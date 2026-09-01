@@ -252,6 +252,10 @@ volatile u32 g_gcm_fifo_drained_ea = 0;
  * no way to notice. GCM_CTXDBG=1 reports it. */
 static u32 s_gcm_ctx_out_ea = 0;
 
+/* Set by cellGcm_syscall_bringup: this run reaches RSX through the lv2 sys_rsx_*
+ * syscalls (libs/video/sys_rsx.c) rather than through the HLE cellGcm* imports. */
+static int s_gcm_syscall_mode = 0;
+
 /* ---------------------------------------------------------------------------
  * Internal helpers
  * -----------------------------------------------------------------------*/
@@ -1190,7 +1194,13 @@ static void gcm_rsx_process_fifo_unlocked(void)
     static int  s_inited = 0;
     extern u32 g_rsx_last_reference;
 
-    if (!s_gcm_context_ea) return;
+    /* A statically-linked libgcm (PS3 firmware modules -- ps1_netemu) never calls
+     * cellGcmSetupContext, so there is no CellGcmContextData EA to gate on: it gets
+     * its ring through sys_rsx_context_allocate instead. The walk below only needs
+     * `put` and the IO table, both of which the syscall layer fills; the one part
+     * that does read the context (the ring-recycle heuristic) is separately guarded
+     * by s_gcm_ctx_out_ea, which stays 0 on that path. */
+    if (!s_gcm_context_ea && !s_gcm_syscall_mode) return;
     if (!s_inited) { rsx_state_init(&s_state); s_inited = 1; }
 
     /* Walk the FIFO exactly like the RSX: chase the guest-written `put` (an IO
@@ -2805,4 +2815,68 @@ u32 rsx_find_vram_upload(u32 want)
 void rsx_reset_upload_claims(void)
 {
     for (u32 i = 0; i < RSX_UPLOAD_LOG; i++) s_uploads[i].claimed = 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * sys_rsx_* bridge (libs/video/sys_rsx.c)
+ *
+ * A PS3 firmware module links libgcm statically and drives RSX through the lv2
+ * syscalls instead of importing cellGcmSys, so none of the HLE entry points above
+ * ever run. Everything the FIFO walker needs is still here -- it just has to be
+ * reachable from the syscall layer. These four accessors are that surface; the
+ * walker, the method decoder and rsx_live_draw are untouched.
+ * -----------------------------------------------------------------------*/
+
+/* Bring the GCM state up the way cellGcmInit would, minus the IO window (the
+ * driver maps that itself with sys_rsx_context_iomap). Returns the guest base of
+ * RSX local memory, which is what sys_rsx_memory_allocate hands back. */
+u32 cellGcm_syscall_bringup(u32 local_size)
+{
+    if (!s_gcm_initialized)
+        cellGcmInit(0x10000, 0, 0);
+    if (local_size)
+        s_config.localSize = local_size;
+    s_gcm_syscall_mode = 1;
+    return s_config.localAddress;
+}
+
+/* Guest EA of the put/get/ref triple. The driver gets this as
+ * sys_rsx_context_allocate's lpar_dma_control + 0x40 (verified in the image:
+ * `lwz r3,0x18(r9)` / `addi r3,r3,64`), so the syscall returns this minus 0x40
+ * and the driver's own flushes land exactly where the walker reads. */
+u32 cellGcm_control_guest_addr(void) { return GCM_CONTROL_GUEST_ADDR; }
+
+/* sys_rsx_context_iomap / iounmap: the same 1MB-page offset table
+ * cellGcmMapEaIoAddress fills, which is what gcm_io2ea() and every offset
+ * resolution read. */
+void cellGcm_syscall_iomap(u32 ea, u32 io, u32 size)
+{
+    populate_offset_table(ea, io, size);
+    if (s_io_mapping_count < CELL_GCM_MAX_IO_MAPPINGS) {
+        s_io_mappings[s_io_mapping_count].ea     = ea;
+        s_io_mappings[s_io_mapping_count].io     = io;
+        s_io_mappings[s_io_mapping_count].size   = size;
+        s_io_mappings[s_io_mapping_count].active = 1;
+        s_io_mapping_count++;
+    }
+    if (!s_config.ioSize) { s_config.ioAddress = ea; s_config.ioSize = size; }
+}
+
+void cellGcm_syscall_iounmap(u32 io, u32 size)
+{
+    u32 page = io >> 20;
+    u32 ea = (page < 65536 && s_ea_address_table[page] != 0xFFFF)
+             ? ((u32)s_ea_address_table[page] << 20) : 0;
+    if (ea) clear_offset_table(ea, io, size);
+}
+
+/* sys_rsx_context_attribute(0x001): the driver's explicit FIFO reset. Move the
+ * walker with it -- leaving s_fifo_getoff where it was makes the next drain walk
+ * from a stale offset through whatever the driver has since overwritten. */
+void cellGcm_syscall_set_fifo(u32 put, u32 get)
+{
+    vm_write32(GCM_CONTROL_GUEST_ADDR + 0, put);
+    vm_write32(GCM_CONTROL_GUEST_ADDR + 4, get);
+    s_fifo_getoff  = get;
+    s_fifo_calloff = 0;
 }

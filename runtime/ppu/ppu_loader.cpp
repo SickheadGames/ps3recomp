@@ -2175,8 +2175,15 @@ extern "C" void lv2_syscall(ppu_context* ctx)
             fprintf(stderr, "[ppu] lv2_syscall %llu (stub)\n", (unsigned long long)num);
             logged++;
         }
-        ctx->gpr[3] = 0;   /* CELL_OK */
-        return;
+        /* The UNIMPLEMENTED syscalls are the ones a trace is most wanted for, and
+         * they were the only ones it skipped: sc_trace ran on both handled paths
+         * but not here, so PS3_SCTRACE showed everything except the gaps. Snapshot
+         * the args before the return value overwrites r3. */
+        { uint64_t _a3 = ctx->gpr[3], _a4 = ctx->gpr[4],
+                   _a5 = ctx->gpr[5], _a6 = ctx->gpr[6];
+          ctx->gpr[3] = 0;   /* CELL_OK */
+          sc_trace(num, ctx, _a3, _a4, _a5, _a6);
+          return; }
     }
     }
 }

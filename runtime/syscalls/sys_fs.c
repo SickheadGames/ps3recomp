@@ -128,6 +128,21 @@ void sys_fs_translate_path(const char* ps3_path, char* host_path, int host_path_
         }
     }
 
+    /* /dev_flash is FIRMWARE, not game data. ppu_fs.cpp serves it from a real
+     * dev_flash tree ($PS3_DEV_FLASH); this layer was missing the same branch, so
+     * a firmware path opened through the raw syscall resolved to <root>/... and
+     * missed. ps1_netemu loads its PS1 BIOS as /dev_flash/ps1emu/ps1_rom.bin and
+     * refuses to boot without it. Keep both halves of the split filesystem agreed. */
+    {
+        static const char* fw = NULL; static int fw_init = 0;
+        if (!fw_init) { fw = getenv("PS3_DEV_FLASH"); fw_init = 1; }
+        if (fw && *fw && strncmp(ps3_path, "/dev_flash/", 11) == 0) {
+            snprintf(host_path, (size_t)host_path_size, "%s/%s", fw, ps3_path + 11);
+            fs_normalize_sep(host_path);
+            return;
+        }
+    }
+
     /* Strip a known mount prefix so this sys_fs layer resolves to the SAME host
      * tree as the cellFs layer (ppu_fs.cpp host_path). Previously /dev_bdvd/X
      * mapped to <root>/dev_bdvd/X -- a directory that doesn't exist -- so a title

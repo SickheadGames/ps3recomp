@@ -23,6 +23,7 @@
 #include "sys_memory.h"
 #include "sys_vm.h"
 #include "sys_fs.h"
+extern void sys_rsx_init(lv2_syscall_table* tbl);   /* libs/video/sys_rsx.c */
 #include "ps3emu/spu_fallback.h"
 #include "../spu/spu_lifted_job.h"   /* spu_run_interp_job — run un-lifted SPU images */
 #include "../spu/spu_workload.h"   /* the content-fingerprint registry */
@@ -1609,6 +1610,19 @@ static int64_t sys_spu_thread_stub(ppu_context* ctx)
     return 0;
 }
 
+/* s32 sys_process_get_sdk_version(u32 pid, u32* version) */
+static int64_t sys_process_get_sdk_version_handler(ppu_context* ctx)
+{
+    uint32_t out_ea = (uint32_t)ctx->gpr[4];
+    static uint32_t ver = 0;
+    if (!ver) {
+        const char* e = getenv("PS3_SDK_VERSION");
+        ver = e && *e ? (uint32_t)strtoul(e, NULL, 0) : 0x00360001u;   /* SDK 3.6.0 */
+    }
+    if (out_ea) vm_write_be32(out_ea, ver);
+    return CELL_OK;
+}
+
 void lv2_register_all_syscalls(lv2_syscall_table* tbl)
 {
     /* Initialize the table with unimplemented stubs first */
@@ -1637,6 +1651,11 @@ void lv2_register_all_syscalls(lv2_syscall_table* tbl)
     /* Filesystem */
     sys_fs_init(tbl);
 
+    /* RSX (libs/video/sys_rsx.c). Only a guest that talks to RSX through the
+     * kernel needs these -- a title that imports cellGcmSys never issues one.
+     * PS3 firmware modules link libgcm statically and go straight here. */
+    sys_rsx_init(tbl);
+
     /* TTY (debug console I/O — used by CRT startup) */
     lv2_syscall_register(tbl, SYS_TTY_READ,  sys_tty_read);
     lv2_syscall_register(tbl, SYS_TTY_WRITE, sys_tty_write);
@@ -1648,6 +1667,16 @@ void lv2_register_all_syscalls(lv2_syscall_table* tbl)
     /* sys_ss_get_open_psid (console PSN/NP identity) — LBP 1.30 reads it during
      * boot; the unimplemented stub left the out-param as garbage. */
     lv2_syscall_register(tbl, 872, sys_ss_get_open_psid_handler);
+
+    /* sys_process_get_sdk_version (25). Reported as a stub for a long time and
+     * returning CELL_OK with the out-param untouched, which reads as SDK 0.
+     * That is not harmless: libgcm sizes the RSX local-memory heap off it with
+     * a compatibility ladder (>=2.20 -> 249 MB, >=2.00 -> 242, >=1.90 -> 234,
+     * >=1.80 -> 232, else 224), and ps1_netemu's cellGcmInit rejects a zero
+     * outright -- which is what "[GPU] cellGcmInit failed" was: a process
+     * syscall, not anything to do with RSX. Report a modern SDK, since the HLE
+     * this runtime implements is the modern one. PS3_SDK_VERSION overrides. */
+    lv2_syscall_register(tbl, 25, sys_process_get_sdk_version_handler);
 
     /* SPU syscalls — we don't execute SPU code but the PPU-side wrappers
      * need consistent IDs and out-params. See the stateful group tracker
