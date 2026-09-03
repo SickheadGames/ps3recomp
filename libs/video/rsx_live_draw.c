@@ -8372,9 +8372,25 @@ void rsx_live_draw_present(u32 buffer_id)
                        * produced, straight out of guest memory, with no D3D and
                        * no window involved. 1024x512, 16-bit 1-5-5-5, pitch
                        * 2048 -- the format the [tex-refresh] line reports. */
+                      /* ONE dump, taken once the framebuffer has at least
+                       * PS1_FBDUMP_MIN non-zero words (default 20000).
+                       *
+                       * It used to write a 1.5 MB PPM on every heartbeat, and
+                       * that instrumentation was itself most of the
+                       * "nondeterminism" this port was chasing: runs carrying
+                       * the periodic dump reached 0-7,127 non-zero words, while
+                       * clean runs reach 75,527 every time. Measuring the thing
+                       * was changing it. One dump, gated on content. */
                       { const char* dp = getenv("PS1_FBDUMP");
-                        if (dp) {
-                            FILE* f = fopen(dp, "wb");
+                        static int dumped = 0;
+                        u32 want = 20000;
+                        { const char* mn = getenv("PS1_FBDUMP_MIN");
+                          if (mn) want = (u32)strtoul(mn, 0, 0); }
+                        if (dp && !dumped && nz >= want) {
+                            dumped = 1;
+                            char path[512];
+                            snprintf(path, sizeof path, "%s", dp);
+                            FILE* f = fopen(path, "wb");
                             if (f) {
                                 fprintf(f, "P6\n1024 512\n255\n");
                                 for (u32 y = 0; y < 512; y++) {
