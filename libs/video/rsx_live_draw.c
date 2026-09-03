@@ -8214,6 +8214,44 @@ void rsx_live_draw_present(u32 buffer_id)
       ULONGLONG now = GetTickCount64();
       if (fps_t0 == 0) { fps_t0 = now; fps_f0 = g_ld_frames; }
       else if (now - fps_t0 >= 5000) {
+          /* PS1_PC=1: the R3000 state block (0x76C080) on the same heartbeat.
+           *
+           * READ +0x124 (instructions retired), NOT +0x108. The interpreter
+           * loads PC from +0x108 on entry (lwz r26, 0x108(r23) at 0x001066CC)
+           * and writes it back only in its epilogue (stw r26, 0x108(r23) at
+           * 0x00106964) -- and it has not returned, because it is entered once
+           * and loops internally. So +0x108 is stale from boot: 280,000 reads
+           * across 14 samples gave 0xBFC00000 every time while +0x124 climbed
+           * past a billion. Reading that as "stuck at the reset vector" would
+           * be wrong twice over -- the epilogue does `ori r26, r26, 0x80`
+           * first, so a real exit there could not even write 0xBFC00000.
+           *
+           * +0x124 is updated from inside the loop and is the honest progress
+           * signal. Finding the LIVE pc needs the interpreter's register, not
+           * this field. */
+          { static int pc_on = -1;
+            if (pc_on < 0) pc_on = getenv("PS1_PC") ? 1 : 0;
+            if (pc_on) {
+                extern uint32_t vm_read32(uint64_t);
+                /* One read of +0x108 cannot tell a reset loop from a field that
+                 * is simply not live between interpreter entries -- both look
+                 * like a constant 0xBFC00000. So sample it hard: 20000 reads,
+                 * and report how many DISTINCT values appear plus the lowest
+                 * and highest. A live PC sweeps; a dead field does not. */
+                uint32_t lo = 0xFFFFFFFFu, hi = 0, prev = 0, chg = 0;
+                for (int k = 0; k < 20000; k++) {
+                    uint32_t v = vm_read32(0x76C080u + 0x108u);
+                    if (v < lo) lo = v;
+                    if (v > hi) hi = v;
+                    if (k && v != prev) chg++;
+                    prev = v;
+                }
+                fprintf(stderr, "[ps1] pc[lo=0x%08X hi=0x%08X changes=%u/20000]"
+                                " exited=%u total=%u\n",
+                        lo, hi, chg,
+                        vm_read32(0x76C080u + 0x110u),
+                        vm_read32(0x76C080u + 0x124u));
+            } }
           fprintf(stderr, "[fps] %.1f (frames %u..%u over %.1fs)\n",
                   (g_ld_frames - fps_f0) * 1000.0 / (double)(now - fps_t0),
                   fps_f0, g_ld_frames, (now - fps_t0) / 1000.0);
