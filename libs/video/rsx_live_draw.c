@@ -2339,6 +2339,28 @@ static u32 texture_srv_slot(const rsx_dsp_texture* t)
                               (unsigned long long)checks,
                               100.0 * (double)torn / (double)checks);
               } }
+            /* LD_FBDBG=1: account for the PS1 framebuffer specifically
+             * (location 1, offset 0x400000, the 1024x512 fmt 0xE2 texture the
+             * PS3 side composites). Its guest memory demonstrably fills up --
+             * PS1 VRAM goes from 0 to 75,527 non-zero words -- yet
+             * [tex-refresh] fires only 6 times in 90 seconds. Three different
+             * things produce that, and they need different fixes: the texture
+             * is rarely BOUND, the span is unreadable so `readable` is 0, or
+             * the hash genuinely does not change. Count all three. */
+            { static int fbd = -1;
+              if (fbd < 0) fbd = getenv("LD_FBDBG") ? 1 : 0;
+              if (fbd && t->location == 1u && t->offset == 0x400000u) {
+                  static unsigned long long checks = 0, unread = 0, changed = 0;
+                  checks++;
+                  if (!readable) unread++;
+                  if (readable && hash != entry->content_hash) changed++;
+                  if ((checks % 64) == 0 || checks < 4)
+                      fprintf(stderr, "[fbdbg] ps1fb checks=%llu unreadable=%llu"
+                                      " changed=%llu span=%u %ux%u pitch=%u\n",
+                              checks, unread, changed,
+                              texture_source_span(t), t->width, t->height,
+                              t->pitch);
+              } }
             entry->last_hash_frame = g_ld_frames;
             if (readable && hash != entry->content_hash) {
                 ID3D12Resource* replacement =
@@ -8340,6 +8362,35 @@ void rsx_live_draw_present(u32 buffer_id)
                           if (w32[i]) { nz++; if (first == 0xFFFFFFFFu) first = i * 4u; }
                       fprintf(stderr, "[ps1] vram nonzero=%u/%u first=+0x%X\n",
                               nz, n, first == 0xFFFFFFFFu ? 0u : first);
+                      /* PS1_FBDUMP=<path>: write PS1 VRAM out as a PPM.
+                       *
+                       * This exists because "the window is black" was an
+                       * ASSUMPTION for a long stretch of this port: PrintWindow
+                       * on a D3D12 swapchain returns black whether the page is
+                       * black or the capture simply failed, so every screenshot
+                       * was unfalsifiable. This reads the pixels the PS1 itself
+                       * produced, straight out of guest memory, with no D3D and
+                       * no window involved. 1024x512, 16-bit 1-5-5-5, pitch
+                       * 2048 -- the format the [tex-refresh] line reports. */
+                      { const char* dp = getenv("PS1_FBDUMP");
+                        if (dp) {
+                            FILE* f = fopen(dp, "wb");
+                            if (f) {
+                                fprintf(f, "P6\n1024 512\n255\n");
+                                for (u32 y = 0; y < 512; y++) {
+                                    const u8* row = fb + (size_t)y * 2048u;
+                                    for (u32 x = 0; x < 1024; x++) {
+                                        u16 p = (u16)(row[x * 2] | (row[x * 2 + 1] << 8));
+                                        u8 rgb[3];
+                                        rgb[0] = (u8)(((p >> 10) & 0x1F) * 255 / 31);
+                                        rgb[1] = (u8)(((p >> 5)  & 0x1F) * 255 / 31);
+                                        rgb[2] = (u8)(( p        & 0x1F) * 255 / 31);
+                                        fwrite(rgb, 1, 3, f);
+                                    }
+                                }
+                                fclose(f);
+                            }
+                        } }
                   } }
                 (void)hi; (void)rbase;
             } }
