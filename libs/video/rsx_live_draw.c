@@ -2654,15 +2654,33 @@ static u32 surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
 {
     if (!want_w) want_w = g.width;
     if (!want_h) want_h = g.height;
+    /* Key on the DIMENSIONS as well as location/offset.
+     *
+     * Keying on location/offset alone meant a redeclaration of the same offset
+     * at a different size STOLE the slot and recreated the D3D12 resource,
+     * throwing the old contents away. ps1_netemu renders two passes at two
+     * sizes -- the PS1 composite at 720x512 and the PS3 output at 1280x720 --
+     * and it alternates between them, so that path fired 9,573 times in a
+     * 90-second run:
+     *
+     *     [surfsz] live surface 0x0 redeclared 720x512 -> 1280x720 (content dropped)
+     *     [surfsz] live surface 0x1401C00 redeclared 1280x720 -> 720x512 (content dropped)
+     *
+     * Every frame of both passes was being destroyed by the other. Giving each
+     * (offset, size) its own surface lets both keep their contents.
+     *
+     * ponytail: two surfaces over the same guest memory do not alias, so a pass
+     * that renders at one size and samples at the other will not see the
+     * other's pixels. That is strictly better than the old behaviour, which saw
+     * NOBODY's pixels, and it is the smaller change. If a title ever needs true
+     * aliasing, the fix is one surface plus a copy on redeclare -- not going
+     * back to destroying content. */
     u32 slot = MAX_SURFACES;
     for (u32 i = 0; i < g.n_surfaces; i++)
-        if (g.surfaces[i].location == location && g.surfaces[i].offset == offset) {
-            if (g.surfaces[i].w == want_w && g.surfaces[i].h == want_h &&
-                g.surfaces[i].fmt == want_fmt)
-                return i;
-            slot = i;
-            break;
-        }
+        if (g.surfaces[i].location == location && g.surfaces[i].offset == offset &&
+            g.surfaces[i].w == want_w && g.surfaces[i].h == want_h &&
+            g.surfaces[i].fmt == want_fmt)
+            return i;
     /* Never destroy a usable render target because a malformed live command
      * briefly decoded a guest pointer as clip dimensions.  The known-good
      * orphanage stream never exceeds 1280x1024; D3D12 rejects the observed
@@ -2679,16 +2697,21 @@ static u32 surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
                     slot < MAX_SURFACES ? "existing" : "none");
         return slot < MAX_SURFACES ? slot : LD_INVALID_SURFACE;
     }
-    if (slot == MAX_SURFACES) {
-        if (g.n_surfaces >= MAX_SURFACES) return LD_INVALID_SURFACE;
-        slot = g.n_surfaces;
-    } else {
-        const surface_t* old = &g.surfaces[slot];
-        fprintf(stderr,
-                "[surfsz] live surface 0x%X redeclared %ux%u -> %ux%u "
-                "(content dropped)\n",
-                offset, old->w, old->h, want_w, want_h);
+    if (g.n_surfaces >= MAX_SURFACES) {
+        /* Out of slots is now the only way a surface can be lost, so say so
+         * once rather than silently returning an invalid handle. */
+        static u32 full_logs = 0;
+        if (full_logs++ < 8)
+            fprintf(stderr, "[surfsz] surface table full (%u); dropping "
+                            "%u:0x%X %ux%u\n",
+                    (unsigned)MAX_SURFACES, location, offset, want_w, want_h);
+        return LD_INVALID_SURFACE;
     }
+    slot = g.n_surfaces;
+    { static u32 new_logs = 0;
+      if (new_logs++ < 24)
+          fprintf(stderr, "[surfsz] new live surface %u:0x%X %ux%u (slot %u)\n",
+                  location, offset, want_w, want_h, slot); }
     D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
     D3D12_RESOURCE_DESC rd = {0};
     rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -8258,12 +8281,67 @@ void rsx_live_draw_present(u32 buffer_id)
                 uint32_t roff_p = vm_read32(0x1BC3E4u);
                 uint32_t rbase  = vm_read32(0x1BC418u);
                 uint32_t roff   = roff_p ? vm_read32(roff_p) : 0xFFFFFFFFu;
-                fprintf(stderr, "[ps1] pc[lo=0x%08X hi=0x%08X changes=%u/20000]"
-                                " exited=%u total=%u ring[base=0x%08X off=0x%08X]\n",
-                        lo, hi, chg,
+                /* Each GPU SPU polls its OWN local store at 0x15010 for that
+                 * offset (it reports that address to the PPU through its
+                 * outbound mailbox during init), and a raw SPU's local store is
+                 * aliased into guest memory at 0xE0000000 + n*0x100000 -- so
+                 * these four reads see exactly what the SPU sees. If they match
+                 * `off`, the kick landed and the SPUs are simply not reacting;
+                 * if they do not, the kick is being lost. Opposite problems. */
+                /* +0x15010 is the offset the PPU publishes to this SPU;
+                 * +0x15020 is how far the SPU has actually CONSUMED (its work
+                 * loop at 0x3158 advances it by 0x100 per packet under the same
+                 * 0x007FFFFF mask the PPU uses, and stores it back). The pair
+                 * separates "the SPUs are not being told" from "the SPUs are
+                 * told and not working" from "both are fine and the problem is
+                 * downstream in compositing". */
+                uint32_t ls[4], cons[4];
+                for (int n = 0; n < 4; n++) {
+                    uint32_t w = 0xE0000000u + (uint32_t)n * 0x100000u;
+                    ls[n]   = vm_read32(w + 0x15010u);
+                    cons[n] = vm_read32(w + 0x15020u);
+                }
+                /* The scheduler's own state. func_00105FA8 hands the
+                 * interpreter a budget at +0x120; when that is permanently zero
+                 * the interpreter spins without executing. These are the fields
+                 * it works from, so a frozen run says WHICH state it froze in
+                 * rather than just that it froze. */
+                fprintf(stderr, "[ps1] pc=0x%08X(chg=%u) exited=%u total=%u"
+                                " cost=%u budget=%d reason=%d evhead=0x%08X"
+                                " ring[off=0x%08X] pub[%06X %06X %06X %06X]"
+                                " done[%06X %06X %06X %06X]\n",
+
+                        lo, chg,
                         vm_read32(0x76C080u + 0x110u),
                         vm_read32(0x76C080u + 0x124u),
-                        rbase, roff);
+                        vm_read32(0x76C080u + 0x114u),
+                        (int32_t)vm_read32(0x76C080u + 0x120u),
+                        (int32_t)vm_read32(0x76C080u + 0x138u),
+                        vm_read32(0x76C080u + 0x540u),
+                        roff, ls[0], ls[1], ls[2], ls[3],
+                        cons[0], cons[1], cons[2], cons[3]);
+                /* Does PS1 VRAM actually have pixels in it?
+                 *
+                 * The texture the PS3 side binds for the PS1 framebuffer is
+                 * location 1 (RSX local), offset 0x400000, 1024x512 fmt 0xE2 --
+                 * exactly PS1 VRAM. Everything upstream of here is now known
+                 * good (the four GPU SPUs consume every packet the R3000
+                 * produces), so this is the first place the picture can go
+                 * missing: either the SPUs are not writing pixels, or they are
+                 * and our compositing drops them. Count non-zero words rather
+                 * than guessing from a window capture -- PrintWindow on a D3D12
+                 * swapchain cannot tell "black" from "capture failed". */
+                { const u8* fb = guest_ptr(1u, 0x400000u, 1024u * 512u * 2u);
+                  if (!fb) fprintf(stderr, "[ps1] vram: not mapped\n");
+                  else {
+                      u32 nz = 0, first = 0xFFFFFFFFu, n = 1024u * 512u / 2u;
+                      const u32* w32 = (const u32*)fb;
+                      for (u32 i = 0; i < n; i++)
+                          if (w32[i]) { nz++; if (first == 0xFFFFFFFFu) first = i * 4u; }
+                      fprintf(stderr, "[ps1] vram nonzero=%u/%u first=+0x%X\n",
+                              nz, n, first == 0xFFFFFFFFu ? 0u : first);
+                  } }
+                (void)hi; (void)rbase;
             } }
           fprintf(stderr, "[fps] %.1f (frames %u..%u over %.1fs)\n",
                   (g_ld_frames - fps_f0) * 1000.0 / (double)(now - fps_t0),
