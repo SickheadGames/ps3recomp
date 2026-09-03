@@ -6140,10 +6140,33 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
         if (!t.enabled) continue;
         texture_mask |= 1u << u;
         smp_slots[u] = sampler_slot(&t, sampler_key(&t));
+        /* Pick WHICH surface at this offset to sample.
+         *
+         * Matching on (location, offset) alone was fine when only one surface
+         * could exist per offset. Now that surfaces are keyed on size too --
+         * they have to be, or the two passes destroy each other's contents --
+         * several can, and taking the first match by offset takes an arbitrary
+         * one. ps1_netemu composites the PS1 framebuffer into a 720x512 surface
+         * at offset 0x0 and then upscales into a 1280x720 output; the upscale
+         * pass samples offset 0x0 and was getting the EMPTY 1280x720 surface
+         * that happens to sit earlier in the table.
+         *
+         * Prefer the surface whose dimensions match what the texture
+         * descriptor actually declares; failing that, the most recently drawn
+         * one, which is the only other defensible answer. */
         int sampled = -1;
-        for (u32 i = 0; i < g.n_surfaces; i++)
-            if (g.surfaces[i].location == t.location && g.surfaces[i].offset == t.offset && i != target)
-            { sampled = (int)i; break; }
+        { u32 best_gen = 0;
+          for (u32 i = 0; i < g.n_surfaces; i++) {
+              const surface_t* sf_i = &g.surfaces[i];
+              if (sf_i->location != t.location || sf_i->offset != t.offset ||
+                  i == target)
+                  continue;
+              if (sf_i->w == t.width && sf_i->h == t.height) { sampled = (int)i; break; }
+              if (sampled < 0 || sf_i->last_draw_generation > best_gen) {
+                  sampled = (int)i;
+                  best_gen = sf_i->last_draw_generation;
+              }
+          } }
         if (sampled < 0 && getenv("LD_ALIAS_DBG")) {
             static u32 n_dbg = 0;
             if (n_dbg++ < 24) {
@@ -7776,11 +7799,21 @@ void rsx_live_draw_present(u32 buffer_id)
           if (presented_surface->last_draw_generation <
               presented_surface->last_clear_generation) blank++;
           if ((n % 256) == 0)
+              /* Also say WHICH surface. Surfaces are now keyed on size as well
+               * as offset, so several exist at once and "we present the wrong
+               * one" is a live possibility -- the PS1 composite is 720x512 and
+               * the PS3 output 1280x720. */
               fprintf(stderr,
                       "[present] %llu/%llu presents showed a surface cleared "
-                      "after its last draw (%.1f%%)\n",
+                      "after its last draw (%.1f%%); target=%u %u:0x%X %ux%u"
+                      " draw_gen=%u clear_gen=%u\n",
                       (unsigned long long)blank, (unsigned long long)n,
-                      100.0 * (double)blank / (double)n);
+                      100.0 * (double)blank / (double)n,
+                      target, presented_surface->location,
+                      presented_surface->offset,
+                      presented_surface->w, presented_surface->h,
+                      presented_surface->last_draw_generation,
+                      presented_surface->last_clear_generation);
       } }
 #if !defined(YZ_PERF_CLEAN)
     presented_surface->last_present_copy_generation =
