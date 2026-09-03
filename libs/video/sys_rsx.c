@@ -60,6 +60,58 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../../runtime/syscalls/sys_event.h"
+
+/* RsxDriverInfo fields libgcm's interrupt thread depends on. Offsets confirmed
+ * against RPCS3's struct RsxDriverInfo (Emu/Cell/lv2/sys_rsx.h).
+ *
+ * _gcm_intr_thread (OPD 0x1B7768 -> code 0x1A584 in ps1_netemu) does, at
+ * 0x1A628:  lwz r3, 0x12D0(r9) ; sc  -- 130 = sys_event_queue_receive. So
+ * +0x12D0 IS the queue id it blocks on. Left zero, the thread received on queue
+ * 0, returned at once and EXITED; nothing then ran gcm's flip handler, so
+ * ps1_netemu's own flip wait at 0x113EB0 (a sys_semaphore_wait that only that
+ * handler posts) never woke. That parked the MAIN guest thread -- the one
+ * running the R3000 -- so the PS1 core stopped after ~42,000 instructions. */
+#define RSX_DI_HANDLERS         0x12C0u   /* mask: which events gcm wants */
+#define RSX_DI_HANDLER_QUEUE    0x12D0u   /* event queue id for the ISR   */
+#define RSX_DI_USER_CMD_PARAM   0x12CCu   /* arg the USER_CMD handler reads */
+#define RSX_DI_HEAD_BASE        0x10B8u   /* head[8], stride 0x40         */
+#define RSX_DI_HEAD_STRIDE      0x40u
+#define RSX_DI_HEAD_FLIPFLAGS   0x08u
+#define RSX_DI_HEAD_LASTQUEUED  0x14u
+
+#define SYS_RSX_EVENT_VBLANK      (1u << 1)
+#define SYS_RSX_EVENT_FLIP_BASE   (1u << 3)
+#define SYS_RSX_EVENT_QUEUE_BASE  (1u << 5)
+#define SYS_RSX_EVENT_USER_CMD    (1u << 7)
+
+/* What ps1_netemu actually registers. Its ISR is a bit -> handler-slot table
+ * (handler object = *(TOC-0x6AB4)), read straight out of the image:
+ *
+ *     0x0001 -> +0x0C   0x0002 -> +0x10   0x0004 -> +0x04
+ *     0x0020 -> +0x24   0x0040 -> +0x28   0x0080 -> +0x2C
+ *     0x0400 -> +0x14   0x0800 -> +0x18
+ *
+ * and the mask it publishes at +0x12C0 settles to 0x84. So the only two
+ * handlers this firmware ever installs are 0x80 and 0x04 -- and 0x04 is its
+ * GRAPHICS ERROR handler, not a flip handler: driving it made the guest print
+ *
+ *     [RSX dump analysis] unsupported error
+ *     graphics error 0 : 00000000 ...
+ *
+ * and dump its whole RSX state, 60 times a second. It registers NO vblank and
+ * NO flip handler, so there is nothing here for a timer to send legitimately,
+ * and the ticker that used to live here has been removed. Publishing the queue
+ * is still both necessary and correct: without it the ISR thread received on
+ * queue 0 and exited outright, and it must instead sit blocked waiting for real
+ * events. rsx_send_event stays for whoever wires those up (a genuine flip or
+ * user command), with the handler-mask filter that makes it safe. */
+
+/* Our own ipc key for the ISR queue. The guest never looks it up by key -- it
+ * only reads the id we publish at +0x12D0. */
+#define RSX_ISR_QUEUE_KEY  0x8000000000005250ull
+
+
 /* ---------------------------------------------------------------------------
  * Guest memory the kernel hands the driver.
  *
@@ -98,6 +150,8 @@ static int rsx_dbg(void)
  * and re-running it must not wipe the real local size back to a placeholder. */
 static int s_di_ready = 0;
 
+static void rsx_isr_queue_bringup(void);
+
 static void rsx_driver_info_init(u32 local_size)
 {
     if (s_di_ready) return;
@@ -122,6 +176,61 @@ static void rsx_driver_info_init(u32 local_size)
 
     for (u32 o = 0; o < 0x1000u; o += 4)
         vm_write32(RSX_DEVICE_EA + o, 0);
+
+    rsx_isr_queue_bringup();
+}
+
+/* ---------------------------------------------------------------------------
+ * The gcm interrupt queue and its vblank tick
+ * -----------------------------------------------------------------------*/
+
+static uint32_t s_isr_qid = 0;
+
+/* Push one RSX event, filtered by the handler mask gcm publishes at +0x12C0,
+ * exactly as rsx::thread::send_event does. Sending an unmasked event is not
+ * merely wasteful: gcm's ISR dispatches on the flag bits, so a bit it never
+ * asked for reaches a handler slot it never filled in. */
+static void rsx_send_event(uint64_t flags)
+{
+    if (!s_isr_qid) return;
+    uint32_t mask = vm_read32(RSX_DRIVER_INFO_EA + RSX_DI_HANDLERS);
+    flags &= (uint64_t)mask;
+    if (!flags) return;
+    sys_event_queue_push_by_id(s_isr_qid, 0, 0, flags, 0);
+}
+
+/* The RSX raises this when the FIFO executes GCM_SET_USER_COMMAND (method
+ * 0xEB00): lv2 stashes the method argument where the handler will read it, then
+ * posts the event -- exactly what sys_rsx_context_attribute's 0xFEF case does.
+ *
+ * This is the "user command" the note above left for whoever wired it up. It is
+ * not optional for this title: the mask settles to 0x84, and the 0x80 handler
+ * ps1_netemu installs is the one that posts the semaphore its flip path blocks
+ * on. A dropped 0xEB00 therefore parks the emulator permanently.
+ *
+ * Called from the FIFO walker in cellGcmSys.c. */
+void rsx_raise_user_cmd(uint32_t arg)
+{
+    { static unsigned long n = 0;
+      if (n++ < 4) {
+          uint32_t mask = vm_read32(RSX_DRIVER_INFO_EA + RSX_DI_HANDLERS);
+          fprintf(stderr, "[usercmd] #%lu arg=0x%08X handlers=0x%X qid=%u\n",
+                  n, arg, mask, s_isr_qid); fflush(stderr); } }
+    vm_write32(RSX_DRIVER_INFO_EA + RSX_DI_USER_CMD_PARAM, arg);
+    rsx_send_event(SYS_RSX_EVENT_USER_CMD);
+}
+
+static void rsx_isr_queue_bringup(void)
+{
+    if (s_isr_qid) return;
+    s_isr_qid = sys_event_queue_create_direct(RSX_ISR_QUEUE_KEY, 0x20);
+    if (!s_isr_qid) {
+        fprintf(stderr, "[sys_rsx] could not create the gcm ISR event queue\n");
+        return;
+    }
+    vm_write32(RSX_DRIVER_INFO_EA + RSX_DI_HANDLER_QUEUE, s_isr_qid);
+    fprintf(stderr, "[sys_rsx] gcm ISR queue id=%u published at driver_info+0x12D0\n",
+            s_isr_qid);
 }
 
 /* ---------------------------------------------------------------------------

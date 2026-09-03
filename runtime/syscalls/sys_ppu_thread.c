@@ -110,9 +110,9 @@ static void* ppu_host_thread_proc(void* param)
      * reservation and prevents ABA corruption of the guest's lock-free lists. */
     { extern void ppu_resv_register(ppu_context*); ppu_resv_register(&info->ctx); }
 
-    fprintf(stderr, "[THREAD %llu] host thread started, entry=0x%08llX\n",
+    fprintf(stderr, "[THREAD %llu] host thread started, entry=0x%08llX hosttid=%lu\n",
             (unsigned long long)info->ctx.thread_id,
-            (unsigned long long)info->entry_addr);
+            (unsigned long long)info->entry_addr), (unsigned long)GetCurrentThreadId();
 
     /* Invoke the recompiled entry point */
     if (g_ppu_thread_entry_trampoline) {
@@ -126,6 +126,26 @@ static void* ppu_host_thread_proc(void* param)
         fprintf(stderr, "[THREAD %llu] entry RETURNED (r3=0x%llX) -- thread finished\n",
                 (unsigned long long)info->ctx.thread_id,
                 (unsigned long long)info->ctx.gpr[3]);
+
+        /* An established interrupt handler does not finish when its body
+         * returns. lv2 re-enters such a thread at its ENTRY on the next
+         * interrupt -- ps1_netemu's two SPU handlers both end in `blr` right
+         * after their `sc 88` (eoi), so a return IS the end of one pass, not
+         * the end of the thread. Wait for the next interrupt and run it again;
+         * without this each handler ran once and the SPUs were never answered,
+         * which is why SPUs 0-3 parked on SPU_RdInMbox and SPU 4 exited. */
+        { extern int ps3_intr_is_handler(unsigned long long);
+          extern int ps3_intr_wait(unsigned long long);
+          if (ps3_intr_is_handler(info->ctx.thread_id)) {
+              fprintf(stderr, "[intr] thread %llu is an interrupt handler -- \n",
+                      (unsigned long long)info->ctx.thread_id);
+              while (ps3_intr_wait(info->ctx.thread_id)) {
+                  s_exit_armed = 1;
+                  if (setjmp(s_exit_jmp) == 0)
+                      g_ppu_thread_entry_trampoline(&info->ctx);
+                  s_exit_armed = 0;
+              }
+          } }
     } else {
         fprintf(stderr, "[THREAD %llu] g_ppu_thread_entry_trampoline is NULL — thread is a no-op!\n",
                 (unsigned long long)info->ctx.thread_id);

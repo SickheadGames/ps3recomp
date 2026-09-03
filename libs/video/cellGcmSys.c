@@ -1101,11 +1101,29 @@ static void gcm_ref_push_at(u32 v, u32 getoff)
  * long lock hold with the number of paced fence publications inside it (the
  * 200us pacing x hundreds of one-ahead fences = the ~156ms holds). */
 volatile long long g_gcm_ref_pub_count = 0;
+/* Absolute microseconds from the QPC hardware counter -- the SAME origin in every
+ * translation unit, so two probes in different files can be compared directly.
+ * That is the whole point: every wrong conclusion about this stall came from
+ * comparing orderings instead of times. */
+unsigned long long ps3_qpc_us(void)
+{
+    static LARGE_INTEGER f; if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    LARGE_INTEGER n; QueryPerformanceCounter(&n);
+    return (unsigned long long)(n.QuadPart / (f.QuadPart / 1000000));
+}
+
 static void gcm_ref_publish_one(void)
 {
     u32 h = s_ref_qhead;
     if (h == s_ref_qtail) return;
     vm_write32(GCM_CONTROL_GUEST_ADDR + 8, s_ref_q[h % GCM_REF_QLEN]);
+    /* stderr, deliberately: [DRAIN] uses printf and stdout is block-buffered
+     * when redirected, so its interleaving with an stderr probe is not a
+     * timeline. Same stream = same ordering. */
+    { static int _rd = -1; if (_rd < 0) _rd = getenv("GCM_REFPUB") ? 1 : 0;
+      if (_rd) { static unsigned long _n = 0; if (++_n <= 24)
+        fprintf(stderr, "[refpub] t=%lluus #%lu wrote 0x%08X -> readback 0x%08X\n", ps3_qpc_us(), _n,
+                s_ref_q[h % GCM_REF_QLEN], vm_read32(GCM_CONTROL_GUEST_ADDR + 8)); } }
     s_ref_qhead = h + 1;
     g_gcm_ref_pub_count++;
 }
@@ -1434,6 +1452,22 @@ static void gcm_rsx_process_fifo_unlocked(void)
                 u32 dea = gcm_io2ea(s_fifo_getoff + 4 + i * 4);
                 if (!dea) break;
                 u32 m = (type == 0) ? method + i * 4 : method;
+                /* GCM_SET_USER_COMMAND is method 0xEB00, which this decode
+                 * splits into subchannel 7 / method 0x0B00 -- so it was landing
+                 * in the 2D engine path and being dropped as unrecognised. It
+                 * is not a 2D method at all: it tells the RSX to raise a
+                 * USER_CMD interrupt, which is what ps1_netemu's flip path
+                 * blocks on. */
+                { static int sd = -1; static unsigned long s7 = 0;
+                  if (sd < 0) sd = getenv("GCM_SUBCH7") ? 1 : 0;
+                  if (sd && subch == 7 && (s7++ < 16))
+                      fprintf(stderr, "[subch7] method=0x%04X data=0x%08X\n",
+                              m, vm_read32(dea)); }
+                if (subch == 7 && m == 0x0B00u) {
+                    extern void rsx_raise_user_cmd(u32 arg);
+                    rsx_raise_user_cmd(vm_read32(dea));
+                    continue;
+                }
                 /* GCM_SUBCH1_3D=1: treat subchannel 1 as the 3D object too.
                  * The title issues NV4097 methods on it -- 0x1A80..0x1AC0 is
                  * SET_TEXTURE_OFFSET for units 4-6 -- and the 2D path silently

@@ -45,6 +45,7 @@ void     ppu_sysprx_register(void);
 void     ppu_fs_register(void);
 int      ppu_run(uint32_t entry_opd, uint32_t stack_top);
 extern const char* ppu_vfs_root;   /* host dir that PS3 mount points map into */
+void     cellGame_init_from_paramsfo(const char* sfo_path);  /* libs/system/cellGame.c */
 /* Optional hook: load real system PRX modules (libsre = cellSpurs/cellSync) into
  * guest RAM and register their exports. Weak default is a no-op; a title that
  * links a lifted PRX defines a strong version. Called after the lifted function
@@ -187,6 +188,7 @@ extern "C" int cellGcm_take_flip_pending(void);
 extern "C" int  rsx_d3d12_backend_pump_messages(void);
 extern "C" void cellGcm_rsx_process_fifo(void);   /* cellGcmSys.c: drain get->put */
 extern "C" unsigned cellGcm_flip_request_count(void);
+extern "C" unsigned cellGcmGetCurrentDisplayBufferId(void);
 extern "C" int sys_event_queue_inject(unsigned int, unsigned long long, unsigned long long, unsigned long long, unsigned long long);
 
 /* Live NV4097->D3D12 engine (libs/video/rsx_live_draw.c, from caner /
@@ -238,7 +240,23 @@ static const uint8_t* rsx_live_guest_ptr(void* user, uint32_t location,
 
 /* Present / pump through whichever backend is live. */
 static void rsx_present_frame(void)
-{ if (s_rsx_live) rsx_live_draw_present(0); else rsx_d3d12_backend_present(); }
+{
+    /* Present the buffer the guest actually flipped to, not buffer 0.
+     *
+     * rsx_live_draw_present() looks up the surface registered for the display
+     * buffer it is given, so hardcoding 0 presented buffer 0's surface for
+     * EVERY flip. A double-buffered title flips 0,1,0,1..., so half its frames
+     * showed the previous image instead of the one just drawn -- content
+     * appearing and vanishing at ~30 Hz, and black wherever buffer 0 had not
+     * been drawn yet. The Simpsons Arcade Game flips 0,1 alternately and that
+     * is exactly what it looked like.
+     *
+     * cellGcmGetCurrentDisplayBufferId() is set by cellGcmSetFlipCommand,
+     * which the FIFO walker calls on this same thread before setting the
+     * pending flag we are responding to, so it is current here. */
+    if (s_rsx_live) rsx_live_draw_present(cellGcmGetCurrentDisplayBufferId());
+    else            rsx_d3d12_backend_present();
+}
 static int rsx_pump_messages(void)
 { return s_rsx_live ? rsx_null_backend_pump_messages() : rsx_d3d12_backend_pump_messages(); }
 
@@ -292,10 +310,19 @@ static DWORD WINAPI guest_prof_thread(LPVOID)
     }
 }
 
+extern "C" const char* cellGame_get_title(void);   /* PARAM.SFO TITLE, for the caption */
+
 static DWORD WINAPI vblank_ticker(LPVOID)
 {
+    /* Window caption: $PS3_TITLE wins, else the TITLE field PARAM.SFO already
+     * gave cellGame, else a neutral name. It used to fall back to a specific
+     * other title, so every port announced itself as that game. */
     const char* _title = getenv("PS3_TITLE");
-    if (!_title || !*_title) _title = "You Don't Know Jack (ps3recomp)";
+    if (!_title || !*_title) {
+        const char* sfo = cellGame_get_title();
+        if (sfo && *sfo && strcmp(sfo, "Unknown Title") != 0) _title = sfo;
+    }
+    if (!_title || !*_title) _title = "ps3recomp";
     /* The live engine's RT-as-backbuffer rescue only treats a surface as the
      * backbuffer when its clip EQUALS the backend size, so a title that renders
      * into something other than 1280x720 must say so: RSX_W / RSX_H. */
@@ -526,10 +553,17 @@ static DWORD WINAPI hang_watchdog(LPVOID)
     GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                        (LPCSTR)&hang_watchdog, &self);
-    Sleep(8000);
-    dump_threads("8s sample", self);
-    Sleep(7000);
-    dump_threads("15s sample", self);
+    /* ponytail: two fixed samples cover a boot wedge, but a hang that happens
+     * minutes in (e.g. after a level load) needs them moved. WATCHDOG_AT="a,b"
+     * gives the two sample times in seconds. */
+    int t1 = 8, t2 = 15;
+    { const char* e = getenv("WATCHDOG_AT"); int a = 0, b = 0;
+      if (e && sscanf(e, "%d,%d", &a, &b) == 2 && a > 0 && b > a) { t1 = a; t2 = b; } }
+    char lbl[64];
+    Sleep((DWORD)t1 * 1000);
+    snprintf(lbl, sizeof lbl, "%ds sample", t1); dump_threads(lbl, self);
+    Sleep((DWORD)(t2 - t1) * 1000);
+    snprintf(lbl, sizeof lbl, "%ds sample", t2); dump_threads(lbl, self);
     return 0;
 }
 #endif
@@ -640,6 +674,38 @@ int main(int argc, char** argv)
     derive_vfs_root(argv[1]);
     printf("[boot] VFS root: %s\n", ppu_vfs_root);
 
+    /* Real title id, from the game's own PARAM.SFO. cellGame has been able to
+     * read this since 2026-06-21, but only a title's own main() ever called it,
+     * so every port that moved to this harness silently kept the BLES00000
+     * placeholder -- and that id is what cellGame / cellSaveData / trophy build
+     * their /dev_hdd0/game/<id> paths from, so saves landed in a directory
+     * belonging to no title. Same shape as the live-draw engine before 1a050be:
+     * a working facility with no caller in the shared harness. */
+    {
+        /* PARAM.SFO sits in a different place depending on how the VFS is rooted.
+         * A disc-style root has it under PS3_GAME/; a title whose content is
+         * opened by RELATIVE path needs the root AT USRDIR, and then PARAM.SFO is
+         * one level up instead. Only the first layout was tried, so rooting at
+         * USRDIR silently lost the title id and name -- which is how the window
+         * caption ended up on its hardcoded fallback. Try each and take the
+         * first that exists. */
+        static const char* const kSfoLayouts[] = {
+            "%s/PS3_GAME/PARAM.SFO",   /* vfs root = disc root      */
+            "%s/../PARAM.SFO",         /* vfs root = .../USRDIR     */
+            "%s/PARAM.SFO",            /* vfs root = the game dir   */
+        };
+        char sfo[1100];
+        int found = 0;
+        for (size_t i = 0; i < sizeof kSfoLayouts / sizeof kSfoLayouts[0]; i++) {
+            snprintf(sfo, sizeof sfo, kSfoLayouts[i], ppu_vfs_root);
+            FILE* f = fopen(sfo, "rb");
+            if (f) { fclose(f); found = 1; break; }
+        }
+        if (!found)
+            snprintf(sfo, sizeof sfo, "%s/PS3_GAME/PARAM.SFO", ppu_vfs_root);
+        cellGame_init_from_paramsfo(sfo);
+    }
+
     fprintf(stderr,"[boot-dbg] before ppu_recomp_register\n"); fflush(stderr);
     ppu_recomp_register();   /* lifted function table -> address map */
     fprintf(stderr,"[boot-dbg] after ppu_recomp_register; before ps3_load_prx_modules\n"); fflush(stderr);
@@ -663,6 +729,7 @@ int main(int argc, char** argv)
         CreateThread(NULL, 0, guest_prof_thread, NULL, 0, NULL);
 #endif
 
+    { extern void ps3_sampler_start(void); ps3_sampler_start(); }   /* PS3_SAMPLE=<ms> */
     printf("\n[boot] dispatching entry OPD 0x%08X (stack top 0x%08X)\n\n", entry, STACK_TOP);
 #ifdef _WIN32
     fprintf(stderr, "[boot] MAIN guest thread tid=%lu\n", (unsigned long)GetCurrentThreadId());
