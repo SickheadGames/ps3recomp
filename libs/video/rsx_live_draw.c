@@ -8246,11 +8246,24 @@ void rsx_live_draw_present(u32 buffer_id)
                     if (k && v != prev) chg++;
                     prev = v;
                 }
+                /* The PS1 GPU command ring. func_0010F658 pushes one 0x100-byte
+                 * packet per GP0 batch (header 3 at +0, payload from +0x10) and
+                 * advances a write offset; the four GPU SPUs consume it. If this
+                 * offset never moves, the R3000 is not producing draw commands
+                 * at all, and no amount of SPU-side work will help.
+                 *
+                 *   ring_off_ptr = *(TOC-0x794C)   (TOC = 0x1C3D30)
+                 *   ring_base    = *(TOC-0x7918)
+                 * from func_0010F658's first two instructions. */
+                uint32_t roff_p = vm_read32(0x1BC3E4u);
+                uint32_t rbase  = vm_read32(0x1BC418u);
+                uint32_t roff   = roff_p ? vm_read32(roff_p) : 0xFFFFFFFFu;
                 fprintf(stderr, "[ps1] pc[lo=0x%08X hi=0x%08X changes=%u/20000]"
-                                " exited=%u total=%u\n",
+                                " exited=%u total=%u ring[base=0x%08X off=0x%08X]\n",
                         lo, hi, chg,
                         vm_read32(0x76C080u + 0x110u),
-                        vm_read32(0x76C080u + 0x124u));
+                        vm_read32(0x76C080u + 0x124u),
+                        rbase, roff);
             } }
           fprintf(stderr, "[fps] %.1f (frames %u..%u over %.1fs)\n",
                   (g_ld_frames - fps_f0) * 1000.0 / (double)(now - fps_t0),
