@@ -801,6 +801,40 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                         }
                         fprintf(stderr, "\n"); }
                   } }
+                /* PS1_LOOPWATCH=<hex pc>: sample the R3000 register file only
+                 * when the pc is inside a 256-byte window, and report which of
+                 * the interesting registers actually CHANGE across samples.
+                 *
+                 * For the decode loop at 0x80164F00: $a0 is the packed word the
+                 * bit-field extractions (srl 19 / srl 22) read, $a1 the output
+                 * cursor, $a3 the Huffman table base. If $a0 never changes the
+                 * bitstream is not advancing and the loop is chewing one word
+                 * forever; if it changes, the input is moving and the fault is
+                 * in the extraction or the table lookup. Sampling at yields is
+                 * enough because this window already takes 15,213 of them. */
+                { static int lw = -2; static uint32_t lwb;
+                  if (lw == -2) { const char* e = getenv("PS1_LOOPWATCH");
+                                  lw = e ? 1 : 0;
+                                  lwb = e ? (uint32_t)strtoul(e, 0, 16) : 0u; }
+                  if (lw && (pc & ~0xFFu) == (lwb & ~0xFFu)) {
+                      static unsigned long ln;
+                      static uint32_t seen_a0[8], seen_a1[8]; static int n0, n1;
+                      const uint32_t sb = 0x0076C080u;
+                      const uint32_t a0 = vm_read32(sb + 4u * 4u);
+                      const uint32_t a1 = vm_read32(sb + 5u * 4u);
+                      const uint32_t a3 = vm_read32(sb + 7u * 4u);
+                      int f0 = 0, f1 = 0;
+                      for (int z = 0; z < n0; z++) if (seen_a0[z] == a0) f0 = 1;
+                      for (int z = 0; z < n1; z++) if (seen_a1[z] == a1) f1 = 1;
+                      if (!f0 && n0 < 8) seen_a0[n0++] = a0;
+                      if (!f1 && n1 < 8) seen_a1[n1++] = a1;
+                      if (++ln <= 8 || (ln % 20000) == 0) {
+                          fprintf(stderr, "[loopwatch] n=%lu pc=0x%08X"
+                                          " a0=%08X a1=%08X a3=%08X"
+                                          " distinct[a0=%d a1=%d]\n",
+                                  ln, pc, a0, a1, a3, n0, n1);
+                      }
+                  } }
                 if (pc >= 0xBFC5361Cu && pc <= 0xBFC538B0u) {
                     const uint32_t sb = 0x0076C080u;
                     g_cdl_hits++;
