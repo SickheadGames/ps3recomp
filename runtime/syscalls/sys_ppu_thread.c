@@ -638,11 +638,14 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
           if (lr >= 0x001066A8u && lr < 0x00108348u) {
               /* Bucket by 4 KB so a tight loop shows as one hot bucket rather
                * than a smear, and report the top few periodically. */
-              enum { NB = 64 };
+              /* 64-byte buckets, not 4 KB: 4 KB was enough to see the PS1
+               * move between BIOS and RAM, but naming the actual loop needs
+               * resolution finer than a page. */
+              enum { NB = 192 };
               static uint32_t key[NB]; static unsigned long cnt[NB];
               static unsigned long total;
               const uint32_t pc = (uint32_t)ctx->gpr[26];
-              const uint32_t b = pc & ~0xFFFu;
+              const uint32_t b = pc & ~0x3Fu;
               int i = 0;
               for (; i < NB; i++) { if (cnt[i] && key[i] == b) break;
                                     if (!cnt[i]) { key[i] = b; break; } }
