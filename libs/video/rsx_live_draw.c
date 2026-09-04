@@ -8734,6 +8734,29 @@ void rsx_live_draw_present(u32 buffer_id)
                                     cls[(w >> 24) >> 5]++;   /* opcode/0x20 */
                                 }
                             }
+                            /* PS1 VRAM comes out solid 0x83E0 -- R=0, G=31,
+                             * B=0, mask bit set -- across the full 640-pixel
+                             * display width, fully written (207 DMA writes per
+                             * 64-byte block). Something paints the screen
+                             * green. GP0 0x02 is Fill Rectangle and its colour
+                             * word is right here in the ring, so print the
+                             * fills: if the guest asks for green, the bug is
+                             * upstream in the R3000; if it asks for something
+                             * else, our SPU rasteriser is packing the colour
+                             * wrong. Opposite halves of the pipeline. */
+                            for (u32 k = 1; k <= 64u; k++) {
+                                const u32 pk = rbase + ((roff - k * 0x100u) & 0x007FFFFFu);
+                                for (u32 q = 0; q < 58u; q++) {
+                                    const u32 w = vm_read32(pk + 0x10u + q * 4u);
+                                    if ((w >> 24) != 0x02u) continue;
+                                    fprintf(stderr, "[gp0fill] pkt+0x%X"
+                                                    " cmd=%08X xy=%08X wh=%08X\n",
+                                            0x10u + q * 4u, w,
+                                            vm_read32(pk + 0x14u + q * 4u),
+                                            vm_read32(pk + 0x18u + q * 4u));
+                                    break;
+                                }
+                            }
                             fprintf(stderr, "[gp0hist] last 64 pkts types[");
                             for (int q = 0; q < 8; q++) fprintf(stderr, "%u ", pk_types[q]);
                             fprintf(stderr, "] words: misc=%u POLY=%u line=%u"

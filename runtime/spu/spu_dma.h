@@ -858,6 +858,41 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
           }
       } }
 
+    /* SPU_ROWCOV=<hex EA>: DMA write coverage of the 2048-byte VRAM row starting
+     * there, as a count per 64-byte block, plus the current bytes.
+     *
+     * This exists to check a claim before it is believed. The 24-bit display
+     * region is coherent for ~104 pixels and patterned after, which reads like
+     * a transfer that writes one third of each row -- but watching a single byte
+     * at offset 512 (well inside the "missing" part) showed 218 DMA writes
+     * covering it. Those cannot both be true as stated. Coverage per block over
+     * a whole row says whether the row is fully written with wrong DATA, or
+     * partly written, and those are completely different bugs. */
+    { static int s_rc = -2; static uint32_t s_rcb;
+      if (s_rc == -2) { const char* e8 = getenv("SPU_ROWCOV");
+                        s_rc = e8 ? 1 : 0;
+                        s_rcb = e8 ? (uint32_t)strtoul(e8, 0, 16) : 0u; }
+      if (s_rc && vm_base && mfc_is_put(cmd) &&
+          (uint32_t)ea < s_rcb + 2048u && (uint32_t)ea + size > s_rcb) {
+          static unsigned long blk[32]; static unsigned long rn;
+          const uint32_t lo = (uint32_t)ea > s_rcb ? (uint32_t)ea : s_rcb;
+          const uint32_t hi = ((uint32_t)ea + size < s_rcb + 2048u)
+                            ? (uint32_t)ea + size : s_rcb + 2048u;
+          for (uint32_t b = (lo - s_rcb) >> 6; b <= (hi - 1u - s_rcb) >> 6; b++)
+              if (b < 32u) blk[b]++;
+          if ((++rn % 4096) == 0) {
+              fprintf(stderr, "[rowcov] %lu puts touching row 0x%08X;"
+                              " writes per 64B block:\n ", rn, s_rcb);
+              for (int b = 0; b < 32; b++) fprintf(stderr, " %lu", blk[b]);
+              fprintf(stderr, "\n bytes:");
+              for (int b = 0; b < 32; b++) {
+                  const uint8_t* q = vm_base + s_rcb + (uint32_t)b * 64u;
+                  fprintf(stderr, " %02X%02X", q[0], q[1]);
+              }
+              fprintf(stderr, "\n"); fflush(stderr);
+          }
+      } }
+
     /* SPU_PUTEA=1: the first few FULL destination addresses per SPU. The 1 MB
      * bucket histogram showed spu1..3 writing only bucket 0 and spu0 buckets
      * 1..3, with nothing in bucket 4 -- where the composite samples PS1 VRAM
