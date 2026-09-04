@@ -1995,6 +1995,18 @@ static u32 texture_source_span(const rsx_dsp_texture* t)
         return 0;
     u32 n_mips = t->mipmaps ? t->mipmaps : 1;
     if (n_mips > 14) n_mips = 14;
+    /* A pitch-linear (LN) texture cannot carry a mip chain -- the RSX samples
+     * only its base level and ignores the mipmap count in SET_TEXTURE_FORMAT.
+     * Honouring that count instead walks `off += pitch * mh` through whatever
+     * guest memory follows the base image and builds every lower level out of
+     * it, and a minified draw then samples that garbage.
+     *
+     * Cherry-picked by hand from flow/live-draw 3f4bdb9, where flOw's EULA
+     * showed "banded olive stripes with a ghosted second copy of the page".
+     * Twisted Metal binds PS1 VRAM pitch-linear (fmt 0xE2/0xE1 carry
+     * TEX_FMT_LINEAR) and shows banded green/magenta stripes, which is the same
+     * symptom on the same mechanism. */
+    if (linear) n_mips = 1;
     if (t->cubemap && block_size) {
         n_mips = 1;
         for (u32 d = (t->width < t->height ? t->width : t->height) / 4;
@@ -2055,6 +2067,18 @@ static ID3D12Resource* decode_guest_texture(const rsx_dsp_texture* t, u32 remap)
         return NULL;
     u32 n_mips = t->mipmaps ? t->mipmaps : 1;
     if (n_mips > 14) n_mips = 14;
+    /* A pitch-linear (LN) texture cannot carry a mip chain -- the RSX samples
+     * only its base level and ignores the mipmap count in SET_TEXTURE_FORMAT.
+     * Honouring that count instead walks `off += pitch * mh` through whatever
+     * guest memory follows the base image and builds every lower level out of
+     * it, and a minified draw then samples that garbage.
+     *
+     * Cherry-picked by hand from flow/live-draw 3f4bdb9, where flOw's EULA
+     * showed "banded olive stripes with a ghosted second copy of the page".
+     * Twisted Metal binds PS1 VRAM pitch-linear (fmt 0xE2/0xE1 carry
+     * TEX_FMT_LINEAR) and shows banded green/magenta stripes, which is the same
+     * symptom on the same mechanism. */
+    if (linear) n_mips = 1;
 
     if (base_fmt == TEX_FMT_DXT1 || base_fmt == TEX_FMT_DXT23 ||
         base_fmt == TEX_FMT_DXT45) {
