@@ -929,6 +929,21 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
                 : pc < 0x1493Cu ? 7     /* DrawEdge */
                 : 0;
           b[k]++; bytes[k] += size;
+          /* And WHERE in the row the blit lands. PS1 VRAM rows are 2048 bytes;
+           * in 24-bit mode a 320-pixel frame is 960 bytes, so buffer 0 is
+           * bytes 0..959, buffer 1 is 960..1919, and anything past that is the
+           * texture region. During the blank phase every VRAM write is a
+           * Host2Local_Body blit -- the movie is still streaming -- yet the
+           * screen shows nothing, so which of those three the frames land in is
+           * the whole question. */
+          { static unsigned long long zone[4];
+            const uint32_t inrow = ((uint32_t)ea - 0x40600000u) % 2048u;
+            const int z = inrow < 960u ? 0 : inrow < 1920u ? 1 : 2;
+            zone[z] += size;
+            if ((n % 20000) == 0)
+                fprintf(stderr, "[vramzone] buf0(0..959)=%lluKB"
+                                " buf1(960..1919)=%lluKB tex(1920+)=%lluKB\n",
+                        zone[0] >> 10, zone[1] >> 10, zone[2] >> 10); }
           if ((++n % 20000) == 0) {
               static const char* nm[8] = { "other", "BlockClear",
                   "Host2Local_Body", "Host2Local", "Local2Local", "main",
