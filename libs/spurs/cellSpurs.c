@@ -2545,13 +2545,120 @@ s32 cellSpursQueueClear(u64 queue_ea)
 /* SDK ABI: cellSpursQueuePushBody(CellSpursQueue*, const void* buffer, bool isBlocking) */
 s32 cellSpursQueuePushBody(u64 queue_ea, u64 data_ea, u32 isBlocking)
 {
+    /* SPURS_QUEUE_PUSH=1 -- EXPERIMENT, off by default.
+     *
+     * A deliberately self-revealing probe rather than a finished push. The
+     * waiter half of the protocol is known (see PROGRESS.md phase 19): the
+     * 16-byte group at queue+0x20 is a ring of blocked task ids, byte[0] the
+     * count and byte[13] the cursor. The DATA half is not: which ring slot an
+     * element belongs in has never been observed, because nothing has ever
+     * pushed and so the consumer has never taken its non-empty path.
+     *
+     * So push into a CANDIDATE slot (a counter kept in the push1 half of the
+     * line at +0x0C), wake the registered waiter, and let the consumer's own
+     * DMA say where it actually looks. Its read address names the correct slot
+     * whether or not the guess was right, which turns one run into the answer.
+     * Everything is logged for that reason. */
+    static int s_exp = -1;
+    if (s_exp < 0) s_exp = getenv("SPURS_QUEUE_PUSH") ? 1 : 0;
+
     static int _n = 0;
-    if (_n < 8)
-        printf("[cellSpurs] QueuePushBody(q=0x%08X data=0x%08X blocking=%u)\n",
-               (u32)queue_ea, (u32)data_ea, isBlocking);
-    else if (_n == 8)
-        printf("[cellSpurs] QueuePushBody further logs suppressed\n");
-    _n++;
+    if (!s_exp) {
+        if (_n < 8)
+            printf("[cellSpurs] QueuePushBody(q=0x%08X data=0x%08X blocking=%u)\n",
+                   (u32)queue_ea, (u32)data_ea, isBlocking);
+        else if (_n == 8)
+            printf("[cellSpurs] QueuePushBody further logs suppressed\n");
+        _n++;
+        return CELL_OK;
+    }
+
+    if (!queue_ea || !data_ea) return CELL_SPURS_TASK_ERROR_NULL_POINTER;
+
+    uint32_t q   = (uint32_t)queue_ea;
+    uint32_t sz  = vm_read32(q + 0x10);
+    uint32_t dep = vm_read32(q + 0x14);
+    uint32_t buf = (uint32_t)vm_read64(q + 0x18);
+    uint32_t tsp = (uint32_t)vm_read64(q + 0x70);      /* eaSignal: taskset */
+    if (!sz || !dep || !buf) return CELL_SPURS_TASK_ERROR_INVAL;
+
+    /* Candidate push counter: the u16 at +0x0C, the push1 half of the pointer
+     * pair the consumer differences at 0x12914..0x129D0. Big-endian by hand --
+     * this is guest memory, not a host struct. */
+    uint8_t* qp  = vm_base + q;
+    uint32_t cur = ((uint32_t)qp[0x0C] << 8) | qp[0x0D];
+    uint32_t slot = cur % dep;
+
+    memcpy(vm_base + buf + (size_t)slot * sz, vm_base + (uint32_t)data_ea, sz);
+
+    uint32_t nxt = (cur + 1) & 0xFFFF;
+    qp[0x0C] = (uint8_t)(nxt >> 8);
+    qp[0x0D] = (uint8_t)nxt;
+
+    /* Participate in the +0x00 counting handshake. Observed SPU transitions,
+     * with the line traced either side of every atomic:
+     *
+     *   wait side  (pc 0x12AA0):  v -> -(v+1)      0->-1, 1->-2, 2->-3
+     *   grant side (pc 0x12D2C): -v ->  v         -1->1, -2->2, -3->3
+     *
+     * so a negative value is "|v| consumers parked" and a positive one is
+     * "v items available". Pushing beside that word without ever touching it is
+     * what left the two sides ping-ponging forever: the producer is supposed to
+     * be the party that grants. Mirror the grant when someone is waiting, and
+     * otherwise just publish one more item. */
+    /* The consumer normalises both +0x00 and +0x04 with the idiom
+     *     cgti $rf, $rv, -1 ; nor $rc, $rv, $rv ; selb $rn, $rc, $rv, $rf
+     * i.e. "if v >= 0 use v else use ~v" -- a pointer with a flag parked in the
+     * sign bit -- and then DIFFERENCES the two (0x12914..0x129D0) to decide
+     * whether the queue is empty. So they are the head/tail pair, +0x00 the
+     * side the consumer advances and +0x04 the side the producer owns.
+     *
+     * Driving +0x00 from here (v<0 ? -v : v+1, mirroring the grant at 0x12D2C)
+     * was tried and is WRONG: the magnitude ran away to 383 within a handful of
+     * pushes instead of settling, and the consumer still never read the buffer.
+     * Advance the producer's own pointer instead and leave the consumer's
+     * alone. `sync` stays read-only, for the log. */
+    /* TWO POINTER MODELS WERE TRIED HERE AND BOTH ARE WRONG. Recorded so the
+     * next person does not spend the time again:
+     *
+     *  a) driving +0x00 as a grant (v<0 ? -v : v+1, mirroring pc 0x12D2C) --
+     *     the magnitude ran away to 383 within a handful of pushes instead of
+     *     settling, and the consumer still never read the element buffer;
+     *  b) advancing +0x04 as the producer-owned tail, sign-normalised the way
+     *     the consumer does -- no effect either, same result.
+     *
+     * In every configuration the consumer has never issued a single DMA into
+     * the element buffer (0x032B2A00..0x032B4A00), which is the one measurement
+     * that would confirm a model. Both pointers are therefore left ALONE and
+     * read only for the log: what is written below is exactly the part that has
+     * evidence behind it (the element bytes, the +0x0C fill count the consumer
+     * was observed decrementing, and the waiter wake). */
+    int32_t sync  = (int32_t)vm_read32(q + 0x00);
+    int32_t nsync = sync;
+    int32_t tail  = (int32_t)vm_read32(q + 0x04);
+    int32_t ntail = tail;
+
+    /* Waiter ring at +0x20: byte[0] = count, byte[1..12] = task ids. */
+    uint32_t waiters = qp[0x20];
+    int woke = -1;
+    if (waiters > 0 && waiters <= 3 && tsp) {
+        /* The entry area is m_bs[1..3] ONLY -- bytes 0x21..0x23. Shifting the
+         * whole 16-byte group (as a first cut of this did) walks straight over
+         * direction at +0x24 and init at +0x2C and corrupts the header; the
+         * trace caught it as direction turning from 00000002 into 00020000. */
+        woke = qp[0x21];
+        qp[0x21] = qp[0x22];
+        qp[0x22] = qp[0x23];
+        qp[0x23] = 0;
+        qp[0x20] = (uint8_t)(waiters - 1);
+        extern void spu_taskset_signal_task(uint32_t taskset_ea, uint32_t taskId);
+        spu_taskset_signal_task(tsp, (uint32_t)woke);
+    }
+
+    if (_n++ < 16)
+        printf("[cellSpurs] QueuePush#%d q=0x%08X slot=%u (cur=%u->%u) buf=0x%08X+0x%X "
+               "size=%u depth=%u waiters=%u woke=%d sync=%d/%d tail=%d->%d taskset=0x%08X\n",
+               _n, q, slot, cur, nxt, buf, slot * sz, sz, dep, waiters, woke, sync, nsync, tail, ntail, tsp);
     return CELL_OK;
 }
 

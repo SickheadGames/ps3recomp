@@ -8698,6 +8698,39 @@ void rsx_live_draw_present(u32 buffer_id)
                                       live, n); }
                             #undef PS1LE
                         } }
+                      /* PS1_GP0HIST=1: which GP0 PRIMITIVES the ring actually
+                       * carries, as a histogram over the last 64 packets.
+                       *
+                       * "The menu draws but nothing 3D does" is a statement
+                       * about primitive TYPES, and no counter here reported
+                       * those -- packets, groups and VRAM pixels all count the
+                       * same whether the PS1 is drawing a textured rectangle or
+                       * a gouraud triangle. GP0 opcodes: 0x20-0x3F polygons,
+                       * 0x40-0x5F lines, 0x60-0x7F rectangles, 0x80+ transfers,
+                       * 0x00-0x1F misc/state. If the 3D is missing because the
+                       * polygons never reach the ring, that is upstream in the
+                       * R3000; if they reach it, it is the rasteriser or the
+                       * composite. Opposite halves of the pipeline. */
+                      { static int gh = -1;
+                        if (gh < 0) gh = getenv("PS1_GP0HIST") ? 1 : 0;
+                        if (gh && rbase && roff >= 0x4000u) {
+                            unsigned cls[8] = {0}; unsigned pk_types[8] = {0};
+                            for (u32 k = 1; k <= 64u; k++) {
+                                const u32 pk = rbase + ((roff - k * 0x100u) & 0x007FFFFFu);
+                                pk_types[vm_read32(pk) & 7u]++;
+                                for (u32 q = 0; q < 60u; q++) {
+                                    const u32 w = vm_read32(pk + 0x10u + q * 4u);
+                                    if (!w) continue;
+                                    cls[(w >> 24) >> 5]++;   /* opcode/0x20 */
+                                }
+                            }
+                            fprintf(stderr, "[gp0hist] last 64 pkts types[");
+                            for (int q = 0; q < 8; q++) fprintf(stderr, "%u ", pk_types[q]);
+                            fprintf(stderr, "] words: misc=%u POLY=%u line=%u"
+                                            " rect=%u xfer=%u %u %u %u\n",
+                                    cls[0], cls[1], cls[2], cls[3],
+                                    cls[4], cls[5], cls[6], cls[7]);
+                        } }
                       /* PS1_RINGDUMP=1: the last few GP0 command packets.
                        *
                        * func_0010F658 writes one 0x100-byte packet per batch:

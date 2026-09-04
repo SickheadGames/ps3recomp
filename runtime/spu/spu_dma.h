@@ -823,9 +823,38 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
               uint32_t v; memcpy(&v, vm_base + s_wa, 4);
               v = (v >> 24) | ((v >> 8) & 0xFF00u) | ((v << 8) & 0xFF0000u) | (v << 24);
               fprintf(stderr, "[watchea] n=%lu spu%u cmd=0x%02X ea=0x%08X"
-                              " size=%u pc=0x%05X -> [0x%08X]=0x%08X\n",
+                              " size=%u lsa=0x%05X pc=0x%05X -> [0x%08X]=0x%08X\n",
                       wn, spu->spu_id & 7u, cmd & 0xFFu, (uint32_t)ea, size,
-                      (uint32_t)spu->pc & SPU_LS_MASK, s_wa, v);
+                      lsa, (uint32_t)spu->pc & SPU_LS_MASK, s_wa, v);
+          }
+      } }
+
+    /* SPU_WATCHLSA=<hex LS addr>: every DMA whose LOCAL STORE range covers one
+     * word, with the value that word holds after the transfer.
+     *
+     * The mirror image of SPU_WATCHEA, and it exists for the last unknown in
+     * the spu4 deadlock. GETLLAR is verified correct at the moment it runs
+     * (SPU_LLARWATCH: lsa=0x10800, and the word that lands equals memory), and
+     * resv_line has exactly one writer in the whole runtime -- that same
+     * GETLLAR. Yet at a freeze the snapshot holds the fresh produced value and
+     * the local-store mirror at 0x10800 holds the previous one. So something
+     * writes that mirror back to a stale value AFTER the GETLLAR, and a DMA is
+     * the only thing that can do it without going through spu_ls_write128.
+     * Watch LS 0x10800. */
+    { static int s_wl = -2; static uint32_t s_wlsa;
+      if (s_wl == -2) { const char* e7 = getenv("SPU_WATCHLSA");
+                        s_wl = e7 ? 1 : 0;
+                        s_wlsa = e7 ? (uint32_t)strtoul(e7, 0, 16) : 0u; }
+      if (s_wl && lsa <= s_wlsa && s_wlsa < lsa + size) {
+          static unsigned long wl;
+          if (++wl <= 12 || (wl % 256) == 0) {
+              const uint8_t* q = spu->ls + (s_wlsa & SPU_LS_MASK);
+              fprintf(stderr, "[watchlsa] n=%lu spu%u cmd=0x%02X ea=0x%08X"
+                              " lsa=0x%05X size=%u pc=0x%05X ->"
+                              " LS[0x%05X]=0x%02X%02X%02X%02X\n",
+                      wl, spu->spu_id & 7u, cmd & 0xFFu, (uint32_t)ea, lsa,
+                      size, (uint32_t)spu->pc & SPU_LS_MASK, s_wlsa,
+                      q[0], q[1], q[2], q[3]);
           }
       } }
 

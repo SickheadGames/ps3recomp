@@ -405,10 +405,82 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
          * GETLLAR fast+slow paths for exactly this reason). */
         yz_lockstep_tick(ctx);
         resv_lock();
+        /* ONE read of guest memory, then the snapshot from that copy.
+         *
+         * This used to memcpy from `mem` twice -- once to the local store, once
+         * to resv_line -- and a PPU store landing BETWEEN the two reads gave the
+         * SPU a stale line and a fresh snapshot. That is a permanent deadlock,
+         * and it is the one this port spent a session chasing: the SPU compares
+         * its (stale) copy, finds produced == consumed, and sleeps on
+         * MFC_LLR_LOST_EVENT; spu_resv_lost_poll then compares memory against a
+         * snapshot that ALREADY has the new value, finds no difference, and
+         * never raises the event. Measured at a freeze: mirror 0x9E, snapshot
+         * 0x9F, memory 0x9F, and the SPU polling rchcnt 1.6 billion times.
+         *
+         * Hardware cannot produce that state: GETLLAR is a single atomic
+         * 128-byte read, so the reserved data and the reservation come from the
+         * same instant. Copying the snapshot from `ls` restores that property,
+         * and a store that lands after the read now leaves BOTH stale -- which
+         * is what makes the lost-reservation event fire. */
         memcpy(ls, mem, MFC_ATOMIC_LINE);              /* line -> local store */
-        memcpy(ctx->resv_line, mem, MFC_ATOMIC_LINE);  /* snapshot for compare */
+        memcpy(ctx->resv_line, ls, MFC_ATOMIC_LINE);   /* snapshot FROM THE COPY */
         ctx->resv_ea = ea; ctx->resv_valid = 1; ctx->atomic_stat = 0;
         resv_unlock();
+        /* SPU_LLARWATCH=<hex EA>: every GETLLAR of that line, with the LSA it
+         * used and the first word as it lands in BOTH places.
+         *
+         * The deadlock this settles: at a freeze the reservation snapshot holds
+         * the fresh produced value (0xC9) while the SPU's local-store mirror
+         * still holds the stale one (0xC8) -- and the compare reads the mirror.
+         * Both memcpys above copy from the same `mem`, so that can only happen
+         * if `lsa` was not where the SPU asked. Reading ctx->mfc_lsa from a
+         * later poll cannot prove it (by then the SPU has issued other DMA and
+         * overwritten the field, which is exactly the compare-two-moments
+         * mistake that has cost this port ten retractions). So log it HERE, at
+         * the GETLLAR, with the word that actually landed. */
+        { static int s_lw2 = -2; static uint32_t s_lwea;
+          if (s_lw2 == -2) { const char* e6 = getenv("SPU_LLARWATCH");
+                             s_lw2 = e6 ? 1 : 0;
+                             s_lwea = e6 ? (uint32_t)strtoul(e6, 0, 16) & ~127u : 0u; }
+          if (s_lw2 && (ea & ~127u) == s_lwea) {
+              static unsigned long ln;
+              /* A histogram of the LSAs this line's GETLLARs use, not a
+               * sample of them. resv_line has exactly one writer -- this
+               * GETLLAR -- and it copies to &ls[mfc_lsa] from the same source,
+               * so a snapshot that is fresh while LS 0x10800 is stale can only
+               * mean some GETLLAR ran with a DIFFERENT mfc_lsa. Sampling every
+               * 256th hit would miss exactly those. Count them all and print
+               * every LSA seen. */
+              { static uint32_t seen[8]; static unsigned long cnt[8]; static int ns;
+                int f = -1;
+                for (int z = 0; z < ns; z++) if (seen[z] == lsa) { f = z; break; }
+                if (f < 0 && ns < 8) { f = ns; seen[ns] = lsa; cnt[ns] = 0; ns++; }
+                if (f >= 0) cnt[f]++;
+                if ((ln % 4096) == 0) {
+                    fprintf(stderr, "[llar-lsa] %lu GETLLARs on 0x%08X;", ln, ea);
+                    for (int z = 0; z < ns; z++)
+                        fprintf(stderr, " lsa=0x%05X x%lu", seen[z], cnt[z]);
+                    fprintf(stderr, "\n"); fflush(stderr);
+                } }
+              if (++ln <= 8 || (ln % 256) == 0) {
+                  const uint8_t* q = (const uint8_t*)ls;
+                  const uint32_t landed = ((uint32_t)q[0] << 24) | ((uint32_t)q[1] << 16)
+                                        | ((uint32_t)q[2] << 8) | q[3];
+                  const uint8_t* m8 = (const uint8_t*)mem;
+                  const uint32_t frommem = ((uint32_t)m8[0] << 24) | ((uint32_t)m8[1] << 16)
+                                         | ((uint32_t)m8[2] << 8) | m8[3];
+                  const uint8_t* mir = ctx->ls + 0x10800u;
+                  const uint32_t mirw = ((uint32_t)mir[0] << 24) | ((uint32_t)mir[1] << 16)
+                                      | ((uint32_t)mir[2] << 8) | mir[3];
+                  fprintf(stderr, "[llar] n=%lu spu%u pc=0x%05X lsa=0x%05X"
+                                  " ea=0x%08X mem=0x%08X landed=0x%08X"
+                                  " mirror[0x10800]=0x%08X r90=0x%08X\n",
+                          ln, (unsigned)(ctx->spu_id & 7u),
+                          (uint32_t)ctx->pc & SPU_LS_MASK, lsa, ea,
+                          frommem, landed, mirw, ctx->gpr[90]._u32[0]);
+                  fflush(stderr);
+              }
+          } }
         return 1;
 
     case MFC_PUTLLC_CMD:
@@ -762,7 +834,8 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
           static uint32_t lastpc[8], lastst[8], lastmask[8];
           static uint32_t lastsig[8][2], lastmb[8], lastrea[8];
           static int lastrv[8], lastrd[8];
-          static uint32_t lastline[8][8];
+          static uint32_t lastline[8][8], lastls[8][8];
+          static uint32_t lastlsa[8], lastr90[8];
           const unsigned sp = (unsigned)(ctx->spu_id & 7u);
           if (channel < 40u) c[sp][channel]++;
           lastpc[sp] = (uint32_t)ctx->pc & SPU_LS_MASK;
@@ -771,9 +844,21 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
           lastsig[sp][1] = ctx->ch_sig_notify[1].count;
           lastmb[sp] = ctx->ch_in_mbox.count;
           lastrv[sp] = ctx->resv_valid; lastrea[sp] = ctx->resv_ea;
+          lastlsa[sp] = ctx->mfc_lsa & SPU_LS_MASK;
+          lastr90[sp] = ctx->gpr[90]._u32[0];
           lastrd[sp] = (ctx->resv_valid && vm_base && ctx->resv_ea)
                      ? (memcmp(vm_base + ctx->resv_ea, ctx->resv_line, 128) != 0)
                      : -1;
+          { static int s_ld2 = -2; static uint32_t s_lo2;
+            if (s_ld2 == -2) { const char* e5 = getenv("SPU_LSDUMP");
+                               s_ld2 = e5 ? 1 : 0;
+                               s_lo2 = e5 ? (uint32_t)strtoul(e5,0,16) : 0u; }
+            if (s_ld2 && ctx->ls)
+                for (int z = 0; z < 8; z++) {
+                    const uint8_t* l8 = ctx->ls + ((s_lo2 + z * 4) & SPU_LS_MASK);
+                    lastls[sp][z] = ((uint32_t)l8[0] << 24) | ((uint32_t)l8[1] << 16)
+                                  | ((uint32_t)l8[2] << 8) | l8[3];
+                } }
           for (int z = 0; z < 8; z++) {
               const uint8_t* b8 = ctx->resv_line + z * 4;
               lastline[sp][z] = ((uint32_t)b8[0] << 24) | ((uint32_t)b8[1] << 16)
@@ -799,12 +884,36 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
                    * wrote the line" in event_status alone -- and they are
                    * different bugs. diff says whether the line has actually
                    * changed under the snapshot right now. */
-                  fprintf(stderr, " resv[v=%d ea=0x%08X diff=%d]",
-                          lastrv[q], lastrea[q], lastrd[q]);
+                  /* mfc_lsa and r90 alongside the reservation. GETLLAR
+                   * copies the line to &ls[mfc_lsa] and to resv_line from the
+                   * same source, so a snapshot that disagrees with the local
+                   * store can only mean mfc_lsa was not what the SPU asked for
+                   * -- and the SPU computes both that LSA and the address its
+                   * compare reads from r90. Printing the two together is what
+                   * decides it. */
+                  fprintf(stderr, " resv[v=%d ea=0x%08X diff=%d]"
+                                  " mfc_lsa=0x%05X r90=0x%08X",
+                          lastrv[q], lastrea[q], lastrd[q],
+                          lastlsa[q], lastr90[q]);
                   /* And the line itself. "The reservation is intact and the
                    * line has not changed" still does not say what the SPU is
                    * waiting FOR; the words do. Snapshot side, so it is exactly
                    * what the SPU last read. */
+                  /* SPU_LSDUMP=<hex LS offset>: 8 words of this SPU's local
+                   * store. The reserved line says what the SPU can SEE; its LS
+                   * says what it BELIEVES. For the spu4 deadlock those are the
+                   * two numbers to compare -- its consumed counter is staged at
+                   * LS 0x10888 (the counter PUT's lsa 0x10880, +8). */
+                  { static int s_ld = -2; static uint32_t s_lo;
+                    if (s_ld == -2) { const char* e4 = getenv("SPU_LSDUMP");
+                                      s_ld = e4 ? 1 : 0;
+                                      s_lo = e4 ? (uint32_t)strtoul(e4,0,16) : 0u; }
+                    if (s_ld) {
+                        fprintf(stderr, " ls[0x%05X:", s_lo);
+                        for (int z = 0; z < 8; z++)
+                            fprintf(stderr, " %08X", lastls[q][z]);
+                        fprintf(stderr, "]");
+                    } }
                   if (lastrv[q]) {
                       fprintf(stderr, " line[");
                       for (int z = 0; z < 8; z++)
