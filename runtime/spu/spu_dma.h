@@ -941,6 +941,42 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
           }
       } }
 
+    /* SPU_H2LSRC=1: for each Host2Local_Body write to PS1 VRAM, the bytes it is
+     * copying OUT of local store next to the bytes already at the destination.
+     *
+     * A PUT copies LS to memory verbatim -- there is no merge inside the DMA
+     * engine. So "the writes write the old bytes back" can only mean the LS
+     * buffer itself already holds those bytes when the PUT is issued. This
+     * prints both sides at that instant, which decides between:
+     *
+     *   LS holds the pattern   -> the SPU never wrote real pixels into it, and
+     *                            the question moves upstream of the blit
+     *   LS holds real pixels   -> the destination comparison was wrong
+     *
+     * Host2Local_Body is LS 0x00350..0x00757 (from the firmware .symtab). */
+    { static int s_hs = -1;
+      if (s_hs < 0) s_hs = getenv("SPU_H2LSRC") ? 1 : 0;
+      if (s_hs && vm_base && mfc_is_put(cmd) && size >= 16u &&
+          (uint32_t)ea >= 0x40600000u && (uint32_t)ea < 0x40700000u) {
+          const uint32_t pc = (uint32_t)spu->pc & SPU_LS_MASK;
+          if (pc >= 0x00350u && pc < 0x00758u) {
+              static unsigned long hn;
+              if (++hn <= 10 || (hn % 200000) == 0) {
+                  const uint8_t* src = spu->ls + (lsa & SPU_LS_MASK);
+                  const uint8_t* dst = vm_base + (uint32_t)ea;
+                  int same = 1;
+                  for (uint32_t q = 0; q < 16u; q++)
+                      if (src[q] != dst[q]) { same = 0; break; }
+                  fprintf(stderr, "[h2lsrc] n=%lu pc=0x%05X ea=0x%08X size=%u"
+                                  " LS=", hn, pc, (uint32_t)ea, size);
+                  for (uint32_t q = 0; q < 12u; q++) fprintf(stderr, "%02X", src[q]);
+                  fprintf(stderr, " VRAM=");
+                  for (uint32_t q = 0; q < 12u; q++) fprintf(stderr, "%02X", dst[q]);
+                  fprintf(stderr, " %s\n", same ? "IDENTICAL" : "differ");
+              }
+          }
+      } }
+
     /* SPU_PUTEA=1: the first few FULL destination addresses per SPU. The 1 MB
      * bucket histogram showed spu1..3 writing only bucket 0 and spu0 buckets
      * 1..3, with nothing in bucket 4 -- where the composite samples PS1 VRAM
