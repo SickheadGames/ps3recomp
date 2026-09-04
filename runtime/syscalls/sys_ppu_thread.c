@@ -665,13 +665,19 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                         /* CdInit spans 0xBFC52B9C..0xBFC52C60 -> buckets for
                          * 0xBFC52B80, BC0, C00, C40. Report those explicitly,
                          * plus a total, so a zero is legible. */
-                        static const uint32_t probe[4] = {
-                            0xBFC52B80u, 0xBFC52BC0u, 0xBFC52C00u, 0xBFC52C40u };
+                        /* CdInit's four buckets, then the BIOS interrupt
+                         * dispatcher's CD branch (0xBFC046AC calls DeliverEvent
+                         * for class 3 when I_STAT bit 2 is set) and the bucket
+                         * holding the I_STAT read that gates it. If the CD
+                         * branch never executes, the CD interrupt never fires. */
+                        static const uint32_t probe[6] = {
+                            0xBFC52B80u, 0xBFC52BC0u, 0xBFC52C00u, 0xBFC52C40u,
+                            0xBFC04680u, 0xBFC046A0u };
                         unsigned tot = 0;
                         for (unsigned q = 0; q < 8192; q++) tot += seen[q];
                         fprintf(stderr, "[census] %lu samples, %u/8192 BIOS buckets"
                                         " ever executed; CdInit:", cn, tot);
-                        for (int q = 0; q < 4; q++)
+                        for (int q = 0; q < 6; q++)
                             fprintf(stderr, " %08X=%d", probe[q],
                                     seen[(probe[q] - 0xBFC00000u) >> 6]);
                         /* The PS1 kernel's A/B/C call gates live at RAM 0xA0,
@@ -707,6 +713,24 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                           for (int q = 0; q < 5; q++)
                               fprintf(stderr, " %08X",
                                       __builtin_bswap32(vm_read32(ram + sl[q])));
+                          /* And each CD event's STATUS, from its EvCB. This is
+                           * the delivery question: EvStACTIVE (0x2000) means
+                           * open and waiting; EvStALREADY (0x4000) means it has
+                           * been DELIVERED and not yet consumed. All 0x2000
+                           * forever = the CD interrupt never fires. Read here,
+                           * in the same report, deliberately. */
+                          { const uint32_t tot = __builtin_bswap32(vm_read32(ram + 0x0120u));
+                            const uint32_t tb = tot & 0x1FFFFFu;
+                            fprintf(stderr, "  ev[cls/status]:");
+                            for (int q = 0; q < 5; q++) {
+                                const uint32_t h =
+                                    __builtin_bswap32(vm_read32(ram + sl[q]));
+                                if ((h >> 24) != 0xF1u) { fprintf(stderr, " -"); continue; }
+                                const uint32_t cb = tb + (h & 0xFFFFu) * 0x1Cu;
+                                fprintf(stderr, " %X/%04X",
+                                        __builtin_bswap32(vm_read32(ram + cb)) & 0xFu,
+                                        __builtin_bswap32(vm_read32(ram + cb + 4)) & 0xFFFFu);
+                            } }
                         }
                         fprintf(stderr, "\n");
                     }
