@@ -2720,6 +2720,9 @@ static u32 vertex_texture_srv_slot(const rsx_dsp_vertex_texture* vt)
 /* ---------------------------------------------------------------------------
  * surfaces (color RTs keyed by location/offset), rendered into then presented
  * -----------------------------------------------------------------------*/
+/* fp constants are stored as raw bits; the shader reads them as floats. */
+static float ld_c2f(u32 bits) { float f; memcpy(&f, &bits, sizeof f); return f; }
+
 static u32 surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
                        DXGI_FORMAT want_fmt)
 {
@@ -6314,7 +6317,32 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
                             rsx_dsp_reg(&g.rsx, M_BLEND_ENABLE) & 1u,
                             rsx_dsp_reg(&g.rsx, 0x1918) & 1u,
                             rsx_dsp_reg(&g.rsx, 0x090C),
-                            sf.clip_w, sf.clip_h); }
+                            sf.clip_w, sf.clip_h);
+                    /* The PS1 framebuffer's fragment program unpacks the
+                     * sampled value arithmetically (NV40 has no integer ops):
+                     *
+                     *   r0 = sample(tex0, tc0 * (1/1024, 1/512))
+                     *   r0 = r0 * fp_constants[0].x + fp_constants[0].y
+                     *   r0 = floor(r0) / 8.0
+                     *   r0 = sign-preserving truncate
+                     *   r0 = r0 * fp_constants[1].x + fp_constants[1].y
+                     *
+                     * So the output depends entirely on those two constants.
+                     * Wrong or absent, it produces exactly the repeating stripe
+                     * pattern the composite currently shows. */
+                    fprintf(stderr, "[uvdbg]   fp_const count=%u mode=%c"
+                                    " c0=(%.6f %.6f %.6f %.6f)"
+                                    " c1=(%.6f %.6f %.6f %.6f)\n",
+                            g.fp_constants.count, g.fp_constant_mode,
+                            ld_c2f(g.fp_constants.count > 0u ? g.fp_constants.values[0][0] : 0u),
+                            ld_c2f(g.fp_constants.count > 0u ? g.fp_constants.values[0][1] : 0u),
+                            ld_c2f(g.fp_constants.count > 0u ? g.fp_constants.values[0][2] : 0u),
+                            ld_c2f(g.fp_constants.count > 0u ? g.fp_constants.values[0][3] : 0u),
+                            ld_c2f(g.fp_constants.count > 1u ? g.fp_constants.values[1][0] : 0u),
+                            ld_c2f(g.fp_constants.count > 1u ? g.fp_constants.values[1][1] : 0u),
+                            ld_c2f(g.fp_constants.count > 1u ? g.fp_constants.values[1][2] : 0u),
+                            ld_c2f(g.fp_constants.count > 1u ? g.fp_constants.values[1][3] : 0u));
+                  }
                   for (u32 vi = 0; vi < 4; vi++) {
                       float pos[4] = {0,0,0,1}, tc[4] = {0,0,0,1};
                       const int okp = fetch_attr(0, vbase, vi, 0, pos);
