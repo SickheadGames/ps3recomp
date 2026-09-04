@@ -644,6 +644,53 @@ int  spu_tailret_enabled(void);
 void (*spu_take_interrupt(spu_context* ctx,
                           void (*tf)(spu_context*)))(spu_context*);
 
+/* SPU_PCHIST=1: bucket SPU execution by the GPU module's own symbols.
+ *
+ * SPU_VRAMPC showed 3.7M VRAM writes from Host2Local_Body and ZERO from
+ * DrawRect/DrawEdge, i.e. the rasteriser never writes a pixel. That leaves two
+ * possibilities -- the draw commands never arrive, or they arrive and main
+ * never dispatches them -- and the difference is whether DrawRect/DrawEdge are
+ * ENTERED at all. This counts entries rather than writes, one increment per
+ * trampoline hop, which is the cheapest place that sees every transfer of
+ * control.
+ *
+ * Extents from the .symtab embedded in ps1_netemu (firmware file offset
+ * 0x171100), so they are exact rather than guessed. */
+static inline void spu_pchist_tick(const spu_context* ctx)
+{
+    static int en = -1;
+    if (en < 0) en = getenv("SPU_PCHIST") ? 1 : 0;
+    if (!en) return;
+    static unsigned long long b[8][8], n;
+    const unsigned sp = (unsigned)(ctx->spu_id & 7u);
+    const uint32_t pc = (uint32_t)ctx->pc & SPU_LS_MASK;
+    const int k = pc < 0x00188u ? 0
+                : pc < 0x00350u ? 1     /* BlockClear */
+                : pc < 0x00758u ? 2     /* Host2Local_Body */
+                : pc < 0x00928u ? 3     /* Host2Local */
+                : pc < 0x010F8u ? 4     /* Local2Local */
+                : pc < 0x051E8u ? 5     /* main */
+                : pc < 0x08700u ? 6     /* DrawRect */
+                : pc < 0x1493Cu ? 7     /* DrawEdge */
+                : 0;
+    b[sp][k]++;
+    if ((++n % 4000000ull) == 0) {
+        static const char* nm[8] = { "other", "BlockClear", "H2L_Body",
+            "Host2Local", "Local2Local", "main", "DrawRect", "DrawEdge" };
+        fprintf(stderr, "[pchist] %llu hops\n", n);
+        for (unsigned q = 0; q < 8; q++) {
+            int any = 0;
+            for (int j = 0; j < 8; j++) if (b[q][j]) any = 1;
+            if (!any) continue;
+            fprintf(stderr, "   spu%u", q);
+            for (int j = 0; j < 8; j++)
+                if (b[q][j]) fprintf(stderr, " %s=%llu", nm[j], b[q][j]);
+            fprintf(stderr, "\n");
+        }
+        fflush(stderr);
+    }
+}
+
 /* Drain the pending trampoline chain: run each queued transfer target until
  * none remain. The one central hook site for the faithful execution model. */
 #define SPU_DRAIN(ctx) do {                                    \
@@ -669,6 +716,7 @@ void (*spu_take_interrupt(spu_context* ctx,
             if ((ctx)->int_enable &&                            \
                 ((ctx)->event_status & (ctx)->event_mask))      \
                 _tf = spu_take_interrupt((ctx), _tf);          \
+            spu_pchist_tick(ctx);                              \
             g_spu_pch[g_spu_pch_n++ & 7u] =                    \
                 (uint32_t)((ctx)->pc & SPU_LS_MASK);           \
             _tf(ctx);                                          \
