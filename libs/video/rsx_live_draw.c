@@ -8671,6 +8671,31 @@ void rsx_live_draw_present(u32 buffer_id)
                                 }
                                 fprintf(stderr, "\n");
                             }
+                            /* Dump the whole EvCB table. The table pointer
+                             * itself is valid (0xA000E028, 448 bytes = 16
+                             * entries of 0x1C), so the PS1 kernel IS up and
+                             * events CAN be opened. Whether any ARE distinguishes
+                             * "CdInit specifically never ran" from "nothing ever
+                             * opens an event", which are very different faults.
+                             * EvCB layout: class +0, status +4, spec +8,
+                             * mode +0xC, func +0x10. */
+                            { const u32 tb = tot_evcb & 0x1FFFFFu;
+                              const u32 n = tot_size / 0x1Cu;
+                              u32 live = 0;
+                              for (u32 i = 0; i < n && i < 32; i++) {
+                                  const u32 cb = tb + i * 0x1Cu;
+                                  const u32 cls = PS1LE(cb + 0);
+                                  const u32 st  = PS1LE(cb + 4);
+                                  if (!cls && !st) continue;
+                                  live++;
+                                  fprintf(stderr, "[ps1ev]   EvCB[%2u] class=0x%08X"
+                                                  " status=0x%08X spec=0x%08X"
+                                                  " mode=0x%08X func=0x%08X\n",
+                                          i, cls, st, PS1LE(cb + 8),
+                                          PS1LE(cb + 12), PS1LE(cb + 16));
+                              }
+                              fprintf(stderr, "[ps1ev]   %u of %u EvCB entries in use\n",
+                                      live, n); }
                             #undef PS1LE
                         } }
                       /* PS1_RINGDUMP=1: the last few GP0 command packets.
