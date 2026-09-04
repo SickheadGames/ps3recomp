@@ -616,6 +616,55 @@ int64_t sys_ppu_thread_detach(ppu_context* ctx)
  * -----------------------------------------------------------------------*/
 int64_t sys_ppu_thread_yield(ppu_context* ctx)
 {
+    /* PS1_R3000_PC=1: the R3000's LIVE program counter.
+     *
+     * The interpreter (func_001066A8, 0x1066A8..0x108348) loads PC from its
+     * state block at +0x108 on entry and writes it back only in its epilogue --
+     * and it never returns, so that field is stale from boot and useless. It
+     * keeps the live PC in r26 instead.
+     *
+     * It also calls sys_ppu_thread_yield from inside its own loop, millions of
+     * times (lr=0x00106824 and 0x001068F4). So the guest context arriving here
+     * carries r26: the PS1 program counter, sampled for free.
+     *
+     * This is the only handle on "what is the PS1 actually executing?" -- the
+     * emulator retires over a billion R3000 instructions while emitting no GP0
+     * drawing commands, and nothing else distinguishes "running the game" from
+     * "spinning in a wait loop". */
+    { static int pc_on = -1;
+      if (pc_on < 0) pc_on = getenv("PS1_R3000_PC") ? 1 : 0;
+      if (pc_on) {
+          const uint32_t lr = (uint32_t)ctx->lr;
+          if (lr >= 0x001066A8u && lr < 0x00108348u) {
+              /* Bucket by 4 KB so a tight loop shows as one hot bucket rather
+               * than a smear, and report the top few periodically. */
+              enum { NB = 64 };
+              static uint32_t key[NB]; static unsigned long cnt[NB];
+              static unsigned long total;
+              const uint32_t pc = (uint32_t)ctx->gpr[26];
+              const uint32_t b = pc & ~0xFFFu;
+              int i = 0;
+              for (; i < NB; i++) { if (cnt[i] && key[i] == b) break;
+                                    if (!cnt[i]) { key[i] = b; break; } }
+              if (i < NB) cnt[i]++;
+              ++total;
+              if (total == 20000ul || (total % 200000ul) == 0) {
+                  fprintf(stderr, "[r3000pc] %lu yields from the interpreter;"
+                                  " hottest PS1 PC buckets:\n", total);
+                  for (int k = 0; k < NB; k++) {
+                      int best = -1; unsigned long bv = 0;
+                      for (int q = 0; q < NB; q++)
+                          if (cnt[q] > bv) { bv = cnt[q]; best = q; }
+                      if (best < 0 || k >= 6) break;
+                      fprintf(stderr, "   pc~0x%08X  %lu (%.1f%%)\n",
+                              key[best], cnt[best],
+                              100.0 * (double)cnt[best] / (double)total);
+                      cnt[best] = 0;   /* consume for this report */
+                  }
+                  for (int q = 0; q < NB; q++) { cnt[q] = 0; key[q] = 0; }
+              }
+          }
+      } }
     (void)ctx;
 #ifdef _WIN32
     SwitchToThread();
