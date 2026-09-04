@@ -674,6 +674,23 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                         for (int q = 0; q < 4; q++)
                             fprintf(stderr, " %08X=%d", probe[q],
                                     seen[(probe[q] - 0xBFC00000u) >> 6]);
+                        /* The PS1 kernel's A/B/C call gates live at RAM 0xA0,
+                         * 0xB0 and 0xC0 -- every BIOS service call jumps there
+                         * with the function index in $t1. Whether they execute
+                         * at all separates "the game makes no BIOS calls" from
+                         * "it makes them, but never asks for CdInit". Address
+                         * bits: KUSEG/KSEG0/KSEG1 all alias, so mask to 0x1FFFFF
+                         * before bucketing. */
+                        { static unsigned char gate[4];
+                          const uint32_t phys = pc & 0x1FFFFFu;
+                          if (phys < 0x100u) {
+                              if (phys >= 0xA0u && phys < 0xB0u) gate[0] = 1;
+                              else if (phys >= 0xB0u && phys < 0xC0u) gate[1] = 1;
+                              else if (phys >= 0xC0u && phys < 0xD0u) gate[2] = 1;
+                              else gate[3] = 1;
+                          }
+                          fprintf(stderr, "  A-gate=%d B-gate=%d C-gate=%d other-low=%d",
+                                  gate[0], gate[1], gate[2], gate[3]); }
                         fprintf(stderr, "\n");
                     }
                 } }
