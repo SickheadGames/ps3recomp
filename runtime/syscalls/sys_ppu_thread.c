@@ -614,6 +614,9 @@ int64_t sys_ppu_thread_detach(ppu_context* ctx)
 /* ---------------------------------------------------------------------------
  * sys_ppu_thread_yield
  * -----------------------------------------------------------------------*/
+/* Every bit ever observed in the emulated PS1 I_STAT / I_MASK. */
+static uint32_t g_ps1_istat_or, g_ps1_imask_or;
+
 int64_t sys_ppu_thread_yield(ppu_context* ctx)
 {
     /* PS1_R3000_PC=1: the R3000's LIVE program counter.
@@ -645,6 +648,22 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
               static uint32_t key[NB]; static unsigned long cnt[NB];
               static unsigned long total;
               const uint32_t pc = (uint32_t)ctx->gpr[26];
+              /* Accumulate every bit ever seen in the emulated PS1 I_STAT and
+               * I_MASK. The state block (*(TOC-0x79FC) = 0x0076C080) holds
+               * I_STAT at +0x688 and I_MASK at +0x68C -- read out of
+               * func_0010577C, the registered handler for 0x1F801070.
+               *
+               * A store watch on those words WOULD show every write, but it
+               * costs a check on every vm_write32 and slows the run enough to
+               * change the outcome: watched runs reach 23 BIOS buckets, unwatched
+               * ones 79-87. Same observer effect as the framebuffer dump earlier.
+               * Sampling and OR-ing is free, and "which bits ever appeared" is
+               * exactly the question. */
+              { extern uint32_t vm_read32(uint64_t);
+                static uint32_t st_or, mk_or;
+                st_or |= vm_read32(0x0076C080u + 0x688u);
+                mk_or |= vm_read32(0x0076C080u + 0x68Cu);
+                g_ps1_istat_or = st_or; g_ps1_imask_or = mk_or; }
               /* PS1_PC_CENSUS=1: has the R3000 EVER executed in a given range?
                *
                * The top-N bucket report answers "where is it now"; it cannot
@@ -721,7 +740,9 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                            * in the same report, deliberately. */
                           { const uint32_t tot = __builtin_bswap32(vm_read32(ram + 0x0120u));
                             const uint32_t tb = tot & 0x1FFFFFu;
-                            fprintf(stderr, "  ev[cls/status]:");
+                            fprintf(stderr, "  I_STAT_or=%08X I_MASK_or=%08X",
+                                  g_ps1_istat_or, g_ps1_imask_or);
+                          fprintf(stderr, "  ev[cls/status]:");
                             for (int q = 0; q < 5; q++) {
                                 const uint32_t h =
                                     __builtin_bswap32(vm_read32(ram + sl[q]));
