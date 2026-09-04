@@ -63,6 +63,11 @@ void rsx_live_draw_shutdown(void) {}
 #include "rsx_dispatch.h"
 #include "rsx_fp_decompiler.h"
 static unsigned long long g_ld_bind_white = 0, g_ld_bind_real = 0, g_ld_bind_surf = 0;
+/* Set once PS1 VRAM actually holds a drawn frame (see the PS1_PC heartbeat).
+ * Every surface dump before this is an early-boot snapshot of a framebuffer the
+ * PS1 has not drawn into yet -- which is what made nonblack=0 look like a broken
+ * pipeline when it was the correct reading of an empty source. */
+static volatile long g_ld_ps1_vram_ready = 0;
 #include "rsx_restart_cuts.h"
 #include "rsx_vertex_compact.h"
 #include "rsx_vp_decompiler.h"
@@ -2218,6 +2223,40 @@ static ID3D12Resource* decode_guest_texture(const rsx_dsp_texture* t, u32 remap)
                 decode_texel(base_fmt, pixel, remap,
                              rgba[n] + ((size_t)y * mw + x) * 4);
             }
+        /* LD_TEXRGBA_DUMP=1: the DECODED level-0 RGBA, with a non-black count
+         * and the remap that produced it.
+         *
+         * Forcing the fragment shader to green fills every surface completely
+         * (368,640 = 720x512 and 921,600 = 1280x720), so the draws reach the
+         * GPU and write every pixel -- the only thing left is that the sampled
+         * texture comes back black. The guest MEMORY has content (PS1 VRAM
+         * carries the BIOS boot screen), so the question is whether decode
+         * preserves it. remap is applied here, and a remap that zeroes channels
+         * would produce exactly this. */
+        { static int td = -1; static int tdn = 0;
+          if (td < 0) td = getenv("LD_TEXRGBA_DUMP") ? 1 : 0;
+          if (td && m == 0 && tdn < 6 && mw >= 512 && mh >= 256) {
+              u64 nb = 0;
+              for (u32 q = 0; q < mw * mh; q++) {
+                  const u8* px = rgba[n] + (size_t)q * 4;
+                  if (px[0] || px[1] || px[2]) nb++;
+              }
+              char fn[160];
+              snprintf(fn, sizeof fn, "scratch/tex_%02d_%ux%u_f%02X.ppm",
+                       tdn, mw, mh, base_fmt);
+              FILE* tf = fopen(fn, "wb");
+              if (tf) {
+                  fprintf(tf, "P6\n%u %u\n255\n", mw, mh);
+                  for (u32 q = 0; q < mw * mh; q++)
+                      fwrite(rgba[n] + (size_t)q * 4, 1, 3, tf);
+                  fclose(tf);
+              }
+              fprintf(stderr, "[tex-rgba] %s fmt=0x%02X remap=0x%04X linear=%d"
+                              " pitch=%u nonblack=%llu/%u\n",
+                      fn, base_fmt, remap, linear, pitch,
+                      (unsigned long long)nb, mw * mh);
+              tdn++;
+          } }
         levels[n].w = mw;
         levels[n].h = mh;
         levels[n].data = rgba[n];
@@ -4023,6 +4062,33 @@ static ID3D12PipelineState* get_pso(
     g_ld_profile.total.decompile_qpc +=
         (u64)(ld_profile_qpc() - decompile_begin);
 #endif
+    /* LD_FORCE_GREEN=1: make every fragment program return solid green.
+     *
+     * The same trick as LD_CLEAR_TEST, applied one stage later. Clears are
+     * visible on these surfaces and draws are not, while the engine reports
+     * 18,452 groups executed with zero drops and the GPU state cannot discard
+     * anything (viewport 0,0 720x512, scissor full, depth test off, colour mask
+     * all channels, blend off, cull off). Two possibilities remain and they need
+     * opposite fixes: the draws reach the GPU and the SAMPLED DATA is black, or
+     * they never reach it and the accounting is wrong. Green separates them. */
+    { static int fg = -1;
+      if (fg < 0) fg = getenv("LD_FORCE_GREEN") ? 1 : 0;
+      if (fg && fi > 0) {
+          char* r = strstr(ps_hlsl, "    return ");
+          if (r) {
+              char* semi = strchr(r, ';');
+              if (semi) {
+                  const char rep[] = "    return float4(0,1,0,1);";
+                  const size_t rl = sizeof(rep) - 1;
+                  const size_t old = (size_t)(semi + 1 - r);
+                  const size_t used = strlen(ps_hlsl);
+                  if (used - old + rl + 1 <= sizeof(ps_hlsl)) {
+                      memmove(r + rl, semi + 1, used - (size_t)(semi + 1 - ps_hlsl) + 1);
+                      memcpy(r, rep, rl);
+                  }
+              }
+          }
+      } }
     if (getenv("LD_HLSL_DUMP")) {
         char fn[64]; FILE* f;
         snprintf(fn, sizeof fn, "hlsl_%02u.vs.txt", g.n_psos);
@@ -6227,6 +6293,28 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
                                   " base=0x%X target=%u\n",
                           u, t.width, t.height, t.pitch, t.format,
                           vbase, target);
+                  /* The GPU state that can silently discard a draw. Clears are
+                   * visible on these surfaces and the draws are not, so one of
+                   * these is throwing the fragments away. */
+                  { const u32 sch = rsx_dsp_reg(&g.rsx, M_SCISSOR_HORIZONTAL);
+                    const u32 scv = rsx_dsp_reg(&g.rsx, M_SCISSOR_VERTICAL);
+                    fprintf(stderr, "[uvdbg]   vp=(%u,%u %ux%u) scale=(%.2f %.2f)"
+                                    " xlate=(%.2f %.2f) scissor=(%u+%u, %u+%u)"
+                                    " depth_test=%u zwrite=%u zfunc=0x%X"
+                                    " colmask=0x%08X blend=%u cull=%u/%u"
+                                    " surf=%ux%u\n",
+                            vp.x, vp.y, vp.w, vp.h,
+                            vp.scale[0], vp.scale[1],
+                            vp.translate[0], vp.translate[1],
+                            sch & 0xFFFFu, sch >> 16, scv & 0xFFFFu, scv >> 16,
+                            rsx_dsp_reg(&g.rsx, M_DEPTH_TEST_ENABLE) & 1u,
+                            rsx_dsp_reg(&g.rsx, 0x0A78) & 1u,
+                            rsx_dsp_reg(&g.rsx, 0x0A7C),
+                            rsx_dsp_reg(&g.rsx, M_COLOR_MASK),
+                            rsx_dsp_reg(&g.rsx, M_BLEND_ENABLE) & 1u,
+                            rsx_dsp_reg(&g.rsx, 0x1918) & 1u,
+                            rsx_dsp_reg(&g.rsx, 0x090C),
+                            sf.clip_w, sf.clip_h); }
                   for (u32 vi = 0; vi < 4; vi++) {
                       float pos[4] = {0,0,0,1}, tc[4] = {0,0,0,1};
                       const int okp = fetch_attr(0, vbase, vi, 0, pos);
@@ -7822,7 +7910,13 @@ void rsx_live_draw_present(u32 buffer_id)
     { static int done = 0; const char* sd = getenv("LD_SURF_DUMP");
       u32 at = 1200; { const char* fe = getenv("LD_SURF_DUMP_FRAME");
                        if (fe) at = (u32)strtoul(fe, 0, 0); }
-      if (sd && sd[0] && !done && g_ld_frames >= at) {
+      /* LD_SURF_DUMP_ON_VRAM=1 waits for PS1 VRAM to hold a drawn frame instead
+       * of firing at a frame number. Needs PS1_PC=1, which is what samples it. */
+      int gate;
+      { static int onv = -1;
+        if (onv < 0) onv = getenv("LD_SURF_DUMP_ON_VRAM") ? 1 : 0;
+        gate = onv ? (g_ld_ps1_vram_ready != 0) : (g_ld_frames >= at); }
+      if (sd && sd[0] && !done && gate) {
           done = 1;
           for (u32 i = 0; i < g.n_surfaces; i++) {
               char path[MAX_PATH * 2];
@@ -8504,6 +8598,10 @@ void rsx_live_draw_present(u32 buffer_id)
                           if (w32[i]) { nz++; if (first == 0xFFFFFFFFu) first = i * 4u; }
                       fprintf(stderr, "[ps1] vram nonzero=%u/%u first=+0x%X\n",
                               nz, n, first == 0xFFFFFFFFu ? 0u : first);
+                      { static u32 rdy = 0;
+                        if (!rdy) { const char* re = getenv("PS1_VRAM_READY");
+                                    rdy = re ? (u32)strtoul(re, 0, 0) : 20000u; }
+                        if (nz >= rdy) g_ld_ps1_vram_ready = 1; }
                       /* PS1_FBDUMP=<path>: write PS1 VRAM out as a PPM.
                        *
                        * This exists because "the window is black" was an
