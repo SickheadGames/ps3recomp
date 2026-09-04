@@ -691,6 +691,23 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                           }
                           fprintf(stderr, "  A-gate=%d B-gate=%d C-gate=%d other-low=%d",
                                   gate[0], gate[1], gate[2], gate[3]); }
+                        /* Read the five CD event handles HERE, in the same
+                         * report as the census. They used to be read from the
+                         * render heartbeat, which is a different thread on a
+                         * different schedule -- and comparing a census from one
+                         * run against a handle read from another is precisely
+                         * the error that produced six retractions. PS1 RAM is
+                         * little-endian in guest memory (the interpreter uses
+                         * lwbrx), so swap. */
+                        { extern uint32_t vm_read32(uint64_t);
+                          const uint32_t ram = vm_read32(0x001BC35Cu);
+                          static const uint32_t sl[5] = { 0xB218u, 0xB21Cu, 0xB220u,
+                                                          0xB224u, 0xB228u };
+                          fprintf(stderr, "  handles:");
+                          for (int q = 0; q < 5; q++)
+                              fprintf(stderr, " %08X",
+                                      __builtin_bswap32(vm_read32(ram + sl[q])));
+                        }
                         fprintf(stderr, "\n");
                     }
                 } }
