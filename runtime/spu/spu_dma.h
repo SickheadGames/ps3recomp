@@ -893,6 +893,54 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
           }
       } }
 
+    /* SPU_VRAMPC=1: which SPU CODE writes PS1 VRAM, bucketed by the symbol it
+     * falls in.
+     *
+     * Both SPU modules in ps1_netemu ship a .symtab (read in situ from the
+     * firmware -- the extracted copies are truncated at the symtab), so the
+     * rasteriser s functions have real names and known LS extents:
+     *
+     *   0x00188..0x0034F  BlockClear(GpuBlockClearCmd const*)
+     *   0x00350..0x00757  Host2Local_Body(GpuH2LBodyCmd const*)
+     *   0x00758..0x00927  Host2Local(GpuH2LCmd const*)
+     *   0x00928..0x010F7  Local2Local(GpuL2LCmd const*)
+     *   0x010F8..0x051E7  main
+     *   0x051E8..0x086FF  DrawRect<0..3>(Code, int)
+     *   0x08700..0x1493B  DrawEdge<0..3, 0..4>       -- the polygon rasteriser
+     *
+     * Every VRAM write traced so far came from 0x002E0 (BlockClear) or
+     * 0x004DC/0x00598 (Host2Local_Body) and none from the DrawRect/DrawEdge
+     * range, which would mean no geometry is rasterised at all -- the missing
+     * 3D. That was noticed from three sampled addresses, so count them all. */
+    { static int s_vp = -1;
+      if (s_vp < 0) s_vp = getenv("SPU_VRAMPC") ? 1 : 0;
+      if (s_vp && mfc_is_put(cmd) &&
+          (uint32_t)ea >= 0x40600000u && (uint32_t)ea < 0x40700000u) {
+          static unsigned long long b[8]; static unsigned long long n;
+          static unsigned long long bytes[8];
+          const uint32_t pc = (uint32_t)spu->pc & SPU_LS_MASK;
+          int k = pc < 0x00188u ? 0
+                : pc < 0x00350u ? 1     /* BlockClear */
+                : pc < 0x00758u ? 2     /* Host2Local_Body */
+                : pc < 0x00928u ? 3     /* Host2Local */
+                : pc < 0x010F8u ? 4     /* Local2Local */
+                : pc < 0x051E8u ? 5     /* main */
+                : pc < 0x08700u ? 6     /* DrawRect */
+                : pc < 0x1493Cu ? 7     /* DrawEdge */
+                : 0;
+          b[k]++; bytes[k] += size;
+          if ((++n % 20000) == 0) {
+              static const char* nm[8] = { "other", "BlockClear",
+                  "Host2Local_Body", "Host2Local", "Local2Local", "main",
+                  "DrawRect", "DrawEdge" };
+              fprintf(stderr, "[vrampc] %llu VRAM puts;", n);
+              for (int q = 0; q < 8; q++)
+                  if (b[q]) fprintf(stderr, " %s=%llu(%lluKB)",
+                                    nm[q], b[q], bytes[q] >> 10);
+              fprintf(stderr, "\n"); fflush(stderr);
+          }
+      } }
+
     /* SPU_PUTEA=1: the first few FULL destination addresses per SPU. The 1 MB
      * bucket histogram showed spu1..3 writing only bucket 0 and spu0 buckets
      * 1..3, with nothing in bucket 4 -- where the composite samples PS1 VRAM
