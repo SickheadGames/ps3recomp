@@ -791,6 +791,57 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
     uint32_t tag  = spu->mfc_tag & 0x1F;
     int rc = 0;
 
+    /* SPU_PUTEA=1: the first few FULL destination addresses per SPU. The 1 MB
+     * bucket histogram showed spu1..3 writing only bucket 0 and spu0 buckets
+     * 1..3, with nothing in bucket 4 -- where the composite samples PS1 VRAM
+     * (RSX local + 0x400000). Buckets keep only 4 address bits, so that may be
+     * an artifact of where RSX local memory actually sits; the full EA settles
+     * it. */
+    { static int s_pe = -1; if (s_pe < 0) s_pe = getenv("SPU_PUTEA") ? 1 : 0;
+      if (s_pe && (cmd & 0xFF) >= 0x20u && (cmd & 0xFF) <= 0x2Fu) {
+          static int shown[8];
+          const unsigned sp2 = spu->spu_id & 7u;
+          if (shown[sp2]++ < 6)
+              fprintf(stderr, "[putea] spu%u cmd=0x%02X ea=0x%016llX size=%u lsa=0x%05X\n",
+                      sp2, cmd & 0xFFu, (unsigned long long)ea, size, lsa);
+      } }
+
+    /* SPU_PUTHIST=1: where the SPUs actually WRITE, by 1 MB destination bucket
+     * and transfer size.
+     *
+     * The PS1 GPU cores rasterise into VRAM by DMA, not by store, so this is
+     * the only ground truth for what they produce. The PS1 framebuffer holds a
+     * 24-pixel-period pattern from a six-entry palette while the texture half
+     * of VRAM decodes to correct game art -- so the rasteriser runs and the
+     * asset upload works, and the question is what geometry these transfers
+     * actually have. */
+    { static int s_ph = -1; if (s_ph < 0) s_ph = getenv("SPU_PUTHIST") ? 1 : 0;
+      if (s_ph && (cmd & 0xFF) >= 0x20u && (cmd & 0xFF) <= 0x2Fu) {
+          static unsigned long long n[8][16], byt[8][16], nsz[8][8], tot;
+          const unsigned sp = spu->spu_id & 7u;
+          const unsigned bucket = (unsigned)((ea >> 20) & 15u);
+          unsigned sb = 0;
+          { uint32_t z = size; while (z > 16u && sb < 7u) { z >>= 1; sb++; } }
+          n[sp][bucket]++; byt[sp][bucket] += size; nsz[sp][sb]++;
+          if ((++tot % 4096ull) == 0) {
+              fprintf(stderr, "[puthist] %llu puts\n", tot);
+              for (unsigned q = 0; q < 8; q++)
+                  for (unsigned b = 0; b < 16; b++)
+                      if (n[q][b])
+                          fprintf(stderr, "   spu%u ea~0x%X00000  %llu puts  %llu bytes\n",
+                                  q, b, n[q][b], byt[q][b]);
+              for (unsigned q = 0; q < 8; q++) {
+                  int any = 0;
+                  for (unsigned b = 0; b < 8; b++) if (nsz[q][b]) any = 1;
+                  if (!any) continue;
+                  fprintf(stderr, "   spu%u sizes:", q);
+                  for (unsigned b = 0; b < 8; b++)
+                      if (nsz[q][b]) fprintf(stderr, " <=%u:%llu", 16u << b, nsz[q][b]);
+                  fprintf(stderr, "\n");
+              }
+          }
+      } }
+
     /* cri build (YDKJ_CRI_CHAIN): when the kernel DMA-loads the TASKSET policy
      * module (libsre guest 0x30023680) to LS 0xA00, switch this SPU's image to 23
      * so subsequent indirect branches to 0xA00 resolve lift_tsp (taskset policy)
