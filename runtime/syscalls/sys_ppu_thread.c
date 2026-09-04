@@ -618,6 +618,7 @@ int64_t sys_ppu_thread_detach(ppu_context* ctx)
 static uint32_t g_ps1_istat_or, g_ps1_imask_or;
 static uint32_t g_ps1_sr_or, g_ps1_cause_or, g_ps1_line_or;
 static unsigned long g_cdl_hits;
+static uint32_t g_yield_ctr;
 static uint32_t g_cdl_v0, g_cdl_s0, g_cdl_s1, g_cdl_s6;
 
 int64_t sys_ppu_thread_yield(ppu_context* ctx)
@@ -694,6 +695,47 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                  * Register file is at state + reg*4 (lwzx r11,r23,r9 at
                  * 0x1068B0 with r9 = (reg & 0x1F) << 2): $v0 +0x08, $s0 +0x40,
                  * $s1 +0x44, $s6 +0x58. s1 == 1 in the output confirms that. */
+                /* Name the R3000 instruction being executed at each yield.
+                 *
+                 * lr is useless for this: every opcode handler is reached by
+                 * bctr, which does not write lr, so a yielding handler carries
+                 * the interpreter's last `bl` address instead of its own. The
+                 * dispatched target is in ctr, and the instruction itself is at
+                 * the R3000 pc -- read it and take its opcode.
+                 *
+                 * PS1 RAM is little-endian in guest memory (the interpreter uses
+                 * lwbrx), so byte-swap. Histogram by primary opcode, and for
+                 * SPECIAL (0) by funct, which is what selects the handler. */
+                { static unsigned long op_n[64], sp_n[64];
+                  static unsigned long tot;
+                  const uint32_t ram = vm_read32(0x001BC35Cu);
+                  const uint32_t insn =
+                      __builtin_bswap32(vm_read32(ram + (pc & 0x001FFFFCu)));
+                  const uint32_t op = insn >> 26;
+                  op_n[op & 63]++;
+                  if (op == 0) sp_n[insn & 63]++;
+                  g_yield_ctr = (uint32_t)ctx->ctr;
+                  if ((++tot % 200000ul) == 0) {
+                      fprintf(stderr, "[yieldop] %lu yields; ctr=0x%08X;"
+                                      " top R3000 opcodes:", tot, g_yield_ctr);
+                      for (int q = 0; q < 6; q++) {
+                          int best = -1; unsigned long bv = 0;
+                          for (int k = 0; k < 64; k++)
+                              if (op_n[k] > bv) { bv = op_n[k]; best = k; }
+                          if (best < 0 || !bv) break;
+                          fprintf(stderr, " op%02X=%lu", best, bv);
+                          op_n[best] = 0;
+                      }
+                      for (int q = 0; q < 3; q++) {
+                          int best = -1; unsigned long bv = 0;
+                          for (int k = 0; k < 64; k++)
+                              if (sp_n[k] > bv) { bv = sp_n[k]; best = k; }
+                          if (best < 0 || !bv) break;
+                          fprintf(stderr, " special:funct%02X=%lu", best, bv);
+                          sp_n[best] = 0;
+                      }
+                      fprintf(stderr, "\n");
+                  } }
                 if (pc >= 0xBFC5361Cu && pc <= 0xBFC538B0u) {
                     const uint32_t sb = 0x0076C080u;
                     g_cdl_hits++;
