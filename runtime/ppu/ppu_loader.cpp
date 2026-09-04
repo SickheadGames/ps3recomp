@@ -958,6 +958,24 @@ static void pt_restore(uint32_t addr) { for (int i=0;i<g_pt_n;i++) if (g_pt_addr
 static PPU_THREAD_LOCAL uint32_t g_vcall_stk[128];
 static PPU_THREAD_LOCAL int      g_vcall_sp = 0;
 extern "C" {
+/* PPU_RWATCH=<hex>[,len] -- see the note in vm_read8. */
+static inline void ppu_rwatch_hit(uint32_t a, int width, void* ra)
+{
+    static int64_t s_lo = -2; static uint32_t s_len = 0x10;
+    if (s_lo == -2) {
+        const char* e = getenv("PPU_RWATCH");
+        s_lo = e ? (int64_t)strtoul(e, 0, 16) : -1;
+        if (e) { const char* c = strchr(e, ',');
+                 if (c) s_len = (uint32_t)strtoul(c + 1, 0, 0); }
+        if (!s_len) s_len = 0x10;
+    }
+    if (s_lo < 0) return;
+    if (a < (uint32_t)s_lo || a >= (uint32_t)s_lo + s_len) return;
+    static unsigned long rn;
+    if (++rn <= 24 || (rn % 4096) == 0)
+        fprintf(stderr, "[rwatch] n=%lu read%d 0x%08X guest-fn=0x%08X\n",
+                rn, width, a, ppu_prof_resolve_host(ra));
+}
 uint8_t  vm_read8 (uint64_t a) { if (vm_oob((uint32_t)a,1)) return 0; vm_hotmap((uint32_t)a,1);
     /* YDKJ_LV2_SAT (diagnostic): the game polls 0x00543580 ("Continue... (Lv-2 is
      * still N)") for an SPU/worker completion that never arrives in the HLE path,
@@ -968,6 +986,20 @@ uint8_t  vm_read8 (uint64_t a) { if (vm_oob((uint32_t)a,1)) return 0; vm_hotmap(
 #ifdef VM_SAMPLE_READS
     { static uint64_t c=0; if ((++c % 2000000ull)==0) fprintf(stderr, "[sample] read8  0x%08X ra0=%p ra1=%p\n", (uint32_t)a, __builtin_return_address(0), __builtin_return_address(1)); }
 #endif
+    /* PPU_RWATCH=<hex>[,len]: log the first reads of a guest address range, with
+     * the guest function that read it.
+     *
+     * Written to answer one question. ps1_netemu carries a 349-title quirk
+     * table at 0x001B1E5C, and Twisted Metal has a record there
+     * (SCUS_943.04 @ 0x001B324C, one parameter pair). If the emulator never
+     * looks our title up, it runs unpatched -- and the run passes "SCUS94304"
+     * in argv while the table is keyed "SCUS_943.04", the disc's boot-filename
+     * form. Stores cannot answer this because a lookup only READS. Watching
+     * the record and its serial string says outright whether the lookup lands.
+     *
+     * Every width shares one window so a byte-at-a-time strcmp is caught as
+     * readily as a word load. */
+    ppu_rwatch_hit((uint32_t)a, 1, __builtin_return_address(0));
     { static PPU_THREAD_LOCAL uint32_t last=0xFFFFFFFFu; static PPU_THREAD_LOCAL uint32_t n=0;
       if ((uint32_t)a==last) { if (++n==200000) {
           fprintf(stderr, "[HOTREAD8] spinning on 0x%08X val=0x%02X tid=%lu guest-fn=0x%08X\n",
@@ -976,11 +1008,11 @@ uint8_t  vm_read8 (uint64_t a) { if (vm_oob((uint32_t)a,1)) return 0; vm_hotmap(
           n=0; } }
       else { last=(uint32_t)a; n=0; } }
     return vm_base[(uint32_t)a]; }
-uint16_t vm_read16(uint64_t a) { if (vm_oob((uint32_t)a,2)) return 0; vm_hotmap((uint32_t)a,2); uint16_t v; memcpy(&v, vm_base + (uint32_t)a, 2);
+uint16_t vm_read16(uint64_t a) { if (vm_oob((uint32_t)a,2)) return 0; ppu_rwatch_hit((uint32_t)a, 2, __builtin_return_address(0)); vm_hotmap((uint32_t)a,2); uint16_t v; memcpy(&v, vm_base + (uint32_t)a, 2);
     { static PPU_THREAD_LOCAL uint32_t last=0xFFFFFFFFu; static PPU_THREAD_LOCAL uint32_t n=0;
       if ((uint32_t)a==last) { if (++n==200000) { fprintf(stderr, "[HOTREAD16] spinning on 0x%08X\n", (uint32_t)a); n=0; } } else { last=(uint32_t)a; n=0; } }
     return __builtin_bswap16(v); }
-uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0;
+uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0; ppu_rwatch_hit((uint32_t)a, 4, __builtin_return_address(0));
     /* Raw SPU problem state: reading the outbound mailbox POPS it, so that one
      * cannot be served out of memory. Everything else in the window the SPU
      * thread keeps current, so it falls through to the plain load. */
