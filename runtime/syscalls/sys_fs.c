@@ -444,7 +444,24 @@ int64_t sys_fs_read(ppu_context* ctx)
 
     void* buf = vm_to_host(buf_addr);
     long pos_before = ftell(f->fp);
-    size_t nread = fread(buf, 1, (size_t)size, f->fp);
+    size_t nread = fread(buf, 1, (size_t)size, f->fp);
+
+    /* PS3_FSTRACE=<n>: every nth read, the fd and the file offset it came from.
+     *
+     * The PS1 title under test streams its intro movie off the disc image and
+     * never stops -- 560 s undriven and the blit counter is still climbing. If
+     * the offsets here keep advancing, the stream is progressing and the movie
+     * genuinely has not reached its end; if they repeat, the disc read is stuck
+     * and the movie is looping over the same sectors forever. Those need
+     * opposite fixes and nothing else distinguishes them. */
+    { static int s_ft = -1;
+      if (s_ft < 0) { const char* e = getenv("PS3_FSTRACE");
+                      s_ft = e ? (atoi(e) > 0 ? atoi(e) : 200) : 0; }
+      if (s_ft) { static unsigned long fn;
+          if ((++fn % (unsigned long)s_ft) == 0)
+              fprintf(stderr, "[fs] n=%lu fd=%d off=%ld size=%llu -> %llu\n",
+                      fn, fd, pos_before, (unsigned long long)size,
+                      (unsigned long long)nread); } }
 
     if (nread_addr != 0) {
         write_be64(nread_addr, (uint64_t)nread);
