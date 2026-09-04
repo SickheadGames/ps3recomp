@@ -6308,6 +6308,20 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
       } }
     for (u32 u = 0; u < SRV_TABLE_SIZE; u++) {
         rsx_dsp_texture t; rsx_dsp_get_texture(&g.rsx, u, &t);
+        /* LD_PS1_BUF0=1 -- DIAGNOSTIC, not a fix. Force a 24-bit PS1 VRAM
+         * bind at buffer 1 (offset 0x4003C0) to sample buffer 0 (0x400000).
+         *
+         * After the intro FMV both the driven and undriven paths end on a blank
+         * screen, and during it every bind is 0x4003C0 while the content that
+         * exists -- the decoded FMV frame -- sits in buffer 0. That is the shape
+         * of a display flip parked on the buffer the game is not drawing into.
+         * If forcing buffer 0 puts a picture back on screen the flip is the bug;
+         * if the screen stays blank it is not. Nothing else distinguishes those
+         * two, and the override is one line. */
+        { static int fb0 = -1;
+          if (fb0 < 0) fb0 = getenv("LD_PS1_BUF0") ? 1 : 0;
+          if (fb0 && t.location == 1u && t.offset == 0x4003C0u)
+              t.offset = 0x400000u; }
         if (!t.enabled) continue;
         texture_mask |= 1u << u;
         smp_slots[u] = sampler_slot(&t, sampler_key(&t));
