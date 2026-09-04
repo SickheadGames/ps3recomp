@@ -645,6 +645,38 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
               static uint32_t key[NB]; static unsigned long cnt[NB];
               static unsigned long total;
               const uint32_t pc = (uint32_t)ctx->gpr[26];
+              /* PS1_PC_CENSUS=1: has the R3000 EVER executed in a given range?
+               *
+               * The top-N bucket report answers "where is it now"; it cannot
+               * answer "did it ever run X", and I have been INFERRING that
+               * answer for CdInit from the fact that its stores never land.
+               * This measures it instead: a flag per 64-byte bucket across the
+               * BIOS, reported once, so "CdInit was entered" becomes an
+               * observation rather than a deduction. */
+              { static int cen = -1;
+                if (cen < 0) cen = getenv("PS1_PC_CENSUS") ? 1 : 0;
+                if (cen) {
+                    /* 0xBFC00000..0xBFC80000 in 64-byte buckets = 8192 flags */
+                    static unsigned char seen[8192];
+                    static unsigned long cn = 0;
+                    if (pc >= 0xBFC00000u && pc < 0xBFC80000u)
+                        seen[(pc - 0xBFC00000u) >> 6] = 1;
+                    if ((++cn % 600000ul) == 0) {
+                        /* CdInit spans 0xBFC52B9C..0xBFC52C60 -> buckets for
+                         * 0xBFC52B80, BC0, C00, C40. Report those explicitly,
+                         * plus a total, so a zero is legible. */
+                        static const uint32_t probe[4] = {
+                            0xBFC52B80u, 0xBFC52BC0u, 0xBFC52C00u, 0xBFC52C40u };
+                        unsigned tot = 0;
+                        for (unsigned q = 0; q < 8192; q++) tot += seen[q];
+                        fprintf(stderr, "[census] %lu samples, %u/8192 BIOS buckets"
+                                        " ever executed; CdInit:", cn, tot);
+                        for (int q = 0; q < 4; q++)
+                            fprintf(stderr, " %08X=%d", probe[q],
+                                    seen[(probe[q] - 0xBFC00000u) >> 6]);
+                        fprintf(stderr, "\n");
+                    }
+                } }
               const uint32_t b = pc & ~0x3Fu;
               int i = 0;
               for (; i < NB; i++) { if (cnt[i] && key[i] == b) break;
