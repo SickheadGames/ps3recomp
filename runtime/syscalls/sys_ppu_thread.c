@@ -616,6 +616,9 @@ int64_t sys_ppu_thread_detach(ppu_context* ctx)
  * -----------------------------------------------------------------------*/
 /* Every bit ever observed in the emulated PS1 I_STAT / I_MASK. */
 static uint32_t g_ps1_istat_or, g_ps1_imask_or;
+static uint32_t g_ps1_sr_or, g_ps1_cause_or, g_ps1_line_or;
+static unsigned long g_cdl_hits;
+static uint32_t g_cdl_v0, g_cdl_s0, g_cdl_s1, g_cdl_s6;
 
 int64_t sys_ppu_thread_yield(ppu_context* ctx)
 {
@@ -660,10 +663,45 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                * Sampling and OR-ing is free, and "which bits ever appeared" is
                * exactly the question. */
               { extern uint32_t vm_read32(uint64_t);
-                static uint32_t st_or, mk_or;
+                static uint32_t st_or, mk_or, sr_or, cs_or, ln_or;
                 st_or |= vm_read32(0x0076C080u + 0x688u);
                 mk_or |= vm_read32(0x0076C080u + 0x68Cu);
-                g_ps1_istat_or = st_or; g_ps1_imask_or = mk_or; }
+                /* Cop0 SR (+0xB0) and CAUSE (+0xB4), plus the PS1 IRQ line flag
+                 * (+0x694) -- all read out of func_001063AC, which is the
+                 * registered write handler for 0x1F801070 and the ONLY place
+                 * that asserts the interrupt:
+                 *
+                 *   r0 = CAUSE; r0 |= 0x400;  CAUSE = r0     ; assert IP bit 10
+                 *   if (!(SR & 1)) skip                      ; SR.IEc
+                 *   if (((SR & CAUSE) >> 8) & 0xFF) take_it  ; SR.IM & CAUSE.IP
+                 *
+                 * The mechanism is present and correct, so whether the
+                 * interrupt can ever be TAKEN comes down to SR: bit 0 (IEc)
+                 * and bit 10 (IM2, 0x400) both have to be set. */
+                sr_or |= vm_read32(0x0076C080u + 0x0B0u);
+                cs_or |= vm_read32(0x0076C080u + 0x0B4u);
+                ln_or |= vm_read32(0x0076C080u + 0x694u);
+                g_ps1_istat_or = st_or; g_ps1_imask_or = mk_or;
+                g_ps1_sr_or = sr_or; g_ps1_cause_or = cs_or; g_ps1_line_or = ln_or;
+                /* Latch the CD poll loop's own R3000 registers, but ONLY on a
+                 * sample where the pc is actually inside CdReadSector
+                 * (0xBFC5361C..0xBFC538B0). Reading them unconditionally gave
+                 * s1=0 on a run that never reached the loop, and s1 must be 1
+                 * there (addiu $s1,$zero,1 at 0xBFC53654) -- so unconditional
+                 * reads are meaningless and the self-check correctly rejected
+                 * them.
+                 *
+                 * Register file is at state + reg*4 (lwzx r11,r23,r9 at
+                 * 0x1068B0 with r9 = (reg & 0x1F) << 2): $v0 +0x08, $s0 +0x40,
+                 * $s1 +0x44, $s6 +0x58. s1 == 1 in the output confirms that. */
+                if (pc >= 0xBFC5361Cu && pc <= 0xBFC538B0u) {
+                    const uint32_t sb = 0x0076C080u;
+                    g_cdl_hits++;
+                    g_cdl_v0 = vm_read32(sb + 0x08u);
+                    g_cdl_s0 = vm_read32(sb + 0x40u);
+                    g_cdl_s1 = vm_read32(sb + 0x44u);
+                    g_cdl_s6 = vm_read32(sb + 0x58u);
+                } }
               /* PS1_PC_CENSUS=1: has the R3000 EVER executed in a given range?
                *
                * The top-N bucket report answers "where is it now"; it cannot
@@ -740,8 +778,31 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                            * in the same report, deliberately. */
                           { const uint32_t tot = __builtin_bswap32(vm_read32(ram + 0x0120u));
                             const uint32_t tb = tot & 0x1FFFFFu;
-                            fprintf(stderr, "  I_STAT_or=%08X I_MASK_or=%08X",
-                                  g_ps1_istat_or, g_ps1_imask_or);
+                            fprintf(stderr, "  I_STAT_or=%08X I_MASK_or=%08X"
+                                          " SR_or=%08X CAUSE_or=%08X line_or=%X",
+                                  g_ps1_istat_or, g_ps1_imask_or,
+                                  g_ps1_sr_or, g_ps1_cause_or, g_ps1_line_or);
+                          /* The CD poll loop's own R3000 registers. The
+                           * interpreter addresses the register file at
+                           * state + reg*4 -- `lwzx r11, r23, r9` at 0x1068B0
+                           * with r9 = (reg & 0x1F) << 2. So $v0 is +0x08,
+                           * $s0 +0x40, $s1 +0x44, $s6 +0x58.
+                           *
+                           * SELF-VALIDATING: the loop at 0xBFC5384C sets
+                           * $s1 = 1 (addiu $s1,$zero,1 at 0xBFC53654) and
+                           * compares TestEvent's result against it. If $s1
+                           * reads 1, the register offset is confirmed. If it
+                           * reads anything else, this probe is wrong and the
+                           * numbers beside it mean nothing.
+                           *
+                           * $s6 is the retry counter tested against 10
+                           * (slti $v0,$s6,0xa); $v0 is TestEvent's last result. */
+                          fprintf(stderr, "  in_cdloop=%lu", g_cdl_hits);
+                          if (g_cdl_hits)
+                              fprintf(stderr, " r3000[v0=%u s0=%d s1=%u s6=%u]%s",
+                                      g_cdl_v0, (int32_t)g_cdl_s0, g_cdl_s1,
+                                      g_cdl_s6,
+                                      g_cdl_s1 == 1u ? "" : "  <== s1!=1, PROBE INVALID");
                           fprintf(stderr, "  ev[cls/status]:");
                             for (int q = 0; q < 5; q++) {
                                 const uint32_t h =
