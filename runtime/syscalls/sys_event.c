@@ -668,6 +668,30 @@ int64_t sys_event_queue_drain(ppu_context* ctx)
 /* Helper to enqueue an event into a queue */
 static int event_queue_push(sys_event_queue_info* q, const sys_event_t* evt)
 {
+    /* PS3_EVQSTAT=<n>: every n pushes, report each live queue's push count and
+     * how many events are sitting in it unread.
+     *
+     * For a deadlock the pending count is the whole answer. The R3000 spins
+     * waiting for spu4; spu4 waits for SigNotify2 from the guest thread that
+     * services an event queue; that thread sits in sys_event_queue_receive.
+     * pending > 0 means the receiver is not waking (our bug); pending == 0
+     * means nothing produced the event (the guest's, or a missing HLE
+     * producer). Those need opposite fixes, and nothing else distinguishes
+     * them. */
+    { static int s_es = -1;
+      if (s_es < 0) { const char* e = getenv("PS3_EVQSTAT");
+                      s_es = e ? (atoi(e) > 0 ? atoi(e) : 2000) : 0; }
+      if (s_es) { static unsigned long long np[SYS_EVENT_QUEUE_MAX + 1], n;
+          const unsigned qi = (unsigned)(q - g_sys_event_queues) + 1u;
+          if (qi <= SYS_EVENT_QUEUE_MAX) np[qi]++;
+          if ((++n % (unsigned long long)s_es) == 0) {
+              fprintf(stderr, "[evqstat] %llu pushes;", n);
+              for (unsigned k = 1; k <= SYS_EVENT_QUEUE_MAX; k++)
+                  if (np[k] || g_sys_event_queues[k - 1].count)
+                      fprintf(stderr, " q%u[pushed=%llu pending=%u]", k, np[k],
+                              (unsigned)g_sys_event_queues[k - 1].count);
+              fprintf(stderr, "\n"); fflush(stderr);
+          } } }
 #ifdef _WIN32
     EnterCriticalSection(&q->lock);
 #else

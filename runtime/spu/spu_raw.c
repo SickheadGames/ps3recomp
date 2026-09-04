@@ -341,6 +341,32 @@ void spu_raw_reg_store(uint32_t ea, uint32_t val, int width)
 
     case SPU_RAW_SIG_NOTIFY1:
     case SPU_RAW_SIG_NOTIFY2:
+        /* SPU_SIGSTAT=<n>: every n signal writes, the per-SPU tally and the
+         * last value written.
+         *
+         * The deadlock this exists for: the R3000 spins waiting for spu4 to
+         * advance a counter, spu4 polls rchcnt(SigNotify2) 1.7 BILLION times
+         * without ever reading one, and the PPU thread that writes those
+         * signals keeps receiving from its event queue the whole time. So
+         * either the writes stop or they land and the SPU does not see them --
+         * and those are opposite bugs. This counts the writes as they happen. */
+        { static int s_ss = -1;
+          if (s_ss < 0) { const char* e = getenv("SPU_SIGSTAT");
+                          s_ss = e ? (atoi(e) > 0 ? atoi(e) : 256) : 0; }
+          if (s_ss) { static unsigned long long c[8][2]; static unsigned long long n;
+              static uint32_t last[8][2];
+              const unsigned sp = (unsigned)(s - s_spu) & 7u;
+              const int wh = (off == SPU_RAW_SIG_NOTIFY1) ? 0 : 1;
+              c[sp][wh]++; last[sp][wh] = val;
+              if ((++n % (unsigned long long)s_ss) == 0) {
+                  fprintf(stderr, "[sigstat] %llu writes;", n);
+                  for (unsigned q = 0; q < 8; q++)
+                      for (int k = 0; k < 2; k++)
+                          if (c[q][k])
+                              fprintf(stderr, " spu%u.sig%d=%llu(last=0x%08X)",
+                                      q, k + 1, c[q][k], last[q][k]);
+                  fprintf(stderr, "\n"); fflush(stderr);
+              } } }
         if (s->ctx) {
             int i = (off == SPU_RAW_SIG_NOTIFY1) ? 0 : 1;
             spu_channel_write(&s->ctx->ch_sig_notify[i], val);

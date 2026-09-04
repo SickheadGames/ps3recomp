@@ -212,7 +212,12 @@ static void rsx_send_event(uint64_t flags)
 void rsx_raise_user_cmd(uint32_t arg)
 {
     { static unsigned long n = 0;
-      if (n++ < 4) {
+      /* Periodic, not just the first four: the question that matters is
+       * whether these STOP. A freeze parks the R3000 waiting on spu4, spu4
+       * waiting for SigNotify2 from the thread that services this event, so
+       * "did the last user command arrive before the freeze" is the join
+       * between the two halves of the deadlock. */
+      if (n++ < 4 || (n % 256) == 0) {
           uint32_t mask = vm_read32(RSX_DRIVER_INFO_EA + RSX_DI_HANDLERS);
           fprintf(stderr, "[usercmd] #%lu arg=0x%08X handlers=0x%X qid=%u\n",
                   n, arg, mask, s_isr_qid); fflush(stderr); } }

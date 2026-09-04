@@ -623,6 +623,39 @@ static uint32_t g_cdl_v0, g_cdl_s0, g_cdl_s1, g_cdl_s6;
 
 int64_t sys_ppu_thread_yield(ppu_context* ctx)
 {
+    /* PS1_SPINWAIT=1: who is yielding, and what is it waiting for?
+     *
+     * The chain, established from lr + ctr on a caught stall: the interpreter
+     * calls the event scheduler (bl 0x105fa8, so lr = 0x00106824), the
+     * scheduler fires an event callback through bctrl at 0x106050 with
+     * ctr = 0x000D2298, and func_000D2298 spins:
+     *
+     *   000D22C0  lwz  r31, 0(r30)      ; r30 = *(TOC-0x7D4C)
+     *   000D22C4  lwz  r0,  0x88(r30)
+     *   000D22D8  beq  cr7, 0xd22f4     ; equal -> done waiting
+     *   000D22E4  sc   (43 = yield)
+     *   000D22F0  bne  cr7, 0xd22e0     ; still unequal -> yield again
+     *
+     * Deriving r30 statically gave 0x001B9298, whose contents are byte-identical
+     * to the ELF image and look like {code,toc} pairs -- so either that
+     * derivation is wrong or the struct is never initialised. Read r30 out of
+     * the live context instead of deriving it: no TOC arithmetic, no
+     * assumption about which callback is running. */
+    { static int sw = -1;
+      if (sw < 0) sw = getenv("PS1_SPINWAIT") ? 1 : 0;
+      if (sw) {
+          static unsigned long n;
+          extern uint32_t vm_read32(uint64_t);
+          const uint32_t r30 = (uint32_t)ctx->gpr[30];
+          if (++n <= 6 || (n % 500000ul) == 0)
+              fprintf(stderr, "[spinwait] n=%lu lr=%08X ctr=%08X r2=%08X"
+                              " r30=%08X w0=%08X w88=%08X r31=%08X\n",
+                      n, (uint32_t)ctx->lr, (uint32_t)ctx->ctr,
+                      (uint32_t)ctx->gpr[2], r30,
+                      vm_read32(r30), vm_read32(r30 + 0x88u),
+                      (uint32_t)ctx->gpr[31]);
+      } }
+
     /* PS1_R3000_PC=1: the R3000's LIVE program counter.
      *
      * The interpreter (func_001066A8, 0x1066A8..0x108348) loads PC from its
@@ -735,6 +768,38 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                           sp_n[best] = 0;
                       }
                       fprintf(stderr, "\n");
+                      /* Bug 1: func_00105FA8 fires every event whose due time
+                       * has passed and RE-APPENDS the node to the same ring
+                       * with its due time UNCHANGED (0x106020..0x10603C), so a
+                       * callback that does not re-arm its own node leaves it
+                       * permanently due and the loop never reaches the
+                       * sentinel. Dump the ring so the culprit names itself.
+                       *
+                       * Sentinel = the list-head cell at state+0x540; it IS a
+                       * node, its own +8 is the stop time. Node layout, read
+                       * off the fire path at 0x105FF0..0x106050:
+                       *   +0 next  +4 prev  +8 due  +0xC callback OPD
+                       *   +0x10 callback arg (loaded into r3)
+                       * NOT "+0xC flag / +0x10 OPD" as the commit before this
+                       * one said: r10 comes from +0xC and is dereferenced as
+                       * the OPD at 0x106040/0x10604C, and +0xC is what gets
+                       * zeroed once the node fires. */
+                      { const uint32_t st = 0x0076C080u, sent = st + 0x540u;
+                        uint32_t n = vm_read32(sent);
+                        fprintf(stderr, "[evring] total=%u sent{due=%u next=%08X"
+                                        " prev=%08X}",
+                                vm_read32(st + 0x124u), vm_read32(sent + 8u),
+                                n, vm_read32(sent + 4u));
+                        for (int q = 0; q < 8 && n && n != sent; q++) {
+                            const uint32_t opd = vm_read32(n + 0xCu);
+                            fprintf(stderr, "  [%08X due=%u opd=%08X fn=%08X"
+                                            " arg=%08X]",
+                                    n, vm_read32(n + 8u), opd,
+                                    opd ? vm_read32(opd) : 0u,
+                                    vm_read32(n + 0x10u));
+                            n = vm_read32(n);
+                        }
+                        fprintf(stderr, "\n"); }
                   } }
                 if (pc >= 0xBFC5361Cu && pc <= 0xBFC538B0u) {
                     const uint32_t sb = 0x0076C080u;
@@ -878,6 +943,37 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                               100.0 * (double)cnt[best] / (double)total);
                       cnt[best] = 0;   /* consume for this report */
                   }
+                  /* The hottest bucket names WHERE the R3000 is; it cannot
+                   * say what it is waiting for. Dump the loop body and the
+                   * register file at the same instant, from the same thread,
+                   * so the two are readable together instead of guessed at.
+                   *
+                   * `top` is recomputed here because the report loop above
+                   * consumes cnt[] as it prints. PS1 RAM is little-endian in
+                   * guest memory (the interpreter uses lwbrx), so swap.
+                   * Register file: state + reg*4 (lwzx r11, r23, r9 at
+                   * 0x1068B0 with r9 = (reg & 0x1F) << 2). */
+                  { uint32_t top = 0; unsigned long tv = 0;
+                    for (int q = 0; q < NB; q++)
+                        if (cnt[q] > tv) { tv = cnt[q]; top = key[q]; }
+                    if (!top) top = key[0];
+                    { const uint32_t ram = vm_read32(0x001BC35Cu);
+                      const uint32_t base = (top & 0x001FFFC0u);
+                      fprintf(stderr, "[r3000mem] %08X:", 0x80000000u | base);
+                      for (int q = 0; q < 16; q++)
+                          fprintf(stderr, " %08X",
+                                  __builtin_bswap32(vm_read32(ram + base + q * 4u)));
+                      fprintf(stderr, "\n");
+                      { static const char* rn[32] = {
+                            "zr","at","v0","v1","a0","a1","a2","a3",
+                            "t0","t1","t2","t3","t4","t5","t6","t7",
+                            "s0","s1","s2","s3","s4","s5","s6","s7",
+                            "t8","t9","k0","k1","gp","sp","fp","ra" };
+                        fprintf(stderr, "[r3000reg]");
+                        for (int q = 1; q < 32; q++)
+                            fprintf(stderr, " %s=%08X", rn[q],
+                                    vm_read32(0x0076C080u + (uint32_t)q * 4u));
+                        fprintf(stderr, "\n"); } } }
                   for (int q = 0; q < NB; q++) { cnt[q] = 0; key[q] = 0; }
               }
           }

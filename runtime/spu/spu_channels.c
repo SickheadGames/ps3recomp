@@ -745,6 +745,78 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel)
  * ===========================================================================*/
 uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
 {
+    /* SPU_WHOPOLLS=<n>: rchcnt/park accounting PER SPU, printed every n calls
+     * with the pc each SPU is sitting at.
+     *
+     * SPU_CHHIST sums every SPU into one histogram, which is exactly the wrong
+     * shape for a deadlock: it showed rchcnt ch0/ch4 climbing past 1.7 billion
+     * while MFC_WrTagUpdate (ch23) stayed frozen, i.e. somebody polls forever
+     * and somebody else stopped doing DMA -- without saying whether that is one
+     * SPU or two. The freeze under investigation is the PPU-side spin in
+     * func_000D2298 waiting for spu4 to advance a counter at 0x002DF008, so
+     * which SPU is parked, and on what, is the whole question. */
+    { static int s_w = -1;
+      if (s_w < 0) { const char* e = getenv("SPU_WHOPOLLS");
+        s_w = e ? (atoi(e) > 0 ? atoi(e) : 4000000) : 0; }
+      if (s_w) { static unsigned long long c[8][40]; static unsigned long long n;
+          static uint32_t lastpc[8], lastst[8], lastmask[8];
+          static uint32_t lastsig[8][2], lastmb[8], lastrea[8];
+          static int lastrv[8], lastrd[8];
+          static uint32_t lastline[8][8];
+          const unsigned sp = (unsigned)(ctx->spu_id & 7u);
+          if (channel < 40u) c[sp][channel]++;
+          lastpc[sp] = (uint32_t)ctx->pc & SPU_LS_MASK;
+          lastst[sp] = ctx->event_status; lastmask[sp] = ctx->event_mask;
+          lastsig[sp][0] = ctx->ch_sig_notify[0].count;
+          lastsig[sp][1] = ctx->ch_sig_notify[1].count;
+          lastmb[sp] = ctx->ch_in_mbox.count;
+          lastrv[sp] = ctx->resv_valid; lastrea[sp] = ctx->resv_ea;
+          lastrd[sp] = (ctx->resv_valid && vm_base && ctx->resv_ea)
+                     ? (memcmp(vm_base + ctx->resv_ea, ctx->resv_line, 128) != 0)
+                     : -1;
+          for (int z = 0; z < 8; z++) {
+              const uint8_t* b8 = ctx->resv_line + z * 4;
+              lastline[sp][z] = ((uint32_t)b8[0] << 24) | ((uint32_t)b8[1] << 16)
+                              | ((uint32_t)b8[2] << 8) | b8[3];
+          }
+          if ((++n % (unsigned long long)s_w) == 0) {
+              fprintf(stderr, "[whopolls] %llu rchcnt calls\n", n);
+              for (unsigned q = 0; q < 8; q++) {
+                  int any = 0;
+                  for (unsigned k = 0; k < 40; k++) if (c[q][k]) any = 1;
+                  if (!any) continue;
+                  /* The channel state each poll is actually testing. Counts
+                   * alone cannot say whether a poll returns 0 or 1, and that is
+                   * the difference between "the SPU is not being told" and "the
+                   * SPU is told and ignores it". */
+                  fprintf(stderr, "   spu%u pc=0x%05X ev[st=%08X mask=%08X]"
+                                  " sig[%u %u] inmbox=%u", q, lastpc[q],
+                          lastst[q], lastmask[q], lastsig[q][0], lastsig[q][1],
+                          lastmb[q]);
+                  /* The reservation is the other half of an evmask=0x400 wait:
+                   * spu_resv_lost_poll returns immediately unless resv_valid,
+                   * so a cleared reservation is indistinguishable from "nobody
+                   * wrote the line" in event_status alone -- and they are
+                   * different bugs. diff says whether the line has actually
+                   * changed under the snapshot right now. */
+                  fprintf(stderr, " resv[v=%d ea=0x%08X diff=%d]",
+                          lastrv[q], lastrea[q], lastrd[q]);
+                  /* And the line itself. "The reservation is intact and the
+                   * line has not changed" still does not say what the SPU is
+                   * waiting FOR; the words do. Snapshot side, so it is exactly
+                   * what the SPU last read. */
+                  if (lastrv[q]) {
+                      fprintf(stderr, " line[");
+                      for (int z = 0; z < 8; z++)
+                          fprintf(stderr, "%s%08X", z ? " " : "", lastline[q][z]);
+                      fprintf(stderr, "]");
+                  }
+                  for (unsigned k = 0; k < 40; k++) if (c[q][k])
+                      fprintf(stderr, " ch%u=%llu", k, c[q][k]);
+                  fprintf(stderr, "\n");
+              }
+              fflush(stderr);
+          } } }
     /* SPU_CHHIST also covers rchcnt. It used to instrument only wrch/rdch,
      * which is the one place a parked persistent worker is guaranteed NOT to
      * appear: park_on_empty_inmbox halts from inside THIS function, so a

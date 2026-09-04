@@ -791,6 +791,44 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
     uint32_t tag  = spu->mfc_tag & 0x1F;
     int rc = 0;
 
+    /* SPU_WATCHEA=<hex guest addr>: report every DMA whose destination range
+     * covers one word, with the SPU id, its pc and the value the word holds
+     * after the transfer.
+     *
+     * Written for one question. func_000D2298 -- the R3000 event callback the
+     * scheduler fires at 0x106050 -- spins on
+     *
+     *     while (*(s + 0x88) != *(s + 0x00)) yield();     s = *(TOC-0x7D4C)
+     *                                                       = 0x002DEF80
+     *
+     * and a freeze pins it at produced=0xDD, consumed=0xDC: one short, forever.
+     * Nothing in that module's code stores +0x88, so the consumer count is
+     * written from outside -- an SPU DMA is the obvious candidate, and this
+     * says outright whether that is true. Watch 0x002DF008. */
+    { static int s_we = -2; static uint32_t s_wa;
+      if (s_we == -2) { const char* e = getenv("SPU_WATCHEA");
+                        s_we = e ? 1 : 0;
+                        s_wa = e ? (uint32_t)strtoul(e, 0, 16) : 0u; }
+      if (s_we && vm_base && (uint32_t)ea <= s_wa && s_wa < (uint32_t)ea + size) {
+          static unsigned long wn;
+          /* SPU_WATCHEA_EVERY=<n> (default 64): print every nth hit. 1
+           * shows the last transfers before a freeze, which a stride skips --
+           * but at ~1000 lines/second it also changes the timing enough to
+           * stop the freeze happening at all, so it is not the default. */
+          static unsigned long s_wev;
+          if (!s_wev) { const char* e2 = getenv("SPU_WATCHEA_EVERY");
+                        s_wev = e2 ? strtoul(e2, 0, 0) : 64ul;
+                        if (!s_wev) s_wev = 64ul; }
+          if (wn <= 12 || (wn % s_wev) == 0) {
+              uint32_t v; memcpy(&v, vm_base + s_wa, 4);
+              v = (v >> 24) | ((v >> 8) & 0xFF00u) | ((v << 8) & 0xFF0000u) | (v << 24);
+              fprintf(stderr, "[watchea] n=%lu spu%u cmd=0x%02X ea=0x%08X"
+                              " size=%u pc=0x%05X -> [0x%08X]=0x%08X\n",
+                      wn, spu->spu_id & 7u, cmd & 0xFFu, (uint32_t)ea, size,
+                      (uint32_t)spu->pc & SPU_LS_MASK, s_wa, v);
+          }
+      } }
+
     /* SPU_PUTEA=1: the first few FULL destination addresses per SPU. The 1 MB
      * bucket histogram showed spu1..3 writing only bucket 0 and spu0 buckets
      * 1..3, with nothing in bucket 4 -- where the composite samples PS1 VRAM
