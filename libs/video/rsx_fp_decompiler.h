@@ -75,6 +75,13 @@ int rsx_fp_decompile(const u8* ucode, u32 max_bytes, u32 ctrl, char* out, u32 ou
  * patched safely. */
 int rsx_fp_apply_alpha_test(char* hlsl, u32 out_size, u32 func, float ref);
 
+/* Scale texel-space (RSX_TEX_FMT_UNNORM) coordinates into HLSL's 0..1 range.
+ * unnorm_mask selects the units; dim[u] gives that unit's {width, height};
+ * cube units are skipped. Returns the number of Sample sites patched, or -1 if
+ * the buffer would overflow. A no-op when unnorm_mask is 0. */
+int rsx_fp_apply_unnorm_scale(char* hlsl, u32 hlsl_size, u32 unnorm_mask,
+                              const u32 dim[][2], u32 cube_mask);
+
 /* Decode NV4097_SET_ALPHA_REF for the active surface color format. Ordinary
  * integer render targets use the low 8 bits as UNORM8; W16Z16Y16X16 uses a
  * half float and X32/W32Z32Y32X32 use a 32-bit float. */

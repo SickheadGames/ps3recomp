@@ -3876,6 +3876,22 @@ static ID3D12PipelineState* get_pso(
     key = fnv1a(&fp_ctrl_key, sizeof(fp_ctrl_key), key);
     key = fnv1a(&cube_mask, sizeof(cube_mask), key);
     key = fnv1a(&vtex_mask, sizeof(vtex_mask), key);
+    /* Texel-addressed (RSX_TEX_FMT_UNNORM) units need their coordinates divided
+     * by the texture size in the shader -- D3D12 has no unnormalised addressing
+     * mode. The divisor is baked into the HLSL, so the sizes are part of the
+     * PSO identity and must be in the key. */
+    u32 unnorm_mask = 0;
+    u32 unnorm_dim[16][2] = {{0}};
+    for (u32 uu = 0; uu < 16; uu++) {
+        rsx_dsp_texture ut; rsx_dsp_get_texture(&g.rsx, uu, &ut);
+        if (!ut.enabled || !(ut.format & TEX_FMT_UNNORM)) continue;
+        if (!ut.width || !ut.height) continue;
+        unnorm_mask |= 1u << uu;
+        unnorm_dim[uu][0] = ut.width;
+        unnorm_dim[uu][1] = ut.height;
+    }
+    key = fnv1a(&unnorm_mask, sizeof(unnorm_mask), key);
+    if (unnorm_mask) key = fnv1a(unnorm_dim, sizeof(unnorm_dim), key);
     if (masked_layout) {
         static const u32 masked_layout_tag = 0x314B534Du; /* "MSK1" */
         const u32 payload_stride =
@@ -3968,6 +3984,17 @@ static ID3D12PipelineState* get_pso(
             rsx_fp_apply_alpha_test_buffered(
                 ps_hlsl, sizeof(ps_hlsl), rs.alpha_func) < 0)
             fi = -1;
+        if (fi > 0) {
+            const int np = rsx_fp_apply_unnorm_scale(
+                ps_hlsl, sizeof(ps_hlsl), unnorm_mask, unnorm_dim, cube_mask);
+            { static int n = 0;
+              if (n++ < 8)
+                  fprintf(stderr, "[unnorm] mask=0x%X cube=0x%X dim0=%ux%u"
+                                  " patched=%d\n",
+                          unnorm_mask, cube_mask, unnorm_dim[0][0],
+                          unnorm_dim[0][1], np); }
+            if (np < 0) fi = -1;
+        }
     } else {
         fi = rsx_fp_decompile_ex(
             fp_uc, fp_size, fp_ctrl, cube_mask,
@@ -3976,6 +4003,10 @@ static ID3D12PipelineState* get_pso(
             rsx_fp_apply_alpha_test(
                 ps_hlsl, sizeof(ps_hlsl), rs.alpha_func,
                 g.fp_alpha_ref) < 0)
+            fi = -1;
+        if (fi > 0 && rsx_fp_apply_unnorm_scale(
+                ps_hlsl, sizeof(ps_hlsl), unnorm_mask,
+                unnorm_dim, cube_mask) < 0)
             fi = -1;
     }
 #if defined(YZ_PERF_PROFILE)
@@ -6167,6 +6198,35 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
                   best_gen = sf_i->last_draw_generation;
               }
           } }
+        /* LD_UVDBG=1: the texture coordinates of the draw that samples the PS1
+         * framebuffer. Placed here rather than in fetch_batches because that
+         * function is not on this draw's path -- probing it printed nothing at
+         * all, which is how that was established.
+         *
+         * This is the last unmeasured link: the PS3 side binds all 1024x512 of
+         * PS1 VRAM as ONE texture, so which part reaches the screen is decided
+         * entirely by these UVs, and every pixel the PS1 draws lives at
+         * x >= 640 while columns 0..639 are black. */
+        { static int uvd = -1;
+          if (uvd < 0) uvd = getenv("LD_UVDBG") ? 1 : 0;
+          if (uvd && t.location == 1u && t.offset == 0x400000u) {
+              static unsigned long n = 0;
+              if (n++ < 4) {
+                  const u32 vbase = rsx_dsp_vertex_data_base_offset(&g.rsx);
+                  fprintf(stderr, "[uvdbg] unit=%u ps1fb %ux%u pitch=%u fmt=0x%02X"
+                                  " base=0x%X target=%u\n",
+                          u, t.width, t.height, t.pitch, t.format,
+                          vbase, target);
+                  for (u32 vi = 0; vi < 4; vi++) {
+                      float pos[4] = {0,0,0,1}, tc[4] = {0,0,0,1};
+                      const int okp = fetch_attr(0, vbase, vi, 0, pos);
+                      const int okt = fetch_attr(8, vbase, vi, 0, tc);
+                      fprintf(stderr, "[uvdbg]   v%u pos%s(%.1f %.1f) tc%s(%.4f %.4f)\n",
+                              vi, okp ? "" : "!", pos[0], pos[1],
+                              okt ? "" : "!", tc[0], tc[1]);
+                  }
+              }
+          } }
         if (sampled < 0 && getenv("LD_ALIAS_DBG")) {
             static u32 n_dbg = 0;
             if (n_dbg++ < 24) {
@@ -7730,6 +7790,34 @@ void rsx_live_draw_present(u32 buffer_id)
 {
     if (!g.ready) return;
 
+    /* LD_SURF_DUMP=<dir>: dump EVERY live surface once, with its non-black
+     * count, at LD_SURF_DUMP_FRAME (default 1200).
+     *
+     * LD_FRAME_DUMP only reads back the presented surface, which answers "is
+     * the screen black" (it is: nonblack=0 on every frame) but not WHERE the
+     * pixels stop. ps1_netemu composites PS1 VRAM into a 720x512 surface and
+     * then upscales into the presented 1280x720 one, so the interesting
+     * question is which of those is already empty. */
+    { static int done = 0; const char* sd = getenv("LD_SURF_DUMP");
+      u32 at = 1200; { const char* fe = getenv("LD_SURF_DUMP_FRAME");
+                       if (fe) at = (u32)strtoul(fe, 0, 0); }
+      if (sd && sd[0] && !done && g_ld_frames >= at) {
+          done = 1;
+          for (u32 i = 0; i < g.n_surfaces; i++) {
+              char path[MAX_PATH * 2];
+              snprintf(path, sizeof(path), "%s\\surf_%02u_%08X_%ux%u.ppm",
+                       sd, i, g.surfaces[i].offset,
+                       g.surfaces[i].w, g.surfaces[i].h);
+              const u64 nb = ld_dump_surface_ppm(path, &g.surfaces[i]);
+              fprintf(stderr, "[surf-dump] slot=%u %u:0x%08X %ux%u nonblack=%llu"
+                              " draw_gen=%u clear_gen=%u\n",
+                      i, g.surfaces[i].location, g.surfaces[i].offset,
+                      g.surfaces[i].w, g.surfaces[i].h,
+                      (unsigned long long)(nb == UINT64_MAX ? 0 : nb),
+                      g.surfaces[i].last_draw_generation,
+                      g.surfaces[i].last_clear_generation);
+          }
+      } }
     /* LD_FRAME_DUMP=<dir> [+ LD_FRAME_DUMP_EVERY=<n>, default 300]: write the
      * PRESENTED surface to a .ppm every n flips. The engine could already dump
      * a surface, but only at shutdown or behind the parity harness -- neither
