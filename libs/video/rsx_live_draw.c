@@ -8626,6 +8626,27 @@ void rsx_live_draw_present(u32 buffer_id)
                           if (w32[i]) { nz++; if (first == 0xFFFFFFFFu) first = i * 4u; }
                       fprintf(stderr, "[ps1] vram nonzero=%u/%u first=+0x%X\n",
                               nz, n, first == 0xFFFFFFFFu ? 0u : first);
+                      /* PS1_RINGDUMP=1: the last few GP0 command packets.
+                       *
+                       * func_0010F658 writes one 0x100-byte packet per batch:
+                       * a type word at +0 (it writes 3 in one variant and 2 in
+                       * another) and the payload from +0x10. The four GPU SPUs
+                       * consume every packet and never DMA a pixel to VRAM, so
+                       * the question is what these packets actually contain --
+                       * PS1 GP0 drawing commands, or only state and sync. */
+                      { static int rd2 = -1; static int shown = 0;
+                        if (rd2 < 0) rd2 = getenv("PS1_RINGDUMP") ? 1 : 0;
+                        if (rd2 && shown < 3 && rbase && roff >= 0x300u) {
+                            shown++;
+                            for (int k = 3; k >= 1; k--) {
+                                const u32 pk = rbase + ((roff - (u32)k * 0x100u) & 0x007FFFFFu);
+                                fprintf(stderr, "[ring] pkt@0x%08X type=%u:", pk,
+                                        vm_read32(pk));
+                                for (u32 q = 0; q < 12; q++)
+                                    fprintf(stderr, " %08X", vm_read32(pk + 0x10u + q * 4u));
+                                fprintf(stderr, "\n");
+                            }
+                        } }
                       { static u32 rdy = 0;
                         if (!rdy) { const char* re = getenv("PS1_VRAM_READY");
                                     rdy = re ? (u32)strtoul(re, 0, 0) : 20000u; }
