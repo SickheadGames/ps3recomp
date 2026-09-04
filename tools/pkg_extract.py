@@ -200,6 +200,13 @@ def main():
     print(f"rev=0x{rev:04X} keystream={used} items={item_count}"
           f"{'  (pycryptodome)' if _HAVE_PYCRYPTO else '  (pure-python AES)'}")
 
+    # --list: the file table alone. Decrypting a multi-GB package to find out what is
+    # in it is a slow way to ask a cheap question.
+    if "--list" in sys.argv:
+        for nm, fo, fs, k in names:
+            print(f"  {fs:>12}  {nm}  [{k}]")
+        return
+
     os.makedirs(outd, exist_ok=True)
     for nm, fo, fs, k in names:
         if only and os.path.basename(nm) != only:

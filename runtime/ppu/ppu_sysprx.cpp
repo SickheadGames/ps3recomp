@@ -627,6 +627,8 @@ extern "C" uint32_t ps3_spu_image_source_ea(uint32_t img_ea)
     return 0;
 }
 
+extern "C" void spu_raw_note_image(uint32_t src_ea, uint32_t entry);  /* runtime/spu/spu_raw.c */
+
 static void hle_sys_spu_image_import(ppu_context* ctx)
 {
     uint32_t img_ea = (uint32_t)ctx->gpr[3];
@@ -681,6 +683,11 @@ static void hle_sys_spu_image_import(ppu_context* ctx)
      * fingerprint of the ELF's own bytes -- without this the raw SPU path has no
      * way to ask whether the image it is about to run was lifted. */
     ps3_spu_image_record(img_ea, src_ea);
+    /* ...and ask that question now, while the ELF is still identified. A raw SPU
+     * is started by an MMIO store to its run-control register, with no syscall in
+     * between, so this import is the last point at which the image can be matched
+     * to a lifted entry (runtime/spu/spu_raw.c). No-op for a SPU-thread image. */
+    spu_raw_note_image(src_ea, entry);
     vm_write32(img_ea + 0x00, 0);                              /* type = USER */
     vm_write32(img_ea + 0x04, entry);
     vm_write32(img_ea + 0x08, nsegs ? segs_ea : 0);

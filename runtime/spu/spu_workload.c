@@ -422,7 +422,7 @@ static void spu_async_run(spu_async_job* j)
                  * (Declared by spu_lifted_job.h -- a local extern re-declaration
                  * here conflicts with the header's static inline under clang.) */
                 int32_t prc = spu_run_lifted_job_abi(tsp_spu_func_00000A00, ls,
-                                                     j->args_ea, 23, 1, j->have_r3 ? j->r3 : 0);
+                                                     j->args_ea, 23, 1, j->have_r3 ? j->r3 : 0, 0);
                 fprintf(stderr, "[cri] taskset policy RETURNED rc=%d\n", prc);
                 fflush(stderr);
                 free(ls); free(j); return;
@@ -636,7 +636,7 @@ static void spu_async_run(spu_async_job* j)
             }
             spu_serial_acquire();       /* one SPU task runs at a time (LBP_SPU_SERIAL) */
             int32_t rc = spu_run_lifted_job_abi(j->fn, ls, j->args_ea, j->image_id,
-                                                1, j->have_r3 ? j->r3 : 0);
+                                                1, j->have_r3 ? j->r3 : 0, 0);
             /* YDKJ_CRI_RESUME: a real SPURS task is PERSISTENT -- on yield (num=0)
              * the kernel re-enters it when work is signaled. Our HLE runs it once,
              * so it polls the (concurrently PPU-updated) eaContext, finds no work,
@@ -654,7 +654,7 @@ static void spu_async_run(spu_async_job* j)
                     uint32_t e2 = 0;
                     if (!spu_elf_load_to_ls(j->image, j->image_size, ls, &e2)) break;
                     rc = spu_run_lifted_job_abi(j->fn, ls, j->args_ea, j->image_id,
-                                                1, j->have_r3 ? j->r3 : 0);
+                                                1, j->have_r3 ? j->r3 : 0, 0);
                     if (g_cri_video_dma) {
                         fprintf(stderr, "[cri] RESUME: cri task DECODED real video (attempt %d)\n", attempt);
                         break;

@@ -3,6 +3,7 @@
  */
 
 #include "sys_fs.h"
+#include "../../libs/filesystem/edat.h"
 #include "../memory/vm.h"
 #include <string.h>
 #include <stdio.h>
@@ -165,6 +166,18 @@ void sys_fs_translate_path(const char* ps3_path, char* host_path, int host_path_
      * not, so they fall through to sagemono's mount-prefix stripping below. */
     const char* usrp = strstr(ps3_path, "USRDIR/");
     if (usrp) {
+        /* PS3_USRDIR_BASE: a title installed as a full /dev_hdd0/game/<ID> tree
+         * keeps its USRDIR there, not at the vfs root, so the flattening above
+         * sends it to a directory that does not exist. ps1_netemu writes its
+         * settings with a bare "/USRDIR/CONFIG" and read them back the same way;
+         * both missed, and it printed "save config file: /USRDIR/CONFIG" /
+         * "failed" on every boot. Opt-in so flattened trees keep the old path. */
+        const char* ub = getenv("PS3_USRDIR_BASE");
+        if (ub && *ub) {
+            snprintf(host_path, (size_t)host_path_size, "%s/%s", ub, usrp);
+            fs_normalize_sep(host_path);
+            return;
+        }
         rel = usrp;                        /* "USRDIR/..." */
     } else {
         /* Otherwise strip a known mount prefix so this sys_fs layer resolves to the
@@ -279,6 +292,14 @@ int64_t sys_fs_open(ppu_context* ctx)
                 fprintf(stderr, "[TITLEFIX] redirected empty-filename title open -> %s\n", host_path); fflush(stderr); }
         }
     } }
+
+    /* NPDRM: a file that begins "NPD " is an EDAT, and on hardware the guest never
+     * sees its ciphertext -- sceNpDrmIsAvailable primes the kernel and cellFsOpen
+     * returns plaintext. Decrypt once into a cache file and open that instead, so
+     * every read/seek/stat path below stays unchanged. (libs/filesystem/edat.c) */
+    { char dec_path[1200];
+      const char* use = edat_resolve(host_path, dec_path, sizeof dec_path);
+      if (use != host_path) snprintf(host_path, sizeof host_path, "%s", use); }
 
     /* Find free fd slot */
     int slot = -1;

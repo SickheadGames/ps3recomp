@@ -17,6 +17,8 @@
 
 /* defined in lv2_register.c — the SPU thread's 256 KB local store */
 extern uint8_t* spu_thread_get_local_store(uint32_t tid);
+extern uint32_t spu_thread_get_group_id(uint32_t tid);
+extern uint32_t spu_thread_take_pending_inmbox(uint32_t tid);
 
 int32_t spu_lifted_fallback(uint32_t tid, uint32_t args_ea,
                             uint32_t args_size, void* user)
@@ -43,7 +45,22 @@ int32_t spu_registry_fallback(uint32_t tid, uint32_t args_ea,
     spu_lifted_entry_fn fn =
         spu_workload_find_img((uint64_t)(uintptr_t)user, &image_id);
     if (!fn) return -1;
+    /* Raw SPU thread, not a SPURS job: it is a persistent worker. Arm parking so
+     * it halts at its idle mailbox poll instead of spinning, hand it any command
+     * the PPU wrote with sys_spu_thread_write_spu_mb, and identify the context so
+     * its reply can be routed back to the connected event queue. */
+    /* Block on an empty inbound mailbox rather than parking. g_spu_force_ch_block
+     * is exactly the switch spu_raw.c uses for the same situation: a raw SPU on
+     * its own host thread whose mailboxes the PPU pokes. A blocking rdch keeps
+     * this thread's C stack (and therefore the SPU's registers) alive across the
+     * wait, which park-and-restart cannot do. */
+    { extern int g_spu_force_ch_block; g_spu_force_ch_block = 1; }
+    spu_run_opts opts;
+    opts.inmbox_val    = spu_thread_take_pending_inmbox(tid);
+    opts.park_on_empty = 0;
+    opts.spu_id        = tid;
+    opts.group_id      = spu_thread_get_group_id(tid);
     return spu_run_lifted_job_abi(fn, spu_thread_get_local_store(tid), args_ea,
-                                  image_id, 0, NULL);
+                                  image_id, 0, NULL, &opts);
 }
 

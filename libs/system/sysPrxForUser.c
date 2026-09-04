@@ -865,6 +865,50 @@ s32 _sys_heap_delete_heap(sys_heap_t heap)
     return sys_heap_destroy_heap(heap);
 }
 
+/* The plain libc allocator sysPrxForUser exports, as opposed to the sys_heap_*
+ * family above. It was missing entirely, so every caller got the generic
+ * unresolved-NID stub: CELL_OK with r3 left holding whatever was there, i.e. a
+ * garbage pointer that the caller then wrote through. ps1_netemu hits it in
+ * cellUsbdInit (which fails), and RPCS3's NID table names it _sys_malloc.
+ *
+ * Same one bump allocator as everything else here -- forwarders, not a second
+ * implementation. */
+void* _sys_malloc(u32 size)
+{
+    return (void*)(uintptr_t)yz_heap_alloc(size, 16);
+}
+
+void* _sys_memalign(u32 align, u32 size)
+{
+    return (void*)(uintptr_t)yz_heap_alloc(size, align);
+}
+
+s32 _sys_free(void* ptr)
+{
+    yz_heap_free((u32)(uintptr_t)ptr);
+    return CELL_OK;
+}
+
+void* _sys_realloc(void* ptr, u32 size)
+{
+    /* Bump-allocated blocks carry their bin in the header, so an in-place grow is
+     * only safe within the same power-of-two bin. Anything larger moves, and the
+     * old block goes back on its free list. The copy length is the SMALLER of the
+     * two sizes -- reading the full new size off a short block would walk past it. */
+    if (!ptr) return (void*)(uintptr_t)yz_heap_alloc(size, 16);
+    u32 old = (u32)(uintptr_t)ptr;
+    if (!size) { yz_heap_free(old); return NULL; }
+    u32 b_old = (old >= YZ_HEAP_BASE && old < YZ_HEAP_END &&
+                 vm_read32(old - 12) == YZ_HEAP_MAGIC) ? vm_read32(old - 8) : 0;
+    u32 fresh = yz_heap_alloc(size, 16);
+    if (!fresh) return NULL;
+    u32 copy = size;
+    if (b_old && b_old < YZ_BINS && (1u << b_old) < copy) copy = (1u << b_old);
+    for (u32 i = 0; i + 4 <= copy; i += 4) vm_write32(fresh + i, vm_read32(old + i));
+    yz_heap_free(old);
+    return (void*)(uintptr_t)fresh;
+}
+
 void* _sys_heap_malloc(sys_heap_t heap, u32 size)
 {
     return sys_heap_malloc(heap, size);
