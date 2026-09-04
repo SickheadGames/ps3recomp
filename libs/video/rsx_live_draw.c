@@ -8651,8 +8651,13 @@ void rsx_live_draw_present(u32 buffer_id)
                             const u32 tot_size = PS1LE(0x0124);
                             fprintf(stderr, "[ps1ev] ram=0x%08X  EvCB tbl=0x%08X size=%u\n",
                                     ram, tot_evcb, tot_size);
-                            static const u32 slot[3] = { 0xB21Cu, 0xB224u, 0xB228u };
-                            for (int k = 0; k < 3; k++) {
+                            /* All FIVE slots CdInit fills, not just the three
+                             * the poll loop reads: -0x4de8/-0x4de4/-0x4de0/
+                             * -0x4ddc/-0x4dd8 = 0xB218..0xB228. All zero means
+                             * CdInit never ran; a mix means it ran partway. */
+                            static const u32 slot[5] = { 0xB218u, 0xB21Cu, 0xB220u,
+                                                         0xB224u, 0xB228u };
+                            for (int k = 0; k < 5; k++) {
                                 const u32 h = PS1LE(slot[k]);
                                 fprintf(stderr, "[ps1ev]   slot 0x%04X handle=0x%08X",
                                         slot[k], h);
