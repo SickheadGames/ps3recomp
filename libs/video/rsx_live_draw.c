@@ -6269,7 +6269,44 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
     u32 texture_mask = 0;
     for (u32 u = 0; u < SRV_TABLE_SIZE; u++) slots[u] = SRV_WHITE;
     for (u32 u = 0; u < SMP_TABLE_SIZE; u++) smp_slots[u] = SMP_DEFAULT;
-    for (u32 u = 0; u < SRV_TABLE_SIZE; u++) {
+    /* LD_UNITS=1: every enabled texture unit of every draw that samples PS1
+     * VRAM, once per distinct combination.
+     *
+     * ps1_netemu's display composite is a Cg program picked from seven
+     * (CG_fp_gradient / orientation / mofix / smart / upscale / upscale_smart /
+     * sharpen) and its uniforms are texture0, texture1 and hwidth -- TWO
+     * textures. Every probe here so far has looked at unit 0 only, so "the
+     * renderer reads the right bytes" was never actually tested for the second
+     * one. This lists them. */
+    { static int lu = -1; static u32 seen[8]; static int ns;
+      if (lu < 0) lu = getenv("LD_UNITS") ? 1 : 0;
+      if (lu) {
+          u32 key = 0; int ps1 = 0;
+          for (u32 q = 0; q < SRV_TABLE_SIZE; q++) {
+              rsx_dsp_texture tq; rsx_dsp_get_texture(&g.rsx, q, &tq);
+              if (!tq.enabled) continue;
+              key = key * 31u + (tq.offset ^ (tq.format << 8) ^ (q << 24));
+              if (tq.location == 1u && tq.offset >= 0x400000u &&
+                  tq.offset < 0x480000u) ps1 = 1;
+          }
+          if (ps1) {
+              int fresh = 1;
+              for (int z = 0; z < ns; z++) if (seen[z] == key) fresh = 0;
+              if (fresh && ns < 8) {
+                  seen[ns++] = key;
+                  fprintf(stderr, "[units] draw sampling PS1 VRAM:");
+                  for (u32 q = 0; q < SRV_TABLE_SIZE; q++) {
+                      rsx_dsp_texture tq; rsx_dsp_get_texture(&g.rsx, q, &tq);
+                      if (!tq.enabled) continue;
+                      fprintf(stderr, " u%u[%u:0x%08X fmt=0x%02X %ux%u p=%u]",
+                              q, tq.location, tq.offset, tq.format,
+                              tq.width, tq.height, tq.pitch);
+                  }
+                  fprintf(stderr, "\n");
+              }
+          }
+      } }
+    for (u32 u = 0; u < SRV_TABLE_SIZE; u++) {
         rsx_dsp_texture t; rsx_dsp_get_texture(&g.rsx, u, &t);
         if (!t.enabled) continue;
         texture_mask |= 1u << u;
