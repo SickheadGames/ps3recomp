@@ -8626,6 +8626,48 @@ void rsx_live_draw_present(u32 buffer_id)
                           if (w32[i]) { nz++; if (first == 0xFFFFFFFFu) first = i * 4u; }
                       fprintf(stderr, "[ps1] vram nonzero=%u/%u first=+0x%X\n",
                               nz, n, first == 0xFFFFFFFFu ? 0u : first);
+                      /* PS1_EVENTS=1: the three kernel events the BIOS polls.
+                       *
+                       * The BIOS parks at 0xBFC53840 calling TestEvent
+                       * (B-table 0x0B, trampoline 0xBFC58B60) on three
+                       * descriptors loaded from PS1 kernel RAM 0x0000B21C,
+                       * 0x0000B224 and 0x0000B228. Reading their event CLASS
+                       * says what it is waiting for; the PS1 CD class is
+                       * 0xF0000003.
+                       *
+                       * PS1 RAM base is *(TOC-0x79D4) = 0x00770780, and the
+                       * interpreter reads PS1 memory with lwbrx -- PS1 RAM is
+                       * stored LITTLE-endian in guest memory, so every read
+                       * here has to be byte-swapped. Reading it big-endian
+                       * would produce plausible-looking nonsense. */
+                      { static int ev = -1; static int ev_done = 0;
+                        if (ev < 0) ev = getenv("PS1_EVENTS") ? 1 : 0;
+                        static int ev_beats = 0;
+                        if (ev && !ev_done && ++ev_beats >= 3) {
+                            ev_done = 1;
+                            const u32 ram = vm_read32(0x001BC35Cu);
+                            #define PS1LE(a) __builtin_bswap32(vm_read32((ram) + (u32)(a)))
+                            const u32 tot_evcb = PS1LE(0x0120);
+                            const u32 tot_size = PS1LE(0x0124);
+                            fprintf(stderr, "[ps1ev] ram=0x%08X  EvCB tbl=0x%08X size=%u\n",
+                                    ram, tot_evcb, tot_size);
+                            static const u32 slot[3] = { 0xB21Cu, 0xB224u, 0xB228u };
+                            for (int k = 0; k < 3; k++) {
+                                const u32 h = PS1LE(slot[k]);
+                                fprintf(stderr, "[ps1ev]   slot 0x%04X handle=0x%08X",
+                                        slot[k], h);
+                                if ((h >> 24) == 0xF1u && tot_evcb) {
+                                    const u32 idx = h & 0xFFFFu;
+                                    const u32 cb  = (tot_evcb & 0x1FFFFFu) + idx * 0x1Cu;
+                                    fprintf(stderr, "  idx=%u class=0x%08X status=0x%08X"
+                                                    " spec=0x%08X mode=0x%08X",
+                                            idx, PS1LE(cb + 0), PS1LE(cb + 4),
+                                            PS1LE(cb + 8), PS1LE(cb + 12));
+                                }
+                                fprintf(stderr, "\n");
+                            }
+                            #undef PS1LE
+                        } }
                       /* PS1_RINGDUMP=1: the last few GP0 command packets.
                        *
                        * func_0010F658 writes one 0x100-byte packet per batch:
