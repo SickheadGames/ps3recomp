@@ -8617,7 +8617,17 @@ void rsx_live_draw_present(u32 buffer_id)
                  * and our compositing drops them. Count non-zero words rather
                  * than guessing from a window capture -- PrintWindow on a D3D12
                  * swapchain cannot tell "black" from "capture failed". */
-                { const u8* fb = guest_ptr(1u, 0x400000u, 1024u * 512u * 2u);
+                { const u8* fb = guest_ptr(1u, 0x400000u, 1024u * 512u * 2u);
+                  /* The guest EA of PS1 VRAM, once. Watching 0xC0400000 --
+                   * derived from cellGcmSys's localAddress -- caught no writes
+                   * at all from either the PPU store path or SPU DMA, which is
+                   * either a real finding or a wrong address. This says which,
+                   * instead of assuming. */
+                  { static int shown = 0;
+                    extern uint8_t* vm_base;
+                    if (!shown && fb && vm_base) { shown = 1;
+                        fprintf(stderr, "[ps1] VRAM guest EA = 0x%08X\n",
+                                (u32)(size_t)(fb - vm_base)); } }
                   if (!fb) fprintf(stderr, "[ps1] vram: not mapped\n");
                   else {
                       u32 nz = 0, first = 0xFFFFFFFFu, n = 1024u * 512u / 2u;
