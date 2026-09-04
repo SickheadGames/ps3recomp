@@ -1787,7 +1787,17 @@ static void decode_texel(u32 base_fmt, const u8* p, u32 remap, u8 d[4])
     }
     case TEX_FMT_A1R5G5B5: {
         const u16 v = (u16)((p[0] << 8) | p[1]);
-        s[0] = (v & 0x8000) ? 255 : 0;
+        /* LD_FORCE_A1_OPAQUE=1: experiment, not a fix. A PS1 15-bit pixel uses
+         * the top bit as a semi-transparency FLAG, and it is clear for ordinary
+         * opaque pixels -- so decoding it as A1R5G5B5 alpha gives alpha=0 for
+         * essentially the whole framebuffer. If the pipeline then blends on
+         * source alpha, every pixel is discarded and the surface reads black,
+         * which is exactly what LD_SURF_DUMP reports for all nine surfaces.
+         * This flips alpha to opaque so that theory can be tested in one run
+         * instead of argued about. */
+        { static int fo = -1;
+          if (fo < 0) fo = getenv("LD_FORCE_A1_OPAQUE") ? 1 : 0;
+          s[0] = fo ? 255 : ((v & 0x8000) ? 255 : 0); }
         s[1] = (u8)(((v >> 10) & 0x1F) * 255 / 31);
         s[2] = (u8)(((v >> 5) & 0x1F) * 255 / 31);
         s[3] = (u8)((v & 0x1F) * 255 / 31); break;
@@ -6605,8 +6615,19 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtv_handle(LD_SWAP_BUFFERS + target);
     if (mask & (RSX_CLEAR_COLOR_R | RSX_CLEAR_COLOR_G | RSX_CLEAR_COLOR_B | RSX_CLEAR_COLOR_A)) {
         const u32 c = rsx_dsp_clear_color(&g.rsx);
-        const float col[4] = { ((c >> 16) & 0xFF) / 255.0f, ((c >> 8) & 0xFF) / 255.0f,
-                               (c & 0xFF) / 255.0f, ((c >> 24) & 0xFF) / 255.0f };
+        float col[4] = { ((c >> 16) & 0xFF) / 255.0f, ((c >> 8) & 0xFF) / 255.0f,
+                         (c & 0xFF) / 255.0f, ((c >> 24) & 0xFF) / 255.0f };
+        /* LD_CLEAR_TEST=1: clear to magenta instead of the guest's colour.
+         *
+         * This validates the MEASUREMENT, not the renderer. LD_SURF_DUMP
+         * reports nonblack=0 for every surface, and every conclusion drawn from
+         * that depends on the readback actually being able to see a non-black
+         * pixel. If magenta clears still read back as 0, the readback is broken
+         * and those conclusions are void. Establish that X would be visible
+         * before concluding X never happens. */
+        { static int ct = -1;
+          if (ct < 0) ct = getenv("LD_CLEAR_TEST") ? 1 : 0;
+          if (ct) { col[0] = 1.0f; col[1] = 0.0f; col[2] = 1.0f; col[3] = 1.0f; } }
         g.list->lpVtbl->ClearRenderTargetView(g.list, rtv, col, 0, NULL);
         ld_surface_note_write(target, LD_SURFACE_WRITE_CLEAR);
     }
