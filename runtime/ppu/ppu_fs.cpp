@@ -16,6 +16,7 @@
 #include "ppu_recomp.h"      /* ppu_context */
 #include "../../libs/filesystem/edat.h"
 #include "ps3emu/nid.h"      /* ps3_compute_nid */
+#include "ps3emu/guest_call.h" /* ps3_invoke_guest: AIO completion is a guest OPD */
 #include "sdata_decrypt.h"   /* SDATA/EDAT (NPD) decryption for cellFsSdataOpen */
 #include <stdint.h>
 #include <stdio.h>
@@ -638,6 +639,81 @@ static void cellFsFsync(ppu_context* ctx)
  * grow files on write, so accepting is correct -- no preallocation needed. */
 static void cellFsAllocateFileAreaWithoutZeroFill(ppu_context* ctx) { ctx->gpr[3] = CELL_OK; }
 
+/* ---- cellFs AIO -----------------------------------------------------------
+ *
+ * Scott Pilgrim loads everything through cellFsAioRead: it opens gamedata.fat
+ * with cellFsOpen and then never calls cellFsRead again. With the AIO NIDs
+ * unresolved, its loader thread submitted requests that nothing ever completed
+ * and the whole boot parked -- one open, no reads, and the main thread spinning.
+ *
+ * CellFsAio, big-endian, 0x28 bytes:
+ *   0x00 u32 fd    0x08 u64 offset    0x10 u32 buf    0x18 u64 size    0x20 u64 user_data
+ *
+ * The completion callback is (CellFsAio* aio, s32 error, s32 id, u64 size).
+ *
+ * ponytail: the read runs synchronously and the callback fires before the
+ * submit call returns. A title that submits, THEN arms the thing the callback
+ * signals, would miss it -- move completion to a worker thread if one shows up.
+ */
+#ifdef _WIN32
+#  define HOST_FSEEK64(f,off) _fseeki64((f), (__int64)(off), SEEK_SET)
+#else
+#  define HOST_FSEEK64(f,off) fseeko((f), (off_t)(off), SEEK_SET)
+#endif
+
+static uint32_t guest_be32(uint32_t a)
+{
+    if (ppu_vm_size && (uint64_t)a + 4 > ppu_vm_size) return 0;
+    return ((uint32_t)vm_base[a] << 24) | ((uint32_t)vm_base[a+1] << 16) |
+           ((uint32_t)vm_base[a+2] << 8) | (uint32_t)vm_base[a+3];
+}
+static uint64_t guest_be64(uint32_t a)
+{
+    return ((uint64_t)guest_be32(a) << 32) | guest_be32(a + 4);
+}
+
+static void cellFsAioInit(ppu_context* ctx)   { ctx->gpr[3] = CELL_OK; }
+static void cellFsAioFinish(ppu_context* ctx) { ctx->gpr[3] = CELL_OK; }
+/* Nothing is ever outstanding, so a cancel has nothing to find. Real cellFs
+ * answers CELL_FS_ENOENT for an unknown id and callers treat that as "already
+ * done", which is exactly true here. */
+static void cellFsAioCancel(ppu_context* ctx) { ctx->gpr[3] = CELL_OK; }
+
+static void cellFsAioRead(ppu_context* ctx)
+{
+    uint32_t aio    = (uint32_t)ctx->gpr[3];
+    uint32_t id_ptr = (uint32_t)ctx->gpr[4];
+    uint32_t cb_opd = (uint32_t)ctx->gpr[5];
+
+    int      fd     = (int)guest_be32(aio + 0x00);
+    uint64_t offset = guest_be64(aio + 0x08);
+    uint32_t buf    = guest_be32(aio + 0x10);
+    uint64_t size   = guest_be64(aio + 0x18);
+
+    static int32_t s_next_id = 1;
+    int32_t id = s_next_id++;
+    if (id_ptr) vm_write32(id_ptr, (uint32_t)id);
+
+    size_t n = 0;
+    int32_t err = CELL_FS_ENOENT;
+    if (fd >= 0 && fd < FS_MAX && g_files[fd]) {
+        if (ppu_vm_size && (uint64_t)buf + size > ppu_vm_size) size = ppu_vm_size - buf;
+        fs_prefault(buf, size);
+        /* AIO reads are absolute -- they do not disturb the fd's own file
+         * position, and the guest interleaves them freely across threads. */
+        if (HOST_FSEEK64(g_files[fd], offset) == 0)
+            n = fread(vm_base + buf, 1, (size_t)size, g_files[fd]);
+        err = CELL_OK;
+    }
+    if (getenv("PS3_FSLOG"))
+        fprintf(stderr, "[fs] aio read id=%d fd=%d off=%llu size=%llu -> %zu\n",
+                id, fd, (unsigned long long)offset, (unsigned long long)size, n);
+
+    ctx->gpr[3] = CELL_OK;
+    if (cb_opd) ps3_invoke_guest(cb_opd, aio, (uint64_t)(int64_t)err,
+                                 (uint64_t)(int64_t)id, (uint64_t)n, 0, 0, 0, 0);
+}
+
 extern "C" void ppu_fs_register(void)
 {
     ps3_hle_register_ctx(ps3_compute_nid("cellFsOpen"),     "cellFsOpen",     cellFsOpen);
@@ -660,4 +736,10 @@ extern "C" void ppu_fs_register(void)
     ps3_hle_register_ctx(ps3_compute_nid("cellFsFsync"),    "cellFsFsync",    cellFsFsync);
     ps3_hle_register_ctx(ps3_compute_nid("cellFsAllocateFileAreaWithoutZeroFill"),
                          "cellFsAllocateFileAreaWithoutZeroFill", cellFsAllocateFileAreaWithoutZeroFill);
+    /* AIO by literal import NID -- ps3_compute_nid() of the friendly name does
+     * not match the exported symbols. */
+    ps3_hle_register_ctx(0xDB869F20u, "cellFsAioInit",   cellFsAioInit);
+    ps3_hle_register_ctx(0x9F951810u, "cellFsAioFinish", cellFsAioFinish);
+    ps3_hle_register_ctx(0xC1C507E7u, "cellFsAioRead",   cellFsAioRead);
+    ps3_hle_register_ctx(0x7F13FC8Cu, "cellFsAioCancel", cellFsAioCancel);
 }

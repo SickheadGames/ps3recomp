@@ -808,7 +808,19 @@ s32 cellSpursCreateTask(CellSpursTaskset* taskset, CellSpursTaskId* taskId,
             s_tasks[i].exitCode = 0;
             s_tasks[i].entryPoint = elf;
 
-            if (taskId_h) *taskId_h = s_tasks[i].id;
+            /* The guest reads this out-param BIG-ENDIAN, and a native store
+             * put it in host order: task 1 came back to the game as 0x01000000,
+             * which it then handed to _cellSpursSendSignal. No task by that id
+             * exists, the signal was dropped, and the SPU task sat in
+             * WAIT_SIGNAL while the PPU waited on the event flag it would have
+             * set -- a two-sided deadlock from one missing byte swap.
+             *
+             * Hand back the SLOT INDEX, not the global counter: `i` is what
+             * spurs_taskset_add_task() sets as the taskset's bitset bit and
+             * what spu_taskset_signal_task() looks up, so the id the guest
+             * signals with has to be the same number. */
+            if (taskId) vm_write32((u32)(uintptr_t)taskId, i);
+            (void)taskId_h;
             taskset->taskCount++;
 
             /* Register the task in the REAL BE taskset: writes task_info[slot]
@@ -2520,11 +2532,22 @@ s32 _cellSpursQueueInitialize(u64 spurs_ea, u64 taskset_ea, u64 queue_ea,
      * queue to reason about. */
     uint32_t q = (uint32_t)queue_ea;
     for (uint32_t o = 0; o < 128; o += 4) vm_write32(q + o, 0);
+    /* W3 at +0x0C is the ring modulus the consumer reduces indices by: the
+     * empty test is (W1-W0) mod 2*W3 and the buffer slot is index mod W3
+     * (derived at 0x12914..0x129B8). Leaving it zero degenerated both and made
+     * the queue look permanently empty no matter what a producer wrote. */
+    vm_write32(q + 0x0C, depth);
     vm_write32(q + 0x10, size);
     vm_write32(q + 0x14, depth);
     vm_write64(q + 0x18, (u64)(uint32_t)buffer_ea);
-    vm_write32(q + 0x24, direction);
-    vm_write32(q + 0x2C, 1);
+    /* NOT direction at +0x24 and NOT init at +0x2C. Both sit inside the
+     * 16-byte group at +0x20..+0x2F that the consumer owns and shifts wholesale
+     * (shlqbyi <group>,1 at 0x12A0C). The trace shows the two values we used to
+     * write there marching through it one byte per dequeue --
+     *   +0x24: 00000002 -> 00000200 -> 00020000 -> 02000000
+     *   +0x2C: 00000001 -> 00000100 -> 00010000 -> 01000000
+     * -- i.e. we were feeding garbage into the SPU's own state every cycle.
+     * Whatever holds direction/init, it is not these offsets. */
     vm_write64(q + 0x70, (u64)(uint32_t)taskset_ea);
     memset(vm_base + (uint32_t)buffer_ea, 0, (size_t)size * depth);
 
@@ -2582,61 +2605,49 @@ s32 cellSpursQueuePushBody(u64 queue_ea, u64 data_ea, u32 isBlocking)
     uint32_t tsp = (uint32_t)vm_read64(q + 0x70);      /* eaSignal: taskset */
     if (!sz || !dep || !buf) return CELL_SPURS_TASK_ERROR_INVAL;
 
-    /* Candidate push counter: the u16 at +0x0C, the push1 half of the pointer
-     * pair the consumer differences at 0x12914..0x129D0. Big-endian by hand --
-     * this is guest memory, not a host struct. */
-    uint8_t* qp  = vm_base + q;
-    uint32_t cur = ((uint32_t)qp[0x0C] << 8) | qp[0x0D];
-    uint32_t slot = cur % dep;
+    /* Derived ring model (see PROGRESS.md phase 22). Working the dataflow of
+     * the consumer's decision at 0x12914..0x129D0 backwards:
+     *
+     *   r11 = normalise(W0)        W0 = queue+0x00
+     *   r2  = normalise(W1)        W1 = queue+0x04
+     *   r60 = W3                   W3 = queue+0x0C
+     *     where normalise(v) is  cgti/nor/selb  ==  (v >= 0 ? v : ~v)
+     *
+     *   r81 = r2 - r11
+     *   r79 = (r2 + r60) - (r11 - r60)  =  r2 - r11 + 2*r60
+     *   r68 = (r11 > r2) ? r79 : r81    =  (r2 - r11) mod 2*r60
+     *   ceqi r77, r68, 0                -> the EMPTY test
+     *
+     * and, separately at 0x129A8..0x129B8,
+     *
+     *   r14 = (r60 > r11) ? r11 : r11 - r60   =  index mod r60
+     *
+     * which is the buffer slot. So this is an ordinary ring: W0 is the pop
+     * index, W1 the push index, indices run modulo 2*W3, and the slot is the
+     * index modulo W3 -- the standard scheme that keeps "full" distinguishable
+     * from "empty". W3 is therefore the depth.
+     *
+     * And that is the bug: the initialiser left queue+0x0C at ZERO, so r60 = 0
+     * and the whole computation degenerates -- occupancy is (W1-W0) mod 0 and
+     * the slot is index mod 0. With both indices at 0 the empty test is
+     * trivially true, which is precisely why the consumer parked every time and
+     * never once read the element buffer, whatever the producer wrote. */
+    uint8_t* qp = vm_base + q;
+
+    int32_t  sync  = (int32_t)vm_read32(q + 0x00);          /* W0, pop  */
+    int32_t  tail  = (int32_t)vm_read32(q + 0x04);          /* W1, push */
+    int32_t  mod   = (int32_t)vm_read32(q + 0x0C);          /* W3       */
+    if (mod <= 0) mod = (int32_t)dep;                       /* pre-fix queues */
+
+    int32_t  nsync = (sync < 0) ? ~sync : sync;             /* normalise */
+    int32_t  cur   = (tail < 0) ? ~tail : tail;
+    uint32_t slot  = (uint32_t)(cur % mod);
 
     memcpy(vm_base + buf + (size_t)slot * sz, vm_base + (uint32_t)data_ea, sz);
 
-    uint32_t nxt = (cur + 1) & 0xFFFF;
-    qp[0x0C] = (uint8_t)(nxt >> 8);
-    qp[0x0D] = (uint8_t)nxt;
-
-    /* Participate in the +0x00 counting handshake. Observed SPU transitions,
-     * with the line traced either side of every atomic:
-     *
-     *   wait side  (pc 0x12AA0):  v -> -(v+1)      0->-1, 1->-2, 2->-3
-     *   grant side (pc 0x12D2C): -v ->  v         -1->1, -2->2, -3->3
-     *
-     * so a negative value is "|v| consumers parked" and a positive one is
-     * "v items available". Pushing beside that word without ever touching it is
-     * what left the two sides ping-ponging forever: the producer is supposed to
-     * be the party that grants. Mirror the grant when someone is waiting, and
-     * otherwise just publish one more item. */
-    /* The consumer normalises both +0x00 and +0x04 with the idiom
-     *     cgti $rf, $rv, -1 ; nor $rc, $rv, $rv ; selb $rn, $rc, $rv, $rf
-     * i.e. "if v >= 0 use v else use ~v" -- a pointer with a flag parked in the
-     * sign bit -- and then DIFFERENCES the two (0x12914..0x129D0) to decide
-     * whether the queue is empty. So they are the head/tail pair, +0x00 the
-     * side the consumer advances and +0x04 the side the producer owns.
-     *
-     * Driving +0x00 from here (v<0 ? -v : v+1, mirroring the grant at 0x12D2C)
-     * was tried and is WRONG: the magnitude ran away to 383 within a handful of
-     * pushes instead of settling, and the consumer still never read the buffer.
-     * Advance the producer's own pointer instead and leave the consumer's
-     * alone. `sync` stays read-only, for the log. */
-    /* TWO POINTER MODELS WERE TRIED HERE AND BOTH ARE WRONG. Recorded so the
-     * next person does not spend the time again:
-     *
-     *  a) driving +0x00 as a grant (v<0 ? -v : v+1, mirroring pc 0x12D2C) --
-     *     the magnitude ran away to 383 within a handful of pushes instead of
-     *     settling, and the consumer still never read the element buffer;
-     *  b) advancing +0x04 as the producer-owned tail, sign-normalised the way
-     *     the consumer does -- no effect either, same result.
-     *
-     * In every configuration the consumer has never issued a single DMA into
-     * the element buffer (0x032B2A00..0x032B4A00), which is the one measurement
-     * that would confirm a model. Both pointers are therefore left ALONE and
-     * read only for the log: what is written below is exactly the part that has
-     * evidence behind it (the element bytes, the +0x0C fill count the consumer
-     * was observed decrementing, and the waiter wake). */
-    int32_t sync  = (int32_t)vm_read32(q + 0x00);
-    int32_t nsync = sync;
-    int32_t tail  = (int32_t)vm_read32(q + 0x04);
-    int32_t ntail = tail;
+    int32_t  nxt   = (cur + 1) % (2 * mod);
+    int32_t  ntail = nxt;
+    vm_write32(q + 0x04, (uint32_t)ntail);
 
     /* Waiter ring at +0x20: byte[0] = count, byte[1..12] = task ids. */
     uint32_t waiters = qp[0x20];
@@ -2928,11 +2939,22 @@ s32 _cellSpursLFQueueInitialize(u64 owner_ea, u64 queue_ea, u64 buffer_ea,
     uint32_t q = (uint32_t)queue_ea;
     for (uint32_t o = 0; o < 128; o += 4) vm_write32(q + o, 0);
 
+    /* W3 at +0x0C is the ring modulus the consumer reduces indices by: the
+     * empty test is (W1-W0) mod 2*W3 and the buffer slot is index mod W3
+     * (derived at 0x12914..0x129B8). Leaving it zero degenerated both and made
+     * the queue look permanently empty no matter what a producer wrote. */
+    vm_write32(q + 0x0C, depth);
     vm_write32(q + 0x10, size);
     vm_write32(q + 0x14, depth);
     vm_write64(q + 0x18, (u64)(uint32_t)buffer_ea);   /* bcptr<void,u64> */
-    vm_write32(q + 0x24, direction);
-    vm_write32(q + 0x2C, 1);                          /* init: constructed */
+    /* NOT direction at +0x24 and NOT init at +0x2C. Both sit inside the
+     * 16-byte group at +0x20..+0x2F that the consumer owns and shifts wholesale
+     * (shlqbyi <group>,1 at 0x12A0C). The trace shows the two values we used to
+     * write there marching through it one byte per dequeue --
+     *   +0x24: 00000002 -> 00000200 -> 00020000 -> 02000000
+     *   +0x2C: 00000001 -> 00000100 -> 00010000 -> 01000000
+     * -- i.e. we were feeding garbage into the SPU's own state every cycle.
+     * Whatever holds direction/init, it is not these offsets. */                          /* init: constructed */
     vm_write64(q + 0x70, (u64)(uint32_t)owner_ea);    /* eaSignal <- taskset/spurs */
 
     memset(vm_base + (uint32_t)buffer_ea, 0, (size_t)size * depth);
