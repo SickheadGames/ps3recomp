@@ -360,10 +360,10 @@ static DWORD WINAPI vblank_ticker(LPVOID)
             fprintf(stderr, "[rsx] live-draw engine up (D3D12); GDI present suppressed\n");
         } else {
             fprintf(stderr, "[rsx] live-draw init FAILED -- falling back to the D3D12 backend\n");
-            rsx_ok = (rsx_d3d12_backend_init(rsx_w, rsx_h, _title) == 0);
+            rsx_ok = (rsx_backend_init(rsx_w, rsx_h, _title) == 0);
         }
     } else {
-        rsx_ok = (rsx_d3d12_backend_init(rsx_w, rsx_h, _title) == 0);
+        rsx_ok = (rsx_backend_init(rsx_w, rsx_h, _title) == 0);
     }
     fprintf(stderr, "[rsx] backend init %s\n", rsx_ok ? "OK -- window open" : "FAILED");
     unsigned last_flip = 0;
@@ -907,11 +907,6 @@ int main(int argc, char** argv)
      * frame clock now runs everywhere. Without it a POSIX host never ticks
      * vblank or drains the FIFO, and the guest waits on fences forever. */
     CreateThread(NULL, 4u * 1024 * 1024, vblank_ticker, NULL, 0, NULL);
-    /* PS3_DEBUG=<file>: ask a running title what it is doing. */
-    { static char dbgpath[1024];
-      const char* dp = getenv("PS3_DEBUG");
-      if (dp && *dp) { snprintf(dbgpath, sizeof dbgpath, "%s", dp);
-                       CreateThread(NULL, 0, debug_console, dbgpath, 0, NULL); } }
     if (getenv("PS3_GUEST_PROF"))
         CreateThread(NULL, 0, guest_prof_thread, NULL, 0, NULL);
 #ifdef _WIN32

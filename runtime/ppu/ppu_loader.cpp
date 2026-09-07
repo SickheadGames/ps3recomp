@@ -15,8 +15,20 @@
  * Game-agnostic: works on any decrypted PS3 PPU ELF. `vm_base` is owned by the
  * host (allocated large enough to cover the highest segment vaddr+memsz).
  *
- * Compiled as C++ to match the lifted output's `extern "C"` / __declspec(thread).
+ * Compiled as C++ to match the lifted output's `extern "C"` / PPU_THREAD_LOCAL.
  */
+
+/* Hoisted: code below was added above the original include block, so these
+ * have to be visible from here rather than 160 lines further down. */
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#ifdef _WIN32
+#  include <windows.h>
+#else
+#  include "../platform/win32_compat.h"   /* _Interlocked*, YieldProcessor, Sleep */
+#endif
 
 #include "ppu_tls.h"   /* PPU_THREAD_LOCAL, without a second ppu_context */
 #include "ppu_recomp.h"     /* ppu_context, func decls, ppu_recomp_register */
@@ -66,6 +78,7 @@ extern "C" void ppu_guest_caller(char* out, size_t n)
  * Deliberately does NOT swallow the exception: it reports and lets the normal
  * handling proceed, so a real bug still stops the run.
  * -----------------------------------------------------------------------*/
+#ifdef _WIN32
 static LONG WINAPI ps3_guest_ptr_veh(EXCEPTION_POINTERS* ep)
 {
     const EXCEPTION_RECORD* er = ep->ExceptionRecord;
@@ -105,6 +118,14 @@ extern "C" void ps3_install_guest_ptr_trap(void)
     fprintf(stderr, "[ps3] guest-pointer trap armed (%zu MB of the low 4 GB reserved)\n",
             got >> 20);
 }
+#else
+/* The trap reserves the low 4 GB and catches the fault through a vectored
+ * exception handler, neither of which exists off Windows. The POSIX
+ * equivalent would be mmap(PROT_NONE) plus a SIGSEGV handler; until that is
+ * written this is a no-op, and the class of bug it catches simply goes
+ * back to being found the hard way there. */
+extern "C" void ps3_install_guest_ptr_trap(void) { }
+#endif
 
 /* PS3_SCTRACE=1: every lv2 syscall with its arguments and RETURN VALUE.
  * An unimplemented syscall is loud (it logs "(stub)") but an IMPLEMENTED one
@@ -513,7 +534,7 @@ extern "C" void ppu_log_host_chain(const char* tag);  /* fwd decl (defined below
  * reservation semantics. stwcx is a sync point (rare vs vm_write), so a single
  * lock is cheap enough; shard by address later if it shows up in a profile.
  * -----------------------------------------------------------------------*/
-extern "C" __declspec(thread) ppu_context* g_active_ctx;   /* fwd (defined below) */
+extern "C" PPU_THREAD_LOCAL ppu_context* g_active_ctx;   /* fwd (defined below) */
 #define PPU_RESV_MAX 128
 #define PPU_RESV_INVALID 0x100000000ull   /* out of (uint32_t) ea range */
 static ppu_context* g_resv_ctxs[PPU_RESV_MAX];
@@ -860,11 +881,11 @@ static void vm_hotmap(uint32_t ea, int width)
         for (uint32_t i = 0; i < NB; i++) cnt[i] = 0;
     }
 }
-extern "C" __declspec(thread) ppu_context* g_active_ctx;  /* fwd decl (defined below) */
+extern "C" PPU_THREAD_LOCAL ppu_context* g_active_ctx;  /* fwd decl (defined below) */
 /* Tracks the most recent vm_read32 {addr,value} on this thread, so FLOW_WVAL can
  * report the SOURCE a copied value came from (poison propagation vs true origin). */
-static __declspec(thread) uint32_t g_last_rd_addr = 0;
-static __declspec(thread) uint32_t g_last_rd_val  = 0;
+static PPU_THREAD_LOCAL uint32_t g_last_rd_addr = 0;
+static PPU_THREAD_LOCAL uint32_t g_last_rd_val  = 0;
 /* PT=<hex>: persistent high-byte truncation detector. A write8 that turns the word
  * at some addr into <hex> (e.g. a heap ptr 0x471057A0 zeroed to 0x001057A0) is BENIGN
  * if the word is later restored to a full pointer; it is the BUG if the truncated
@@ -893,8 +914,8 @@ static void pt_restore(uint32_t addr) { for (int i=0;i<g_pt_n;i++) if (g_pt_addr
 #endif
 /* Stack of currently-executing indirect-call (vtable) targets on this thread, so a
  * write hook can name the virtual method that is running when it writes a value. */
-static __declspec(thread) uint32_t g_vcall_stk[128];
-static __declspec(thread) int      g_vcall_sp = 0;
+static PPU_THREAD_LOCAL uint32_t g_vcall_stk[128];
+static PPU_THREAD_LOCAL int      g_vcall_sp = 0;
 extern "C" {
 /* PPU_RWATCH=<hex>[,len] -- see the note in vm_read8. */
 static inline void ppu_rwatch_hit(uint32_t a, int width, void* ra)
@@ -1048,7 +1069,7 @@ uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0; ppu_rwatch
           for(uint32_t i=0;i<NB;i++) cnt[i]=0; } } }
     /* Hot-poll detector: a thread spinning on the same address (e.g. a GCM FIFO
      * get-pointer / label waiting on RSX) reads it thousands of times in a row. */
-    { static __declspec(thread) uint32_t last=0xFFFFFFFFu; static __declspec(thread) uint32_t n=0;
+    { static PPU_THREAD_LOCAL uint32_t last=0xFFFFFFFFu; static PPU_THREAD_LOCAL uint32_t n=0;
       if ((uint32_t)a==last) { if (++n==200000) { if (((uint32_t)a & ~0xFFFu) == (VM_HLE_INJECT_BASE + 0x2000u)) {
               /* A spin on the GCM control block is a fence/FIFO wait. Print the
                * WHOLE block: put vs get says whether the RSX side is behind or
@@ -1169,7 +1190,7 @@ static inline void barrier_watch_hit(uint32_t a, uint32_t v, int width, void* ra
           if (_n++ < 24) {
               fprintf(stderr, "[wv] 0x%08X <- 0x%X (w%d) guest-fn=0x%08X\n",
                       a, v, width, ppu_prof_resolve_host(ra));
-              extern __declspec(thread) ppu_context* g_active_ctx;
+              extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
               extern void ppu_dump_guest_stack(ppu_context*, const char*);
               if (_n <= 3 && g_active_ctx) ppu_dump_guest_stack(g_active_ctx, "wv");
               fflush(stderr);
@@ -1224,7 +1245,7 @@ static inline void barrier_watch_hit(uint32_t a, uint32_t v, int width, void* ra
                       a, v, width, ppu_prof_resolve_host(ra));
               /* On the first write to the watched word, dump the guest caller
                * chain so the origin of a null field can be walked up-stack. */
-              extern __declspec(thread) ppu_context* g_active_ctx;
+              extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
               extern void ppu_dump_guest_stack(ppu_context*, const char*);
               if (_i == 1 && g_active_ctx) ppu_dump_guest_stack(g_active_ctx, "ww");
           } else if (_i == _cap + 1) {
@@ -1471,11 +1492,11 @@ void flow_lookup_alloc(unsigned int p) {
 }
 
 /* Cross-fragment trampoline pointer (matches the lifted header's TLS decl). */
-extern "C" __declspec(thread) void (*g_trampoline_fn)(void*) = nullptr;
+extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*) = nullptr;
 
 /* Per-thread active guest context, for the crash handler to report the guest PC
  * (ctx->pc, updated by lifted code at block boundaries) of a host AV. */
-extern "C" __declspec(thread) ppu_context* g_active_ctx = nullptr;
+extern "C" PPU_THREAD_LOCAL ppu_context* g_active_ctx = nullptr;
 
 /* Caller LR of the guest function currently in an HLE call (for HLE-side
  * diagnostics: pin which lifted function invoked us). 0 if none. */
@@ -2709,7 +2730,7 @@ extern "C" uint32_t ppu_load_elf(const char* path)
            * changes what the title does on the way to the moment you care
            * about -- forcing VF5's render gate on from t=0 left it opening 15
            * files instead of 134. Wait until the title is where you want it. */
-          struct P8 { static unsigned long __stdcall go(void*) {
+          struct P8 { static DWORD WINAPI go(LPVOID) {
               { const char* d = getenv("PPU_POKE_AFTER_MS");
                 if (d && *d) Sleep((unsigned long)strtoul(d, 0, 0)); }
               for (;;) {
@@ -2732,7 +2753,7 @@ extern "C" uint32_t ppu_load_elf(const char* path)
               n++;
               while (*c == ',' || *c == ' ') c++;
           }
-          struct P { static unsigned long __stdcall go(void*) {
+          struct P { static DWORD WINAPI go(LPVOID) {
               for (;;) {
                   for (int i = 0; i < n; i++)
                       if (!ppu_vm_size || ea[i] + 4 <= ppu_vm_size) vm_write32(ea[i], val[i]);
@@ -2754,7 +2775,7 @@ extern "C" uint32_t ppu_load_elf(const char* path)
                   keep_ea = kea; keep_len = klen;
                   fprintf(stderr, "[keep] snapshotting 0x%08X..0x%08X and restoring it%c",
                           kea, kea + klen, 10);
-                  struct R { static unsigned long __stdcall go(void*) {
+                  struct R { static DWORD WINAPI go(LPVOID) {
                       for (;;) {
                           if (memcmp(vm_base + keep_ea, keep, keep_len)) {
                               memcpy(vm_base + keep_ea, keep, keep_len);
@@ -2866,7 +2887,7 @@ extern "C" uint64_t ppu_guest_call(uint32_t opd_addr,
 
     /* Private scratch stack high in the guest stack region, distinct from the
      * main + ppu_thread stacks. One callback at a time per caller thread. */
-    static __declspec(thread) uint32_t s_cb_sp = 0;
+    static PPU_THREAD_LOCAL uint32_t s_cb_sp = 0;
     if (!s_cb_sp) s_cb_sp = 0xCFFE0000u;
 
     ppu_context ctx;
@@ -2911,7 +2932,7 @@ extern "C" uint64_t ppu_guest_call_ct(uint32_t code, uint32_t toc,
     ppu_fn fn = ppu_lookup(code);
     if (!fn) { fprintf(stderr, "[ppu] guest_call_ct: code 0x%08X not registered\n", code); return 0; }
 
-    static __declspec(thread) uint32_t s_cb_sp = 0;
+    static PPU_THREAD_LOCAL uint32_t s_cb_sp = 0;
     if (!s_cb_sp) s_cb_sp = 0xCFFE0000u;
 
     ppu_context ctx;
