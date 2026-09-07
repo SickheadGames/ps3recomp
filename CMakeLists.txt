@@ -151,6 +151,23 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
         -fno-strict-aliasing
     )
 elseif(MSVC)
+    # Real cl.exe -- clang-cl reports its id as Clang and is handled above.
+    #
+    # This does not currently build. The runtime and the lifted output use GCC/
+    # Clang builtins that cl has no equivalent for, and the failure lands as a
+    # wall of errors in whichever file the build happens to reach first rather
+    # than as anything that names the cause. Say it here instead.
+    message(WARNING
+        "Building with cl.exe (MSVC). This is not currently supported.\n"
+        "  The runtime uses __atomic_* builtins, __int128 and __builtin_bswap*, "
+        "and the lifted output uses __int128 for the PPC 64x64 multiplies. "
+        "cl has none of them.\n"
+        "  Use clang-cl instead -- it consumes the MSVC headers and libraries, "
+        "so nothing else about a Visual Studio build changes:\n"
+        "    cmake -S . -B build -G Ninja "
+        "-DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl\n"
+        "  See docs/BUILDING.md. Porting the intrinsics to cl is a welcome "
+        "contribution; nothing else stands in the way.")
     target_compile_options(ps3recomp_runtime PRIVATE
         /W3 /wd4100 /wd4244 /wd4267 /wd4996
         /Zc:__cplusplus

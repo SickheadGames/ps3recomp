@@ -753,4 +753,24 @@ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
 extern "C" void ppu_hle_register_all(void) __attribute__((weak));
 extern "C" void ppu_hle_register_all(void) {}
 
-extern "C" void ppu_hle_init(void) { ppu_hle_register_all(); }
+extern "C" void ppu_hle_init(void)
+{
+    ppu_hle_register_all();
+
+    /* The generated registration unit is per-game and easy to leave out: the
+     * weak stub above means a build without it links and starts, then fails
+     * later and somewhere else. Say so here, once, at the point where it is
+     * still obvious what to do about it. */
+    if (ps3_hle_count() == 0) {
+        fprintf(stderr,
+            "\n[ps3] WARNING: no HLE handlers are registered.\n"
+            "  ppu_hle_register_all() is the weak do-nothing stub, so every firmware\n"
+            "  import will return 0 and the first indirect call through one lands on\n"
+            "  the import stub's own instruction word (a bare address like 0x39800000\n"
+            "  is `li r12,0`, not a function).\n"
+            "  Generate the table and add it to the build:\n"
+            "      python tools/gen_hle_nids.py --all --out src/gen/ppu_hle_nids.cpp\n"
+            "  See docs/GETTING_STARTED.md.\n\n");
+        fflush(stderr);
+    }
+}
