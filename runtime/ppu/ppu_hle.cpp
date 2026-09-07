@@ -18,6 +18,7 @@
  */
 #include "ppu_recomp.h"   /* ppu_context */
 #include "ps3emu/nid.h"   /* ps3_nid_table, ps3_nid_entry */
+#include "ps3emu/milestone.h" /* ps3_msf -- boot milestone log */
 #include <stdlib.h>       /* getenv */
 #include <stdint.h>
 #include <stdio.h>
@@ -43,13 +44,16 @@ extern "C" uint32_t ps3_hle_count(void) { return g_hle_inited ? g_hle_nids.count
  * Registered separately and dispatched before the generic table. */
 typedef void (*hle_ctx_fn)(ppu_context*);
 #define HLE_CTX_CAP 256
-static struct { uint32_t nid; hle_ctx_fn fn; } g_ctx[HLE_CTX_CAP];
+static struct { uint32_t nid; hle_ctx_fn fn; const char* name; } g_ctx[HLE_CTX_CAP];
 static uint32_t g_ctx_count = 0;
 
 extern "C" void ps3_hle_register_ctx(uint32_t nid, const char* name, hle_ctx_fn fn)
 {
-    (void)name;
-    if (g_ctx_count < HLE_CTX_CAP) { g_ctx[g_ctx_count].nid = nid; g_ctx[g_ctx_count].fn = fn; g_ctx_count++; }
+    if (g_ctx_count < HLE_CTX_CAP) {
+        g_ctx[g_ctx_count].nid = nid; g_ctx[g_ctx_count].fn = fn;
+        g_ctx[g_ctx_count].name = name ? name : "?";   /* named in the milestone log */
+        g_ctx_count++;
+    }
 }
 
 /* Is this NID implemented here? Lets a host boot harness that owns its own
@@ -572,6 +576,9 @@ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
               if(_ri){ uint64_t _sr1=ctx->gpr[1]; ctx->gpr[1]=(ctx->gpr[1]-0x1000)&~0xFull;
                 ps3_indirect_call(ctx); ctx->gpr[1]=_sr1; }
               else ps3_indirect_call(ctx); }       /* -> registered lifted libsre fn; r3=ret */
+            /* A real PRX serving this import is a different implementation of it,
+             * so it gets its own prefix rather than reading as the HLE stub. */
+            ps3_msf("prx:0x%08X", nid);
             { static int64_t st=-2; if(st==-2){const char*e=getenv("YDKJ_SPURSTRACE"); st=e?1:0;}
               if (st) fprintf(stderr, "[SPURSTRACE] nid=0x%08X RETURNED r3=0x%08X\n",
                   nid, (uint32_t)ctx->gpr[3]);
@@ -618,10 +625,17 @@ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
     }
 
     for (uint32_t i = 0; i < g_ctx_count; i++)
-        if (g_ctx[i].nid == nid) { g_ctx[i].fn(ctx); return; }
+        if (g_ctx[i].nid == nid) {
+            ps3_msf("hle:%s", g_ctx[i].name);
+            g_ctx[i].fn(ctx); return;
+        }
 
     ps3_nid_entry* e = g_hle_inited ? ps3_nid_table_find(&g_hle_nids, nid) : nullptr;
     if (!e || !e->handler) {
+        /* Recorded before the diagnostic paths below, several of which return
+         * early. An import moving between resolved and unresolved is exactly the
+         * kind of change the gate exists to catch. */
+        ps3_msf("hle:unresolved:0x%08X", nid);
         /* YDKJ_TUNERFIX: sysPrxForUser 0xE0998DBF is the profiler-presence query called
          * by libsre _cellSpursIsLaunchedFromTuner (0x3000D318). On a normal (non-tuner)
          * run it must return 0x8001112E ("profiler not loaded"); an unresolved-NID error
@@ -686,6 +700,7 @@ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
         return;
     }
     g_last_hle_name = e->name;
+    ps3_msf("hle:%s", e->name);
     { unsigned t = (unsigned)ctx->thread_id;
       if (t < PS3_HLE_INFLIGHT_MAX) g_hle_inflight[t] = e->name; }
     if (nid == 0xD0B1D189u /*cellGcmSetTile*/ || nid == 0xDC09357Eu /*SetDisplayBuffer*/) {

@@ -19,7 +19,8 @@
  */
 
 #include "ppu_tls.h"   /* PPU_THREAD_LOCAL, without a second ppu_context */
-#include "ppu_recomp.h"     /* ppu_context, func decls, ppu_recomp_register */
+#include "ppu_recomp.h"
+#include "ps3emu/milestone.h"   /* ps3_ms / ps3_msf -- boot milestone log */     /* ppu_context, func decls, ppu_recomp_register */
 #include "../memory/vm.h"   /* vm_commit -- sys_mmapper_search_and_map maps for real */
 #include "../platform/win32_compat.h"      /* Win32 types, interlocked ops, Sleep/QPC on POSIX */
 #include "../platform/win32_backtrace.h"   /* RtlCaptureStackBackTrace / GetModuleHandleA on POSIX */
@@ -1847,6 +1848,10 @@ extern "C" void lv2_syscall(ppu_context* ctx)
           const char* e = getenv("PPU_GUARD_EA");
           if (e && *e) ppu_guard_page((uint32_t)strtoul(e, 0, 16)); } }
     uint64_t num = ctx->gpr[11];
+    /* Milestone: which lv2 calls this title makes, in first-occurrence order.
+     * Formatting the key each time is noise next to the profiler stamp below,
+     * which resolves a host return address to a guest function. */
+    ps3_msf("sys:%u", (unsigned)num);
 
     /* Which lv2 syscall each guest thread is currently INSIDE, by thread_id.
      * A thread blocked in a syscall shows no in-flight HLE (syscalls do not go

@@ -1,0 +1,90 @@
+# Ports the regression gate runs. See tools/regress.py.
+#
+# Paths are relative to the ps3recomp repo root, and assume the sibling layout
+# every port already uses (ps3recomp and the game trees next to each other).
+# A port that is not on this machine is SKIPPED, not failed -- nobody owns all
+# seven titles, and the gate has to be useful to someone who owns two.
+#
+# Deliberately NOT setting RSX_LIVE_DRAW: the draw milestone is recorded in
+# rsx_commands.c before the backend call, so draws are captured with the null
+# backend too. That keeps a gate run headless, faster, and identical on Linux
+# and macOS, where there is no D3D12 at all.
+#
+# `expect = "timeout"` is the normal case: a title that reaches its frame loop
+# never exits, so being killed on the timeout is what success looks like. The
+# milestone stream is flushed as each key is first seen so the kill still leaves
+# a complete record.
+#
+# `cmd` points at build-gate/, a build of the port made against the toolkit under
+# test rather than the developer's own build/. Making that build is currently the
+# operator's job -- regress.py exports PS3RECOMP_DIR for an optional `build`
+# command, but no port defines one yet. That is the next piece of work, and it
+# belongs in the port repos next to relift.sh, where the toolchain knowledge (on
+# Windows, the vcvars call clang-cl needs) already lives.
+#
+# It is not optional busywork: building vf5 against master needed its generated
+# src/gen/ppu_hle_nids.cpp regenerated first, because the table in the tree was
+# generated from the ports' own toolkit branch (ydkj-live-draw) and referenced
+# three sysPrxForUser handlers master does not have. A golden nobody can
+# reproduce is worth nothing, so the regeneration has to be part of the build:
+#
+#     python $PS3RECOMP_DIR/tools/gen_hle_nids.py --all --out src/gen/ppu_hle_nids.cpp
+#
+# The vf5 golden here was recorded that way.
+#
+# flOw is deliberately absent. Its lifted tree is git-ignored and cannot be
+# regenerated, so a golden recorded from it could never be reproduced or
+# explained. It stays a manual title until it is relifted from scratch.
+
+# --- showcase titles -------------------------------------------------------
+
+[[port]]
+name    = "vf5"
+dir     = "../ps3games/vf5"
+cmd     = ["build-gate/vf5.exe", "game/EBOOT.elf"]
+timeout = 60
+expect  = "timeout"
+env     = { PS3_VFS_ROOT = "vfs/PS3_GAME/USRDIR" }
+
+[[port]]
+name    = "tokyojungle"
+dir     = "../ps3games/tokyojungle"
+cmd     = ["build/Release/tokyojungle.exe", "input/EBOOT.elf"]
+timeout = 90
+expect  = "timeout"
+env     = { PS3_VFS_ROOT = "input" }
+
+# --- regression subjects: not being worked on, which is exactly why they are
+#     here. These are the ports a shared-runtime change breaks silently. ------
+
+[[port]]
+name    = "twistedmetal"
+dir     = "../ps3games/twistedmetal"
+cmd     = ["build/twistedmetal.exe", "input/EBOOT.elf"]
+timeout = 90
+expect  = "timeout"
+env     = { PS3_VFS_ROOT = "input" }
+
+[[port]]
+name    = "simpsons"
+dir     = "../ps3games/simpsons"
+cmd     = ["build/simpsons.exe", "vfs/PS3_GAME/USRDIR/EBOOT.elf"]
+timeout = 90
+expect  = "timeout"
+env     = { PS3_VFS_ROOT = "vfs/PS3_GAME/USRDIR" }
+
+[[port]]
+name    = "youdontknowjack"
+dir     = "../ps3games/youdontknowjack/project"
+cmd     = ["build/ydkj_boot.exe", "input/EBOOT.elf"]
+timeout = 90
+expect  = "timeout"
+env     = { PS3_VFS_ROOT = "input" }
+
+[[port]]
+name    = "rubberducky"
+dir     = "../ps3games/rubberducky"
+cmd     = ["build/rubberducky.exe", "input/EBOOT.elf"]
+timeout = 60
+expect  = "timeout"
+env     = { PS3_VFS_ROOT = "input", RD_SPU_INTERP = "1" }

@@ -15,6 +15,7 @@
  */
 
 #include "rsx_commands.h"
+#include "ps3emu/milestone.h"   /* ps3_ms -- boot milestone log */
 #include <stdio.h>
 #include <stdlib.h>   /* getenv -- an implicit decl returns int, truncating the pointer */
 #include <string.h>
@@ -690,6 +691,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
                 }
             }
         }
+        ps3_ms("rsx:draw_arrays");
         if (s_backend && s_backend->draw_arrays)
             s_backend->draw_arrays(s_backend->userdata, state->primitive_type, first, count);
         return 0;
@@ -715,6 +717,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
         u32 first = data & 0xFFFFFF;
         u32 count = ((data >> 24) & 0xFF) + 1;
         { static int _d=0; if (_d++ < 8) fprintf(stderr, "[RSX] DRAW_INDEX_ARRAY prim=%u first=%u count=%u idxoff=0x%X dma=0x%X\n", state->primitive_type, first, count, state->index_array_offset, state->index_array_dma); }
+        ps3_ms("rsx:draw_indexed");
         if (s_backend && s_backend->draw_indexed)
             s_backend->draw_indexed(s_backend->userdata, state->primitive_type,
                                     first, count);
