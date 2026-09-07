@@ -8,6 +8,7 @@
 
 #include "cellAdec.h"
 #include <stdio.h>
+#include <stdlib.h>   /* getenv -- an implicit decl returns int, truncating the pointer */
 #include <string.h>
 #include "../../runtime/ppu/ppu_memory.h"   /* vm_write*: guest EA -> host, byte-swapped */
 #include "../../runtime/ppu/ppu_context.h" /* g_active_ctx -> the guest lr */

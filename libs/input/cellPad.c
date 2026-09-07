@@ -610,7 +610,7 @@ skip_inject: ;
      * Legit input simulation on the same footing as LBP_AUTOPRESS/PAD_STICK. */
     { static int s_sc = -1;
       static struct { double t; unsigned mask; } ev[32]; static int n_ev = 0;
-      static ULONGLONG t0 = 0;
+      static unsigned long long t0 = 0;   /* not ULONGLONG: this builds on POSIX too */
       if (s_sc < 0) {
           s_sc = 0;
           const char* e = getenv("PAD_SCRIPT");
