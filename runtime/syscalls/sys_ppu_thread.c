@@ -19,6 +19,7 @@ static PPU_TLS int     s_exit_armed = 0;
 
 #include <stddef.h>
 #include "sys_ppu_thread.h"
+#include "../platform/win32_compat.h"   /* GetCurrentThreadId on POSIX */
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>   /* getenv (else return value truncated to int on x64) */

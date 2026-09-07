@@ -37,6 +37,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>      /* nanosleep, in the POSIX half of spu_intr.inc */
 
 #ifdef _WIN32
 #include <windows.h>
