@@ -2142,6 +2142,17 @@ extern "C" void ps3_indirect_call(ppu_context* ctx)
     last = cur; streak = 0;
     fprintf(stderr, "[ppu] unresolved indirect call -> 0x%08X (tid=%llu lr=0x%08X)\n",
             (uint32_t)ctx->ctr, (unsigned long long)ctx->thread_id, (uint32_t)ctx->lr);
+    /* With no NID table the very first one of these is the expected outcome
+     * rather than a mystery, so name the cause instead of the symptom. */
+    { extern uint32_t ps3_hle_count(void);
+      static int said = 0;
+      if (!said && ps3_hle_count() == 0) {
+          said = 1;
+          fprintf(stderr,
+              "       ^ no HLE handlers are registered, so this is almost certainly\n"
+              "         a firmware import rather than guest code. Run\n"
+              "         tools/gen_hle_nids.py and build its output into the port.\n");
+      } }
     static int dumped = 0;
     if (dumped < 3) {
         dumped++;
