@@ -20,6 +20,7 @@
  */
 #include <stdarg.h>
 #include "ppu_recomp.h"
+#include "ps3emu/milestone.h"   /* ps3_ms / ps3_ms_kv -- boot milestone log */
 /* PPU_THREAD_LOCAL only -- NOT ppu_context.h, which would redefine the struct
  * a generated ppu_recomp.h already declares. Ports generated before the
  * qualifier existed do not define it, so the scaffold must carry its own
@@ -43,6 +44,7 @@ extern "C" {
 uint32_t ppu_load_elf(const char* path);
 void     ppu_recomp_register(void);
 void     ppu_hle_init(void);
+uint32_t ps3_hle_count(void);   /* handlers actually registered, for the milestone log */
 void     ppu_sysprx_register(void);
 void     ppu_fs_register(void);
 int      ppu_run(uint32_t entry_opd, uint32_t stack_top);
@@ -897,6 +899,13 @@ int main(int argc, char** argv)
     ppu_fs_register();       /* cellFs VFS over the real game directory */
     fprintf(stderr,"[boot-dbg] before lv2_init_syscalls\n"); fflush(stderr);
     lv2_init_syscalls();     /* real lv2 syscall table (semaphore/memory/fs/...) */
+
+    /* Two scalars that make a milestone diff interpretable: a lift that found
+     * fewer functions, or a build that registered fewer HLE handlers, explains
+     * a whole run going missing without anyone having to bisect the stream. */
+    ps3_ms_kv("load:functions", (long long)function_table_count);
+    ps3_ms_kv("load:hle_registered", (long long)ps3_hle_count());
+    ps3_ms("boot:init_done");
     fprintf(stderr,"[boot-dbg] after lv2_init_syscalls\n"); fflush(stderr);
 
     /* Install the guest-callback hook and start the synthetic RSX vblank driver
@@ -918,6 +927,7 @@ int main(int argc, char** argv)
                        CreateThread(NULL, 0, debug_console, dbgpath, 0, NULL); } }   /* tlhelp32-based */
 #endif
 
+    ps3_ms("boot:entry");
     { extern void ps3_sampler_start(void); ps3_sampler_start(); }   /* PS3_SAMPLE=<ms> */
     printf("\n[boot] dispatching entry OPD 0x%08X (stack top 0x%08X)\n\n", entry, STACK_TOP);
 #ifdef _WIN32
