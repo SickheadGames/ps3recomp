@@ -991,7 +991,8 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                     for (int q = 0; q < NB; q++)
                         if (cnt[q] > tv) { tv = cnt[q]; top = key[q]; }
                     if (!top) top = key[0];
-                    { const uint32_t ram = vm_read32(0x001BC35Cu);
+                    { extern uint32_t vm_read32(uint64_t);
+                      const uint32_t ram = vm_read32(0x001BC35Cu);
                       const uint32_t base = (top & 0x001FFFC0u);
                       fprintf(stderr, "[r3000mem] %08X:", 0x80000000u | base);
                       for (int q = 0; q < 16; q++)
