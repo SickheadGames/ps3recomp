@@ -289,10 +289,10 @@ static int process_vertex_attrib_method(rsx_state* state, u32 method, u32 data)
 
 int rsx_process_method(rsx_state* state, u32 method, u32 data)
 {
-    /* YDKJ_RSXTRACE=<N>: trace the first N methods (bare "1" keeps the old 250).
+    /* RSX_TRACE=<N>: trace the first N methods (bare "1" keeps the old 250).
      * The fixed 250 was spent entirely on boot-time setup, so the methods around
      * the first real draw -- exactly the ones worth seeing -- were never traced. */
-    { static int _rt=-1; if(_rt<0){ const char* e=getenv("YDKJ_RSXTRACE");
+    { static int _rt=-1; if(_rt<0){ const char* e=getenv("RSX_TRACE");
         _rt = e ? (atoi(e) > 1 ? atoi(e) : 250) : 0; }
       if(_rt){ static int _m=0; if(_m++<_rt) fprintf(stderr,"[rsxm] method=0x%04X data=0x%08X\n", method, data); } }
     /* Back-end write label / semaphore (cellGcmSetWriteBackEndLabel): the RSX

@@ -415,7 +415,7 @@ int64_t sys_fs_read(ppu_context* ctx)
     }
 
     /* FLOW_FSDBG: the lv2 path is what PhyreEngine titles actually use (they do
-     * not go through the cellFs HLE), so YDKJ_FSDBG in ppu_fs.cpp never fires. */
+     * not go through the cellFs HLE), so PS3_FSLOG in ppu_fs.cpp never fires. */
     { extern char* getenv(const char*);
       if (getenv("FLOW_FSDBG")) {
         const unsigned char* b = (const unsigned char*)buf;

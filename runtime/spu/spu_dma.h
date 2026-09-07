@@ -419,7 +419,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
                 mfc_is_get(cmd) ? "GET" : "PUT", lsa, (uint32_t)ea, size); }
 #endif
     { static int s_t = -1; static int s_img = -2;
-      if (s_t < 0) s_t = getenv("YDKJ_DMATRACE") ? 1 : 0;
+      if (s_t < 0) s_t = getenv("SPU_DMATRACE_ALL") ? 1 : 0;
       if (s_img == -2) { const char* e = getenv("YDKJ_DMA_IMG"); s_img = e ? atoi(e) : -1; }
       /* YDKJ_DMA_IMG=N: trace ONLY image N, uncapped (the 300-cap otherwise fills
        * with the always-running PM's DMA and hides a late image entirely). */
@@ -804,10 +804,10 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
 
     /* DMA trace for the cri task (image 22): log each transfer's LS/EA/size so we
      * can see the work-fetch GET (func_000040F0) that precedes the branch-to-0 and
-     * whether its source EA holds valid work-queue data. Env YDKJ_DMATRACE. */
+     * whether its source EA holds valid work-queue data. Env SPU_DMATRACE_ALL. */
     {
-        static int64_t dt=-2; if (dt==-2){ const char* e=getenv("YDKJ_DMATRACE"); dt=e?1:0; }
-        /* SPU_DMATRACE=<img> traces one image; YDKJ_DMATRACE keeps the old
+        static int64_t dt=-2; if (dt==-2){ const char* e=getenv("SPU_DMATRACE_ALL"); dt=e?1:0; }
+        /* SPU_DMATRACE=<img> traces one image; SPU_DMATRACE_ALL keeps the old
          * hardcoded pair. Seeing a job's FIRST transfers is how you tell a bad
          * parameter block from a bad address computed later. */
         static int64_t only=-2;
@@ -1016,7 +1016,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
     /* After a cri-task GET, dump the bytes it just read (the task context) so we
      * can tell if eaContext holds valid SPURS work data or garbage. */
     {
-        static int64_t dt2=-2; if (dt2==-2){ const char* e=getenv("YDKJ_DMATRACE"); dt2=e?1:0; }
+        static int64_t dt2=-2; if (dt2==-2){ const char* e=getenv("SPU_DMATRACE_ALL"); dt2=e?1:0; }
         if (dt2 && spu->image_id==22 && cmd==0x40 /*GET*/ && size<=0x80) {
             static int _g=0; if (_g++ < 6) {
                 const uint8_t* p = spu->ls + (lsa & 0x3FFFF);

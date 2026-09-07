@@ -764,9 +764,6 @@ static int64_t sys_spu_thread_group_start_handler(ppu_context* ctx)
         }
         }
         fflush(stderr);
-        /* Arm a page-guard on the instance page so we catch the libsre function
-         * that writes the CellSpurs struct (WWATCH misses memcpy/DMA writes). */
-        if (getenv("YDKJ_GUARD_INST")) { extern void ppu_guard_page(uint32_t); ppu_guard_page(0x40009D00); }
       } }
 
     /* For each thread in the group, look up a registered PPU fallback by
@@ -1116,7 +1113,7 @@ static void ydkj_spu_out_mbox_deliver(uint32_t group_id, uint32_t spu_id,
     spu_thread_t* t = spu_find_thread(spu_id);
     if (t && t->connected_queue) q = t->connected_queue;
     if (!q) { spu_group_t* g = spu_find_group(group_id); if (g) q = g->event_queue_id; }
-    { static int s_d = 0; if (getenv("YDKJ_MBOXTRACE") && s_d++ < 64)
+    { static int s_d = 0; if (getenv("SPU_MBOXTRACE") && s_d++ < 64)
         fprintf(stderr, "[SPU->PPU] deliver? spu=0x%X intr=%d val=0x%08X q=%u (thread %s)\n",
                 spu_id, is_intr, value, q, t ? "found" : "MISSING"); }
     if (!q) return;
@@ -1654,10 +1651,5 @@ int lv2_try_syscall(ppu_context* ctx)
               fprintf(stderr, "[lv2err] syscall %u(r3=0x%08X r4=0x%08X r5=0x%08X)"
                               " -> 0x%08X lr=0x%08X%c",
                       num, _a3, _a4, _a5, (uint32_t)ctx->gpr[3], (uint32_t)ctx->lr, 10); } } }
-    if (getenv("YDKJ_GFXSCAN") && num >= 128 && num <= 141) {
-        static int _e = 0; if (_e++ < 60)
-            fprintf(stderr, "[EVT-SC] #%u(r3=0x%08X r4=0x%08X r5=0x%08X) -> 0x%08X lr=0x%08X\n",
-                    num, _a3, _a4, _a5, (uint32_t)ctx->gpr[3], (uint32_t)ctx->lr);
-    }
     return 1;
 }

@@ -1504,20 +1504,20 @@ extern "C" void ps3_indirect_call(ppu_context* ctx)
 
     /* SPURS trace: log calls into libsre's cellSpurs export range so we can
      * identify the instance-init function (called with &spurs = 0x40009D00) and
-     * confirm libsre receives the correct struct pointer. Env YDKJ_SPURSTRACE. */
+     * confirm libsre receives the correct struct pointer. Env SPURS_TRACE. */
     if (addr >= 0x30031200u && addr < 0x30031900u) {
-        static int64_t st=-2; if (st==-2){ const char* e=getenv("YDKJ_SPURSTRACE"); st=e?1:0; }
+        static int64_t st=-2; if (st==-2){ const char* e=getenv("SPURS_TRACE"); st=e?1:0; }
         if (st) fprintf(stderr, "[SPURSTRACE] call libsre 0x%08X  r3=0x%08X r4=0x%08X r5=0x%08X\n",
             addr, (uint32_t)ctx->gpr[3], (uint32_t)ctx->gpr[4], (uint32_t)ctx->gpr[5]);
     }
 
-    /* YDKJ_LIBTRACE: log the FIRST call into each libsre code-range function
+    /* PS3_PRX_CALLTRACE: log the FIRST call into each libsre code-range function
      * (0x30000000..0x3001D718 = libsre .text) so we can see how far the real
      * lifted cellSpurs path gets -- in particular whether cellSpursInitialize
      * completes and CreateTaskset (0x30014DC4) / CreateTask (0x30012520) are
      * ever reached, or execution stalls in the SPU bring-up handshake. */
     {
-        static int64_t lt=-2; if (lt==-2){ const char* e=getenv("YDKJ_LIBTRACE"); lt=e?1:0; }
+        static int64_t lt=-2; if (lt==-2){ const char* e=getenv("PS3_PRX_CALLTRACE"); lt=e?1:0; }
         if (lt && addr>=0x30000000u && addr<0x3001D718u) {
             static uint32_t seen[1024]; static int nseen=0; int found=0;
             for (int i=0;i<nseen;i++) if (seen[i]==addr){ found=1; break; }
@@ -1530,19 +1530,6 @@ extern "C" void ps3_indirect_call(ppu_context* ctx)
         }
     }
 
-    /* YDKJ_DDTRACE: dump func_003DAA58's incoming object (orig) + call1's target
-     * (orig->vtable[0]->code). The crash is call2 = call1_result->vtable[4]() on a
-     * base-typed object; on real HW call1 should return null so call2 is skipped.
-     * Capture orig's type + call1's method so we can see why it returns non-null. */
-    if (addr == 0x003DAA58u && vm_base && getenv("YDKJ_DDTRACE")) {
-        uint32_t orig=(uint32_t)ctx->gpr[3];
-        uint32_t vt  = orig? __builtin_bswap32(*(volatile uint32_t*)(vm_base+orig)) : 0;
-        uint32_t m0  = vt?   __builtin_bswap32(*(volatile uint32_t*)(vm_base+vt))   : 0;
-        uint32_t code= m0?   __builtin_bswap32(*(volatile uint32_t*)(vm_base+m0))   : 0;
-        static int _n=0; if(_n++<8)
-            fprintf(stderr,"[dd] func_003DAA58 orig=0x%08X vtable=0x%08X method0_opd=0x%08X call1_code=func_%08X\n",
-                    orig, vt, m0, code);
-    }
     ppu_fn fn = ppu_lookup(addr);
     if (!fn) {
         /* OPD-swap clobber fixup: a malformed memcpy (game func_0036FA74) writes
@@ -1868,10 +1855,6 @@ extern "C" void lv2_syscall(ppu_context* ctx)
      * callsite (lr) in the runtime-side thread info. cia itself is the thread
      * entry OPD (load-bearing for the entry trampoline) -- do not touch it. */
     ppu_prof_stamp(ctx, ppu_prof_resolve_host(__builtin_return_address(0)));
-    if (getenv("YDKJ_SCTRACE"))
-        fprintf(stderr, "[sc] %llu r3=%08X r4=%08X r5=%08X r6=%08X\n",
-                (unsigned long long)num, (uint32_t)ctx->gpr[3], (uint32_t)ctx->gpr[4],
-                (uint32_t)ctx->gpr[5], (uint32_t)ctx->gpr[6]);
     /* FLOW_WORKERSC: trace every lv2 syscall made by the loader/worker thread
      * (tid=1) so we can see what it does AFTER receiving its q=1 event and why
      * it never registers handlers / loads assets. */
