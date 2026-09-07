@@ -6306,7 +6306,7 @@ static void sink_end_impl(void* user, const rsx_dispatch* r)
               }
           }
       } }
-    for (u32 u = 0; u < SRV_TABLE_SIZE; u++) {
+    for (u32 u = 0; u < SRV_TABLE_SIZE; u++) {
         rsx_dsp_texture t; rsx_dsp_get_texture(&g.rsx, u, &t);
         /* LD_PS1_BUF0=1 -- DIAGNOSTIC, not a fix. Force a 24-bit PS1 VRAM
          * bind at buffer 1 (offset 0x4003C0) to sample buffer 0 (0x400000).
@@ -8692,7 +8692,7 @@ void rsx_live_draw_present(u32 buffer_id)
                  * and our compositing drops them. Count non-zero words rather
                  * than guessing from a window capture -- PrintWindow on a D3D12
                  * swapchain cannot tell "black" from "capture failed". */
-                { const u8* fb = guest_ptr(1u, 0x400000u, 1024u * 512u * 2u);
+                { const u8* fb = guest_ptr(1u, 0x400000u, 1024u * 512u * 2u);
                   /* The guest EA of PS1 VRAM, once. Watching 0xC0400000 --
                    * derived from cellGcmSys's localAddress -- caught no writes
                    * at all from either the PPU store path or SPU DMA, which is
