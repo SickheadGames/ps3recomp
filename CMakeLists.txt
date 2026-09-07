@@ -161,6 +161,14 @@ elseif(MSVC)
     )
 endif()
 
+if(NOT MSVC AND NOT WIN32)
+    # dladdr/Dl_info (runtime/platform/win32_backtrace.h) are GNU extensions
+    # that glibc hides unless _GNU_SOURCE is set. g++ defines it implicitly,
+    # so the C++ boot scaffold never noticed; a C file including the same
+    # shim does not get it for free.
+    target_compile_definitions(ps3recomp_runtime PRIVATE _GNU_SOURCE)
+endif()
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -192,6 +200,10 @@ if(UNIX)
         runtime/host/host_stubs.c
     )
     target_link_libraries(ps3recomp_host PRIVATE ps3recomp_runtime)
+    if(NOT WIN32)
+        # glibc keeps the math functions in a separate library; MSVC does not.
+        target_link_libraries(ps3recomp_host PRIVATE m)
+    endif()
     target_include_directories(ps3recomp_host PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/libs/video"
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
