@@ -683,6 +683,43 @@ class PPULifter:
                 _r = int(_dm.group(1))
                 if _r not in _first_def:
                     _first_def[_r] = _i
+        # Stores through a frame POINTER land on frame slots that never appear
+        # as a literal `r1 + off` store, so _write_counts misses them and the
+        # slot looks untouched. Track registers holding r1+off (through the
+        # zero-extend and register-move idioms the compiler emits) and charge
+        # `std rX, disp(rN)` to offset off+disp.
+        #
+        # ps1_netemu's Montgomery multiply (func_0015ABEC) does exactly this:
+        # `addi r5,r1,-128` -> r31 -> r30, then `std r9,0x8(r30)` writes -0x78 and
+        # `ld r25,-0x78(r1)` reads it back. Without this, -0x78 was snapshotted at
+        # entry and the reload returned the CALLER's r25 -- a pointer -- into the
+        # carry chain, so every ECDSA signature the firmware checked came out
+        # wrong and no PSOne disc would mount.
+        _fp = {}
+        for _l in func.body_lines:
+            _sm = re.search(r'vm_write\d+\(ctx->gpr\[(\d+)\] \+ (-?(?:0x)?[0-9a-fA-F]+)', _l)
+            if _sm and int(_sm.group(1)) in _fp:
+                try:
+                    _write_counts[hex(_fp[int(_sm.group(1))] + int(_sm.group(2), 0))] += 1
+                except ValueError:
+                    pass
+            _am2 = re.match(r'\s*ctx->gpr\[(\d+)\] = ctx->gpr\[1\] \+ \(int64_t\)\((-?(?:0x)?[0-9a-fA-F]+)\);', _l)
+            if _am2:
+                try:
+                    _fp[int(_am2.group(1))] = int(_am2.group(2), 0)
+                except ValueError:
+                    _fp.pop(int(_am2.group(1)), None)
+                continue
+            _cp = (re.match(r'\s*ctx->gpr\[(\d+)\] = ppc_rldicl\(ctx->gpr\[(\d+)\], 0, 32\);', _l)
+                   or re.match(r'\s*ctx->gpr\[(\d+)\] = ctx->gpr\[(\d+)\] \| ctx->gpr\[\];', _l))
+            if _cp:
+                _d, _s2 = int(_cp.group(1)), int(_cp.group(2))
+                if _s2 in _fp: _fp[_d] = _fp[_s2]
+                else: _fp.pop(_d, None)
+                continue
+            _dm2 = re.match(r'\s*ctx->gpr\[(\d+)\] = ', _l)
+            if _dm2:
+                _fp.pop(int(_dm2.group(1)), None)
         _saved_slots = set()
         for _i, _l in enumerate(func.body_lines):
             _m = _CS_SAVE_RE.search(_l)
@@ -711,6 +748,20 @@ class PPULifter:
                 return int(_off, 0) in _addr_taken
             except ValueError:
                 return False
+        # A function that saves ANY register into its own r1-relative frame owns
+        # that frame, even with no stdu: a PPC64 leaf may keep its locals in the
+        # 288-byte protected zone below r1 (`addi rN,r1,-224`) and never adjust
+        # the stack pointer. Such a function is NOT a tail entry, so a
+        # `ld rN,off(r1)` at an offset it never saved is a genuine data load.
+        #
+        # ps1_netemu's Montgomery multiply (func_0015ABEC) is exactly this: it
+        # spills r25 to -0x38(r1), builds a 2-word product temp at -0x80(r1) via
+        # `addi r5,r1,-128`, writes the high word as `std r9,0x8(r30)` and reads
+        # it back with `ld r25,-0x78(r1)`. The store is through r30, so
+        # _write_counts never sees -0x78 written; the address taken was -0x80, so
+        # _off_escapes misses it too -- and the reload got rewritten to the
+        # CALLER's r25, a pointer, which then flowed into the carry chain. Every
+        # ECDSA signature the firmware checked failed on that one word.
         _reg_snap = set()        # regs to snapshot from the register at entry
         _mem_snap = {}           # reg -> offset, snapshot from memory at entry
         for _i, _l in enumerate(func.body_lines):
@@ -2403,9 +2454,26 @@ class PPULifter:
                 if mn == iname:
                     vd, va, vb = int(ops[0][1:]), int(ops[1][1:]), int(ops[2][1:])
                     cmp = ">" if prefix == "vmax" else "<"
-                    return (f"{{ {ty}* d=({ty}*)&ctx->vr[{vd}]; {ty}* a=({ty}*)&ctx->vr[{va}]; "
-                            f"{ty}* b=({ty}*)&ctx->vr[{vb}]; "
-                            f"for(int i=0;i<{cnt};i++) d[i]=a[i]{cmp}b[i]?a[i]:b[i]; }}")
+                    w = 16 // cnt
+                    if w == 1:
+                        # single byte per lane: no byte order to get wrong
+                        return (f"{{ {ty}* d=({ty}*)&ctx->vr[{vd}]; {ty}* a=({ty}*)&ctx->vr[{va}]; "
+                                f"{ty}* b=({ty}*)&ctx->vr[{vb}]; "
+                                f"for(int i=0;i<{cnt};i++) d[i]=a[i]{cmp}b[i]?a[i]:b[i]; }}")
+                    # Multi-byte lanes are stored BIG-ENDIAN in vr[]. Reading
+                    # them through a host {ty}* byte-reverses every lane, so the
+                    # comparison picks the wrong operand -- the same defect the
+                    # vadduwm comment above describes. Compose each lane from its
+                    # bytes, compare, write the winner back big-endian.
+                    return (f"{{ const uint8_t* a=(const uint8_t*)&ctx->vr[{va}]; "
+                            f"const uint8_t* b=(const uint8_t*)&ctx->vr[{vb}]; uint8_t o[16]; "
+                            f"for(int i=0;i<{cnt};i++){{ uint32_t ux=0,uy=0; "
+                            f"for(int k=0;k<{w};k++){{ ux=(ux<<8)|a[i*{w}+k]; "
+                            f"uy=(uy<<8)|b[i*{w}+k]; }} "
+                            f"{ty} x=({ty})ux, y=({ty})uy; "
+                            f"{ty} r=(x{cmp}y)?x:y; "
+                            f"for(int k=0;k<{w};k++) o[i*{w}+k]=(uint8_t)((({ty})r)>>(8*({w}-1-k))); }} "
+                            f"memcpy(&ctx->vr[{vd}], o, 16); }}")
 
         # Float min/max
         if mn == "vmaxfp" or mn == "vminfp":
@@ -2620,15 +2688,26 @@ class PPULifter:
                     f"uint8_t* b=(uint8_t*)&ctx->vr[{vb}]; "
                     f"for(int i=0;i<16;i++){{uint8_t s=b[i]&7u; d[i]=(a[i]<<s)|(a[i]>>(8u-s));}} }}")
         if mn == "vrlw":
+            # BE lanes (same defect as vsraw had). A rotate of a byte-reversed
+            # word is wrong in both the value and the amount.
             vd, va, vb = int(ops[0][1:]), int(ops[1][1:]), int(ops[2][1:])
-            return (f"{{ uint32_t* d=(uint32_t*)&ctx->vr[{vd}]; uint32_t* a=(uint32_t*)&ctx->vr[{va}]; "
-                    f"uint32_t* b=(uint32_t*)&ctx->vr[{vb}]; "
-                    f"for(int i=0;i<4;i++){{uint32_t s=b[i]&31u; d[i]=(a[i]<<s)|(a[i]>>(32u-s));}} }}")
+            return (f"{{ uint32_t a[4],b[4],d[4]; ppu_vldu4(&ctx->vr[{va}],a); "
+                    f"ppu_vldu4(&ctx->vr[{vb}],b); "
+                    f"for(int i=0;i<4;i++){{ uint32_t s=b[i]&31u; "
+                    f"d[i]=s?((a[i]<<s)|(a[i]>>(32u-s))):a[i]; }} "
+                    f"ppu_vstu4(&ctx->vr[{vd}],d); }}")
         if mn == "vsraw":
+            # BE lanes, exactly like vslw/vsrw above. This read vr[] through an
+            # int32_t* with no byte swap, so every lane was byte-reversed before
+            # the shift -- and an arithmetic shift of a byte-reversed value is
+            # not even close. ps1_netemu's MDEC colour conversion is built from
+            # vsraw + vminsw + vmaxsw, which is why its output was saturated
+            # primaries (pure red/green/white) instead of decoded video.
             vd, va, vb = int(ops[0][1:]), int(ops[1][1:]), int(ops[2][1:])
-            return (f"{{ int32_t* d=(int32_t*)&ctx->vr[{vd}]; int32_t* a=(int32_t*)&ctx->vr[{va}]; "
-                    f"uint32_t* b=(uint32_t*)&ctx->vr[{vb}]; "
-                    f"for(int i=0;i<4;i++) d[i]=a[i]>>(b[i]&31u); }}")
+            return (f"{{ uint32_t a[4],b[4],d[4]; ppu_vldu4(&ctx->vr[{va}],a); "
+                    f"ppu_vldu4(&ctx->vr[{vb}],b); "
+                    f"for(int i=0;i<4;i++) d[i]=(uint32_t)((int32_t)a[i]>>(b[i]&31u)); "
+                    f"ppu_vstu4(&ctx->vr[{vd}],d); }}")
 
         # (vmaxsw handled above by the generic vmax/vmin loop)
 
@@ -2645,12 +2724,76 @@ class PPULifter:
                     f"uint16_t* b=(uint16_t*)&ctx->vr[{vb}]; "
                     f"d[0]=(uint32_t)a[0]*(uint32_t)b[0]; d[1]=(uint32_t)a[2]*(uint32_t)b[2]; "
                     f"d[2]=(uint32_t)a[4]*(uint32_t)b[4]; d[3]=(uint32_t)a[6]*(uint32_t)b[6]; }}")
-        if mn == "vmulosh":
+        # vmsumshs / vsumsws -- the two instructions an IDCT is actually built
+        # from, and both were emitted as "/* TODO */" no-ops. 32 sites, ALL of
+        # them inside ps1_netemu's MDEC decode function (func_000E90B4), so the
+        # inverse DCT never ran at all.
+        #
+        # vr[] holds big-endian bytes: halfword lane i is bytes [2i,2i+1],
+        # word lane j is bytes [4j..4j+3].
+        #
+        # vmsumshs vD,vA,vB,vC: for each word j, add vC[j] to the two products
+        # of the signed halfword pair in that word, saturating to signed 32.
+        if mn == "vmsumshs":
+            vd, va, vb, vc = (int(ops[0][1:]), int(ops[1][1:]),
+                              int(ops[2][1:]), int(ops[3][1:]))
+            return (f"{{ const uint8_t* a=(const uint8_t*)&ctx->vr[{va}]; "
+                    f"const uint8_t* b=(const uint8_t*)&ctx->vr[{vb}]; "
+                    f"const uint8_t* c=(const uint8_t*)&ctx->vr[{vc}]; uint8_t o[16]; "
+                    f"for(int j=0;j<4;j++){{ "
+                    f"int64_t acc=(int64_t)(int32_t)(((uint32_t)c[j*4]<<24)|"
+                    f"((uint32_t)c[j*4+1]<<16)|((uint32_t)c[j*4+2]<<8)|c[j*4+3]); "
+                    f"for(int h=0;h<2;h++){{ int l=j*2+h; "
+                    f"int16_t x=(int16_t)((a[l*2]<<8)|a[l*2+1]); "
+                    f"int16_t y=(int16_t)((b[l*2]<<8)|b[l*2+1]); "
+                    f"acc+=(int64_t)x*(int64_t)y; }} "
+                    f"if(acc>2147483647LL) acc=2147483647LL; "
+                    f"if(acc<-2147483648LL) acc=-2147483648LL; "
+                    f"uint32_t r=(uint32_t)(int32_t)acc; "
+                    f"for(int k=0;k<4;k++) o[j*4+k]=(uint8_t)(r>>(8*(3-k))); }} "
+                    f"memcpy(&ctx->vr[{vd}], o, 16); }}")
+
+        # vsumsws vD,vA,vB: sum the four signed words of vA plus word 3 of vB,
+        # saturate to signed 32, place in word 3 of vD; words 0..2 are zero.
+        if mn == "vsumsws":
             vd, va, vb = int(ops[0][1:]), int(ops[1][1:]), int(ops[2][1:])
-            return (f"{{ int32_t* d=(int32_t*)&ctx->vr[{vd}]; int16_t* a=(int16_t*)&ctx->vr[{va}]; "
-                    f"int16_t* b=(int16_t*)&ctx->vr[{vb}]; "
-                    f"d[0]=(int32_t)a[1]*(int32_t)b[1]; d[1]=(int32_t)a[3]*(int32_t)b[3]; "
-                    f"d[2]=(int32_t)a[5]*(int32_t)b[5]; d[3]=(int32_t)a[7]*(int32_t)b[7]; }}")
+            return (f"{{ const uint8_t* a=(const uint8_t*)&ctx->vr[{va}]; "
+                    f"const uint8_t* b=(const uint8_t*)&ctx->vr[{vb}]; uint8_t o[16]; "
+                    f"memset(o,0,16); int64_t acc=0; "
+                    f"for(int j=0;j<4;j++){{ acc+=(int64_t)(int32_t)(((uint32_t)a[j*4]<<24)|"
+                    f"((uint32_t)a[j*4+1]<<16)|((uint32_t)a[j*4+2]<<8)|a[j*4+3]); }} "
+                    f"acc+=(int64_t)(int32_t)(((uint32_t)b[12]<<24)|((uint32_t)b[13]<<16)|"
+                    f"((uint32_t)b[14]<<8)|b[15]); "
+                    f"if(acc>2147483647LL) acc=2147483647LL; "
+                    f"if(acc<-2147483648LL) acc=-2147483648LL; "
+                    f"uint32_t r=(uint32_t)(int32_t)acc; "
+                    f"for(int k=0;k<4;k++) o[12+k]=(uint8_t)(r>>(8*(3-k))); "
+                    f"memcpy(&ctx->vr[{vd}], o, 16); }}")
+
+        # vmulesh / vmulosh -- multiply the EVEN / ODD signed halfword lanes to
+        # four 32-bit products.
+        #
+        # vmulesh had NO lowering at all and was emitted as "/* TODO */" -- a
+        # no-op -- and vmulosh read vr[] through int16_t*/int32_t* with no byte
+        # swap, so its lanes were byte-reversed. ps1_netemu's MDEC colour
+        # conversion (func_000E90B4) uses three of each, so half its multiplies
+        # never ran and the other half multiplied byte-reversed values: the
+        # decoder emitted saturated primaries instead of video, which is why the
+        # PS1 intro movie had no picture.
+        #
+        # vr[] holds big-endian bytes: halfword lane i is bytes [2i,2i+1] and
+        # result word j is bytes [4j..4j+3]. Compose and store explicitly.
+        if mn in ("vmulesh", "vmulosh"):
+            vd, va, vb = int(ops[0][1:]), int(ops[1][1:]), int(ops[2][1:])
+            off = 0 if mn == "vmulesh" else 1
+            return (f"{{ const uint8_t* a=(const uint8_t*)&ctx->vr[{va}]; "
+                    f"const uint8_t* b=(const uint8_t*)&ctx->vr[{vb}]; uint8_t o[16]; "
+                    f"for(int j=0;j<4;j++){{ int l=2*j+{off}; "
+                    f"int16_t x=(int16_t)((a[l*2]<<8)|a[l*2+1]); "
+                    f"int16_t y=(int16_t)((b[l*2]<<8)|b[l*2+1]); "
+                    f"uint32_t r=(uint32_t)((int32_t)x*(int32_t)y); "
+                    f"for(int k=0;k<4;k++) o[j*4+k]=(uint8_t)(r>>(8*(3-k))); }} "
+                    f"memcpy(&ctx->vr[{vd}], o, 16); }}")
 
         # Average unsigned byte
         if mn == "vavgub":
@@ -3192,6 +3335,12 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi):
             continue
         _dbg(all_insns[i].addr, "bctr found")
         win = all_insns[max(0, i - 30):i]
+        _clo = 0
+        for _k in range(i - 1, -1, -1):
+            if all_insns[_k].mnemonic == 'blr':
+                _clo = _k + 1
+                break
+        win_cand = all_insns[_clo:i]
         # the ctr source register (last mtctr before the bctr)
         rC = None
         for w in reversed(win):
@@ -3277,7 +3426,20 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi):
             # dispatcher (every dense switch in newlib dtoa fell through -> the
             # guest's printf("%f") spun forever). gcc (PSL1GHT/newlib) loads the
             # base with `ld` (64-bit ELFv1 TOC entry); SN uses `lwz`. Accept both.
-            for w in reversed(win):
+            #
+            # Scanned over the ENCLOSING FUNCTION, not the 30-instruction window:
+            # the base load can sit far ahead of the dispatch arithmetic. In
+            # ps1_netemu's R3000 interpreter `lwz r19,-0x79CC(r2)` is 36
+            # instructions before its `bctr`, so the window found the mtctr and
+            # the lwzx but no base, dropped the 127-entry opcode table, and every
+            # guest instruction dispatched to an unlifted address -- the PS1 BIOS
+            # executed exactly one instruction and the emulator quit. Bounded by
+            # the nearest preceding blr (same guard the two-level path below
+            # uses) so it cannot latch a stale base from the previous function.
+            # Widening is safe for the cases that already worked: the walk stops
+            # at the NEAREST definition of `cand`, so when one exists inside the
+            # window the result is unchanged.
+            for w in reversed(win_cand):
                 a = [x.strip() for x in w.operands.split(',')]
                 if not a or a[0] != cand:
                     continue                    # not a definition of cand
@@ -3439,7 +3601,15 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi):
                     _dbg(all_insns[i].addr, f"  entry[{k}] raw=0x{v:X} -> target=0x{t:X} valid={text_lo <= t < text_hi and t % 4 == 0}")
                 if text_lo <= t < text_hi and t % 4 == 0:
                     targets.append(t)
-                else:
+                elif targets or k >= 4:
+                    # First hole AFTER real entries ends the table. LEADING holes
+                    # do not: a dense opcode table has null slots for the codes it
+                    # never dispatches, and ps1_netemu's 128-entry R3000 table
+                    # starts with exactly one (index 0 is unused, entries 1..127
+                    # are the handlers). Breaking on it decoded 0 targets and
+                    # dropped the whole dispatcher. Bounded at 4 so a table_base
+                    # that is simply wrong still fails fast instead of scanning
+                    # into unrelated data.
                     break
             _dbg(all_insns[i].addr, f"decoded {len(targets)} targets")
             if len(targets) > len(best):
@@ -3924,7 +4094,17 @@ def main() -> None:
                 fs = _enclosing(disp)
                 if fs is None:
                     continue
-                maxc = max(cases)
+                # A real switch's cases sit inside the dispatcher's own body.
+                # A case target megabytes away is a misread table entry, and
+                # extending to it swallows every function in between: on Saints
+                # Row 2 one bogus table absorbed 8.6 MB and 21,812 function
+                # starts into a single 2.3M-line emission that clang then
+                # dead-stripped to a 34 KB object. Bound the extension by the
+                # same span cap the mid-function tail pass uses.
+                near = [c for c in cases if abs(c - disp) <= _MAX_MID_TAIL]
+                if not near:
+                    continue
+                maxc = max(near)
                 kk = bisect.bisect_right(_starts0, maxc)
                 new_end = _starts0[kk] if kk < len(_starts0) else text_hi
                 if new_end > fb[fs]:

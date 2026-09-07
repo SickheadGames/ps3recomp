@@ -346,8 +346,12 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
         return 1;
     }
 
-    /* SPU_ATOM_EA=<hex>: log every lock-line atomic touching that EA's 128B
-     * line (e.g. a SPURS event flag) -- who tries to set it, from where. */
+    /* SPU_ATOM_EA=<hex>: log every lock-line atomic touching that EA`s 128B line.
+     * SPU_ATOM_FULL=1 additionally dumps 32 bytes of the line before and after.
+     *
+     * Built into ONE buffer and written with a single fprintf: several SPU host
+     * threads and the PPU all write stderr, so a dump split across many fprintf
+     * calls comes out shredded and unreadable exactly when it matters. */
     { static int s_ae = -1; static uint32_t s_aea;
       if (s_ae < 0) { const char* e = getenv("SPU_ATOM_EA");
         s_aea = e ? (uint32_t)strtoul(e, 0, 16) & ~127u : 0; s_ae = s_aea ? 1 : 0;
@@ -358,19 +362,27 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
           if (_n++ < 48) {
               extern uint8_t* vm_base;
               const uint8_t* r = vm_base + ((uint32_t)ea & ~127u);
-              /* lr (gpr[0]) too: these atomics sit in generic inc/dec helpers, so
-               * pc names the HELPER and only the link register names the caller
-               * that gives the counter its meaning. */
-              fprintf(stderr, "[atom-ea] cmd=0x%X img=%d pc=0x%05X lr=0x%05X ea=0x%08X "
-                      "RAM=%02X%02X%02X%02X %02X%02X%02X%02X",
-                      cmd, ctx->image_id, (uint32_t)ctx->pc & SPU_LS_MASK,
-                      ctx->gpr[0]._u32[0] & SPU_LS_MASK, (uint32_t)ea,
-                      r[0],r[1],r[2],r[3], r[4],r[5],r[6],r[7]);
+              static int s_af = -1;
+              if (s_af < 0) s_af = getenv("SPU_ATOM_FULL") ? 1 : 0;
+              char buf[640]; int p = 0;
+              /* lr (gpr[0]) as well as pc: these atomics sit in generic helpers,
+               * so pc names the HELPER and only lr names the real caller. */
+              p += snprintf(buf + p, sizeof buf - p,
+                            "[atom-ea] cmd=0x%X img=%d pc=0x%05X lr=0x%05X ea=0x%08X",
+                            cmd, ctx->image_id, (uint32_t)ctx->pc & SPU_LS_MASK,
+                            ctx->gpr[0]._u32[0] & SPU_LS_MASK, (uint32_t)ea);
+              int nb = s_af ? 64 : 8;   /* 64 covers +0x30 pendingRecv */
+              p += snprintf(buf + p, sizeof buf - p, " RAM=");
+              for (int i = 0; i < nb && p < (int)sizeof buf - 4; i++)
+                  p += snprintf(buf + p, sizeof buf - p, "%02X%s", r[i],
+                                (i % 4 == 3) ? " " : "");
               if (cmd == MFC_PUTLLC_CMD) {
-                  fprintf(stderr, " STORE=%02X%02X%02X%02X %02X%02X%02X%02X",
-                          ls[0],ls[1],ls[2],ls[3], ls[4],ls[5],ls[6],ls[7]);
+                  p += snprintf(buf + p, sizeof buf - p, " STORE=");
+                  for (int i = 0; i < nb && p < (int)sizeof buf - 4; i++)
+                      p += snprintf(buf + p, sizeof buf - p, "%02X%s", ls[i],
+                                    (i % 4 == 3) ? " " : "");
               }
-              fprintf(stderr, "\n"); fflush(stderr);
+              fprintf(stderr, "%s\n", buf); fflush(stderr);
           }
       } }
     /* Bink sync-line atomic trace (armed by the PPU-side producer probe). */
@@ -393,10 +405,82 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
          * GETLLAR fast+slow paths for exactly this reason). */
         yz_lockstep_tick(ctx);
         resv_lock();
+        /* ONE read of guest memory, then the snapshot from that copy.
+         *
+         * This used to memcpy from `mem` twice -- once to the local store, once
+         * to resv_line -- and a PPU store landing BETWEEN the two reads gave the
+         * SPU a stale line and a fresh snapshot. That is a permanent deadlock,
+         * and it is the one this port spent a session chasing: the SPU compares
+         * its (stale) copy, finds produced == consumed, and sleeps on
+         * MFC_LLR_LOST_EVENT; spu_resv_lost_poll then compares memory against a
+         * snapshot that ALREADY has the new value, finds no difference, and
+         * never raises the event. Measured at a freeze: mirror 0x9E, snapshot
+         * 0x9F, memory 0x9F, and the SPU polling rchcnt 1.6 billion times.
+         *
+         * Hardware cannot produce that state: GETLLAR is a single atomic
+         * 128-byte read, so the reserved data and the reservation come from the
+         * same instant. Copying the snapshot from `ls` restores that property,
+         * and a store that lands after the read now leaves BOTH stale -- which
+         * is what makes the lost-reservation event fire. */
         memcpy(ls, mem, MFC_ATOMIC_LINE);              /* line -> local store */
-        memcpy(ctx->resv_line, mem, MFC_ATOMIC_LINE);  /* snapshot for compare */
+        memcpy(ctx->resv_line, ls, MFC_ATOMIC_LINE);   /* snapshot FROM THE COPY */
         ctx->resv_ea = ea; ctx->resv_valid = 1; ctx->atomic_stat = 0;
         resv_unlock();
+        /* SPU_LLARWATCH=<hex EA>: every GETLLAR of that line, with the LSA it
+         * used and the first word as it lands in BOTH places.
+         *
+         * The deadlock this settles: at a freeze the reservation snapshot holds
+         * the fresh produced value (0xC9) while the SPU's local-store mirror
+         * still holds the stale one (0xC8) -- and the compare reads the mirror.
+         * Both memcpys above copy from the same `mem`, so that can only happen
+         * if `lsa` was not where the SPU asked. Reading ctx->mfc_lsa from a
+         * later poll cannot prove it (by then the SPU has issued other DMA and
+         * overwritten the field, which is exactly the compare-two-moments
+         * mistake that has cost this port ten retractions). So log it HERE, at
+         * the GETLLAR, with the word that actually landed. */
+        { static int s_lw2 = -2; static uint32_t s_lwea;
+          if (s_lw2 == -2) { const char* e6 = getenv("SPU_LLARWATCH");
+                             s_lw2 = e6 ? 1 : 0;
+                             s_lwea = e6 ? (uint32_t)strtoul(e6, 0, 16) & ~127u : 0u; }
+          if (s_lw2 && (ea & ~127u) == s_lwea) {
+              static unsigned long ln;
+              /* A histogram of the LSAs this line's GETLLARs use, not a
+               * sample of them. resv_line has exactly one writer -- this
+               * GETLLAR -- and it copies to &ls[mfc_lsa] from the same source,
+               * so a snapshot that is fresh while LS 0x10800 is stale can only
+               * mean some GETLLAR ran with a DIFFERENT mfc_lsa. Sampling every
+               * 256th hit would miss exactly those. Count them all and print
+               * every LSA seen. */
+              { static uint32_t seen[8]; static unsigned long cnt[8]; static int ns;
+                int f = -1;
+                for (int z = 0; z < ns; z++) if (seen[z] == lsa) { f = z; break; }
+                if (f < 0 && ns < 8) { f = ns; seen[ns] = lsa; cnt[ns] = 0; ns++; }
+                if (f >= 0) cnt[f]++;
+                if ((ln % 4096) == 0) {
+                    fprintf(stderr, "[llar-lsa] %lu GETLLARs on 0x%08X;", ln, ea);
+                    for (int z = 0; z < ns; z++)
+                        fprintf(stderr, " lsa=0x%05X x%lu", seen[z], cnt[z]);
+                    fprintf(stderr, "\n"); fflush(stderr);
+                } }
+              if (++ln <= 8 || (ln % 256) == 0) {
+                  const uint8_t* q = (const uint8_t*)ls;
+                  const uint32_t landed = ((uint32_t)q[0] << 24) | ((uint32_t)q[1] << 16)
+                                        | ((uint32_t)q[2] << 8) | q[3];
+                  const uint8_t* m8 = (const uint8_t*)mem;
+                  const uint32_t frommem = ((uint32_t)m8[0] << 24) | ((uint32_t)m8[1] << 16)
+                                         | ((uint32_t)m8[2] << 8) | m8[3];
+                  const uint8_t* mir = ctx->ls + 0x10800u;
+                  const uint32_t mirw = ((uint32_t)mir[0] << 24) | ((uint32_t)mir[1] << 16)
+                                      | ((uint32_t)mir[2] << 8) | mir[3];
+                  fprintf(stderr, "[llar] n=%lu spu%u pc=0x%05X lsa=0x%05X"
+                                  " ea=0x%08X mem=0x%08X landed=0x%08X"
+                                  " mirror[0x10800]=0x%08X r90=0x%08X\n",
+                          ln, (unsigned)(ctx->spu_id & 7u),
+                          (uint32_t)ctx->pc & SPU_LS_MASK, lsa, ea,
+                          frommem, landed, mirw, ctx->gpr[90]._u32[0]);
+                  fflush(stderr);
+              }
+          } }
         return 1;
 
     case MFC_PUTLLC_CMD:
@@ -467,10 +551,10 @@ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value)
      * worker that never issues an MFC command is either not being handed its
      * work descriptor or is waiting on a channel we never satisfy; the channel
      * mix distinguishes those. */
-    { static int s_c = -1; if (s_c < 0) s_c = getenv("SPU_CHHIST") ? 1 : 0;
+    { static int s_c = -1; if (s_c < 0) { const char* e = getenv("SPU_CHHIST"); s_c = e ? (atoi(e) > 0 ? atoi(e) : 2000) : 0; }
       if (s_c) { static unsigned long long w[128]; static unsigned long long n;
           w[channel & 127]++;
-          if ((++n % 2000) == 0) { fprintf(stderr, "[chw] %llu writes:%c", n, 10);
+          if ((++n % (unsigned long long)s_c) == 0) { fprintf(stderr, "[chw] %llu writes:%c", n, 10);
               for (int i = 0; i < 128; i++) if (w[i])
                   fprintf(stderr, "   wrch ch%-3d %llu%c", i, w[i], 10); } } }
     uint32_t v = value._u32[0];  /* channel writes use the preferred slot */
@@ -499,6 +583,17 @@ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value)
     switch (channel) {
     case SPU_WrOutMbox:
         spu_channel_write(&ctx->ch_out_mbox, v);
+        /* SPU_DBG_MBOX=1: depth after the write. The image-1 SPUs publish their
+         * LS work buffer here (LS 0x11D4) and then poll it, and the guest sets
+         * class-2 mask 0x3 -- which excludes the plain-mailbox bit 0x10 -- so
+         * this write raises no interrupt and the PPU must POLL to see it. If the
+         * depth climbs and stays, nobody is polling and the message is stranded.
+         * That is the difference between "the PPU is slow" and "the PPU never
+         * looks", which no other probe here distinguishes. */
+        { static int _d = -1; if (_d < 0) _d = getenv("SPU_DBG_MBOX") ? 1 : 0;
+          if (_d) { static unsigned long _n = 0; if (++_n <= 24)
+            fprintf(stderr, "[spu-outmbox] spu=%X wrote 0x%08X depth=%u\n",
+                    ctx->spu_id, v, (unsigned)ctx->ch_out_mbox.count); } }
         { static int s_t = -1; if (s_t < 0) s_t = getenv("YDKJ_MBOXTRACE") ? 1 : 0;
           if (s_t) fprintf(stderr, "[spu-mbox] OUT  grp=0x%X spu=0x%X val=0x%08X\n",
                            ctx->spu_group_id, ctx->spu_id, v); }
@@ -535,18 +630,51 @@ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value)
  * then blocking a read whose producer is missing would hang, so default stays
  * legacy non-blocking with zero regression, exactly like the lockstep gate.
  * ===========================================================================*/
+/* Set by runtime/spu/spu_raw.c once a raw SPU exists. A raw SPU runs on its own
+ * host thread against a PPU that pokes its mailboxes by MMIO, so an empty
+ * RdInMbox must PARK, not fabricate a zero -- there is no scheduler above it to
+ * retry. Off unless a raw SPU is actually created, so no other port changes. */
+int g_spu_force_ch_block = 0;
+
 static int yz_ch_block(void)
 {
     static int v = -1;
     if (v < 0) v = getenv("YZ_CH_BLOCK") ? 1 : 0;
-    return v;
+    return v || g_spu_force_ch_block;
 }
 
 /* Would rdch complete right now? Plain reads + the 10 ms re-poll cover cross-
  * thread visibility (x86 TSO + the wait syscall's barrier); the s43 atomics are
  * a later refinement. */
+/* MFC_LLR_LOST_EVENT (0x400) -- the only producer for it.
+ *
+ * The SPU "wait until another processor touches this variable" idiom is: GETLLAR
+ * the 128-byte line, set the event mask to Lr, then block in
+ * `rdch SPU_RdEventStat` until the reservation is lost. Nothing ever raised that
+ * bit, so an SPU using it waited forever -- ps1_netemu's GPU core (SPU 4) parks
+ * at pc=0x0A5E8 with evmask=0x400 exactly here while the PPU spins waiting on the
+ * SPU. Deadlock, and the reason the PS1 core never starts.
+ *
+ * Losing a reservation means the reserved line changed, and GETLLAR already
+ * snapshots it, so compare against that snapshot rather than hooking every store.
+ * ponytail: polled, not store-hooked -- one 128-byte memcmp per 10 ms poll on an
+ * already-blocked SPU, and nothing at all on the PPU store path. The ceiling is
+ * one poll of wake latency, and an A-B-A write that restores the same bytes
+ * between polls is missed; hook the writers if either ever matters.
+ */
+static void spu_resv_lost_poll(spu_context* ctx)
+{
+    if (!(ctx->event_mask & 0x400u) || !ctx->resv_valid) return;
+    if (!vm_base || ctx->resv_ea == 0) return;
+    if (memcmp(vm_base + ctx->resv_ea, ctx->resv_line, 128) != 0) {
+        ctx->resv_valid = 0;
+        ctx->event_status |= 0x400u;
+    }
+}
+
 static int spu_ch_ready(spu_context* ctx, uint32_t channel)
 {
+    if (channel == SPU_RdEventStat) spu_resv_lost_poll(ctx);
     switch (channel) {
     case SPU_RdInMbox:      return ctx->rcv_evt_n != 0 || ctx->ch_in_mbox.count != 0;
     case SPU_RdSigNotify1:  return ctx->ch_sig_notify[0].count != 0;
@@ -587,8 +715,10 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
             ReleaseSRWLockExclusive((SRWLOCK*)&ctx->ch_wait_lock);
             unsigned long long waited = GetTickCount64() - start;
             if (waited >= next_hb) {
-                fprintf(stderr, "[ch-wait] spu=%X pc=0x%05X ch=%u waited=%llums\n",
-                        ctx->spu_id, ctx->pc & SPU_LS_MASK, channel, waited);
+                fprintf(stderr, "[ch-wait] spu=%X pc=0x%05X ch=%u waited=%llums evstat=0x%X evmask=0x%X resv[valid=%d ea=0x%08X]\n",
+                        ctx->spu_id, ctx->pc & SPU_LS_MASK, channel, waited,
+                        ctx->event_status, ctx->event_mask,
+                        ctx->resv_valid, ctx->resv_ea);
                 fflush(stderr);
                 next_hb = ((waited / 2000) + 1) * 2000;
             }
@@ -603,10 +733,10 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
  * ===========================================================================*/
 u128 spu_rdch(spu_context* ctx, uint32_t channel)
 {
-    { static int s_c = -1; if (s_c < 0) s_c = getenv("SPU_CHHIST") ? 1 : 0;
+    { static int s_c = -1; if (s_c < 0) { const char* e = getenv("SPU_CHHIST"); s_c = e ? (atoi(e) > 0 ? atoi(e) : 2000) : 0; }
       if (s_c) { static unsigned long long r[128]; static unsigned long long n;
           r[channel & 127]++;
-          if ((++n % 2000) == 0) { fprintf(stderr, "[chr] %llu reads:%c", n, 10);
+          if ((++n % (unsigned long long)s_c) == 0) { fprintf(stderr, "[chr] %llu reads:%c", n, 10);
               for (int i = 0; i < 128; i++) if (r[i])
                   fprintf(stderr, "   rdch ch%-3d %llu%c", i, r[i], 10); } } }
     /* Block (never fabricate) on an empty producer-fed read channel (opt-in
@@ -672,7 +802,7 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel)
         break;
     }
     case SPU_RdEventMask:   v = ctx->event_mask;                        break;
-    case SPU_RdEventStat:   v = ctx->event_status;                      break;
+    case SPU_RdEventStat:   spu_resv_lost_poll(ctx); v = ctx->event_status; break;
     case SPU_RdMachStat:    v = (ctx->status == SPU_STATUS_RUNNING) ? 1 : 0; break;
     case SPU_RdSRR0:        v = ctx->srr0;                              break;
     default:
@@ -687,6 +817,130 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel)
  * ===========================================================================*/
 uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
 {
+    /* SPU_WHOPOLLS=<n>: rchcnt/park accounting PER SPU, printed every n calls
+     * with the pc each SPU is sitting at.
+     *
+     * SPU_CHHIST sums every SPU into one histogram, which is exactly the wrong
+     * shape for a deadlock: it showed rchcnt ch0/ch4 climbing past 1.7 billion
+     * while MFC_WrTagUpdate (ch23) stayed frozen, i.e. somebody polls forever
+     * and somebody else stopped doing DMA -- without saying whether that is one
+     * SPU or two. The freeze under investigation is the PPU-side spin in
+     * func_000D2298 waiting for spu4 to advance a counter at 0x002DF008, so
+     * which SPU is parked, and on what, is the whole question. */
+    { static int s_w = -1;
+      if (s_w < 0) { const char* e = getenv("SPU_WHOPOLLS");
+        s_w = e ? (atoi(e) > 0 ? atoi(e) : 4000000) : 0; }
+      if (s_w) { static unsigned long long c[8][40]; static unsigned long long n;
+          static uint32_t lastpc[8], lastst[8], lastmask[8];
+          static uint32_t lastsig[8][2], lastmb[8], lastrea[8];
+          static int lastrv[8], lastrd[8];
+          static uint32_t lastline[8][8], lastls[8][8];
+          static uint32_t lastlsa[8], lastr90[8];
+          const unsigned sp = (unsigned)(ctx->spu_id & 7u);
+          if (channel < 40u) c[sp][channel]++;
+          lastpc[sp] = (uint32_t)ctx->pc & SPU_LS_MASK;
+          lastst[sp] = ctx->event_status; lastmask[sp] = ctx->event_mask;
+          lastsig[sp][0] = ctx->ch_sig_notify[0].count;
+          lastsig[sp][1] = ctx->ch_sig_notify[1].count;
+          lastmb[sp] = ctx->ch_in_mbox.count;
+          lastrv[sp] = ctx->resv_valid; lastrea[sp] = ctx->resv_ea;
+          lastlsa[sp] = ctx->mfc_lsa & SPU_LS_MASK;
+          lastr90[sp] = ctx->gpr[90]._u32[0];
+          lastrd[sp] = (ctx->resv_valid && vm_base && ctx->resv_ea)
+                     ? (memcmp(vm_base + ctx->resv_ea, ctx->resv_line, 128) != 0)
+                     : -1;
+          { static int s_ld2 = -2; static uint32_t s_lo2;
+            if (s_ld2 == -2) { const char* e5 = getenv("SPU_LSDUMP");
+                               s_ld2 = e5 ? 1 : 0;
+                               s_lo2 = e5 ? (uint32_t)strtoul(e5,0,16) : 0u; }
+            if (s_ld2 && ctx->ls)
+                for (int z = 0; z < 8; z++) {
+                    const uint8_t* l8 = ctx->ls + ((s_lo2 + z * 4) & SPU_LS_MASK);
+                    lastls[sp][z] = ((uint32_t)l8[0] << 24) | ((uint32_t)l8[1] << 16)
+                                  | ((uint32_t)l8[2] << 8) | l8[3];
+                } }
+          for (int z = 0; z < 8; z++) {
+              const uint8_t* b8 = ctx->resv_line + z * 4;
+              lastline[sp][z] = ((uint32_t)b8[0] << 24) | ((uint32_t)b8[1] << 16)
+                              | ((uint32_t)b8[2] << 8) | b8[3];
+          }
+          if ((++n % (unsigned long long)s_w) == 0) {
+              fprintf(stderr, "[whopolls] %llu rchcnt calls\n", n);
+              for (unsigned q = 0; q < 8; q++) {
+                  int any = 0;
+                  for (unsigned k = 0; k < 40; k++) if (c[q][k]) any = 1;
+                  if (!any) continue;
+                  /* The channel state each poll is actually testing. Counts
+                   * alone cannot say whether a poll returns 0 or 1, and that is
+                   * the difference between "the SPU is not being told" and "the
+                   * SPU is told and ignores it". */
+                  fprintf(stderr, "   spu%u pc=0x%05X ev[st=%08X mask=%08X]"
+                                  " sig[%u %u] inmbox=%u", q, lastpc[q],
+                          lastst[q], lastmask[q], lastsig[q][0], lastsig[q][1],
+                          lastmb[q]);
+                  /* The reservation is the other half of an evmask=0x400 wait:
+                   * spu_resv_lost_poll returns immediately unless resv_valid,
+                   * so a cleared reservation is indistinguishable from "nobody
+                   * wrote the line" in event_status alone -- and they are
+                   * different bugs. diff says whether the line has actually
+                   * changed under the snapshot right now. */
+                  /* mfc_lsa and r90 alongside the reservation. GETLLAR
+                   * copies the line to &ls[mfc_lsa] and to resv_line from the
+                   * same source, so a snapshot that disagrees with the local
+                   * store can only mean mfc_lsa was not what the SPU asked for
+                   * -- and the SPU computes both that LSA and the address its
+                   * compare reads from r90. Printing the two together is what
+                   * decides it. */
+                  fprintf(stderr, " resv[v=%d ea=0x%08X diff=%d]"
+                                  " mfc_lsa=0x%05X r90=0x%08X",
+                          lastrv[q], lastrea[q], lastrd[q],
+                          lastlsa[q], lastr90[q]);
+                  /* And the line itself. "The reservation is intact and the
+                   * line has not changed" still does not say what the SPU is
+                   * waiting FOR; the words do. Snapshot side, so it is exactly
+                   * what the SPU last read. */
+                  /* SPU_LSDUMP=<hex LS offset>: 8 words of this SPU's local
+                   * store. The reserved line says what the SPU can SEE; its LS
+                   * says what it BELIEVES. For the spu4 deadlock those are the
+                   * two numbers to compare -- its consumed counter is staged at
+                   * LS 0x10888 (the counter PUT's lsa 0x10880, +8). */
+                  { static int s_ld = -2; static uint32_t s_lo;
+                    if (s_ld == -2) { const char* e4 = getenv("SPU_LSDUMP");
+                                      s_ld = e4 ? 1 : 0;
+                                      s_lo = e4 ? (uint32_t)strtoul(e4,0,16) : 0u; }
+                    if (s_ld) {
+                        fprintf(stderr, " ls[0x%05X:", s_lo);
+                        for (int z = 0; z < 8; z++)
+                            fprintf(stderr, " %08X", lastls[q][z]);
+                        fprintf(stderr, "]");
+                    } }
+                  if (lastrv[q]) {
+                      fprintf(stderr, " line[");
+                      for (int z = 0; z < 8; z++)
+                          fprintf(stderr, "%s%08X", z ? " " : "", lastline[q][z]);
+                      fprintf(stderr, "]");
+                  }
+                  for (unsigned k = 0; k < 40; k++) if (c[q][k])
+                      fprintf(stderr, " ch%u=%llu", k, c[q][k]);
+                  fprintf(stderr, "\n");
+              }
+              fflush(stderr);
+          } } }
+    /* SPU_CHHIST also covers rchcnt. It used to instrument only wrch/rdch,
+     * which is the one place a parked persistent worker is guaranteed NOT to
+     * appear: park_on_empty_inmbox halts from inside THIS function, so a
+     * worker that polls rchcnt and parks produced a completely empty channel
+     * histogram and read as 'never touches a channel'. */
+    { static int s_c = -1;
+      if (s_c < 0) { const char* e = getenv("SPU_CHHIST");
+        s_c = e ? (atoi(e) > 0 ? atoi(e) : 2000) : 0; }
+      if (s_c) { static unsigned long long c[128]; static unsigned long long n;
+          c[channel & 127]++;
+          if ((++n % (unsigned long long)s_c) == 0) {
+              fprintf(stderr, "[chc] %llu rchcnt:%c", n, 10);
+              for (int i = 0; i < 128; i++) if (c[i])
+                  fprintf(stderr, "   rchcnt ch%-3d %llu%c", i, c[i], 10);
+              fflush(stderr); } } }
     { static int s_t = -1; if (s_t < 0) s_t = getenv("YDKJ_POLLTRACE") ? 1 : 0;
       if (s_t) { static uint64_t s_cnt[8] = {0}; static uint64_t s_total = 0;
         int b = (channel==SPU_RdInMbox)?0:(channel==SPU_RdEventStat)?1:(channel==SPU_RdSigNotify1)?2:
@@ -718,6 +972,21 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
     case SPU_RdSigNotify1:   return ctx->ch_sig_notify[0].count;
     case SPU_RdSigNotify2:   return ctx->ch_sig_notify[1].count;
     case MFC_Cmd:            return MFC_QUEUE_DEPTH - mfc_for(ctx)->queue_count;
+    /* An enabled event pending, or 0 -- NOT the `default: 1` this used to fall
+     * through to. The SPU idiom is `rchcnt SPU_RdEventStat; brnz -> rdch`: it
+     * asks whether an event is pending and only commits to the BLOCKING read if
+     * the answer is yes. Answering 1 unconditionally lured it into a read that
+     * then parked forever, because rdch correctly blocks while
+     * (event_status & event_mask) == 0 -- rchcnt and rdch disagreed.
+     *
+     * ps1_netemu's audio SPU does exactly this at LS 0x8934 and parked at
+     * 0x0A5E8 waiting for MFC_LLR_LOST_EVENT on a line nothing was ever going
+     * to touch; on hardware it would simply have fallen through to 0x893C and
+     * kept working. Same condition as spu_ch_ready's case, including the
+     * lost-reservation poll, so the two now agree by construction. */
+    case SPU_RdEventStat:
+        spu_resv_lost_poll(ctx);
+        return (ctx->event_status & ctx->event_mask) != 0;
     case MFC_RdTagStat:      return 1;  /* synchronous: status always ready */
     /* Stall-and-notify status is a single-value channel: count is 1 while a
      * newly-stalled tag is pending to be read, else 0. The wwsjob interrupt
@@ -743,6 +1012,23 @@ typedef struct {
 #define SPU_FN_REGISTRY_MAX 65536
 static spu_reg_entry s_registry[SPU_FN_REGISTRY_MAX];
 static uint32_t s_registry_count = 0;
+
+/* Accessor for the sampling profiler in ppu_loader.cpp. Its address->function
+ * map is built from the PPU table alone, which leaves the SPU-lifted bodies as
+ * unowned gaps -- and an [entry, next_entry) extent then charges every SPU
+ * sample to whichever PPU function happens to precede it. That produced a
+ * confident and completely wrong "99% of guest time in one PPU function".
+ * Handing the SPU host pointers over lets the map cover both, so the gaps are
+ * real entries and the extents mean something. */
+uint32_t spu_registry_size(void) { return s_registry_count; }
+
+int spu_registry_entry(uint32_t i, void** host, uint32_t* ls_addr)
+{
+    if (i >= s_registry_count) return 0;
+    if (host)    *host    = (void*)s_registry[i].fn;
+    if (ls_addr) *ls_addr = s_registry[i].addr;
+    return 1;
+}
 
 /* Hash index over the registry. spu_lookup runs on EVERY guest indirect
  * branch -- with the Bink decoder live that is millions of dispatches per
@@ -933,6 +1219,37 @@ int spu_overlay_match_sig(const uint8_t hdr[16])
  * syscallAddr (in the cri dispatch) and INTERCEPT a branch to it here to HLE the
  * syscall. num = r3&0xF (0x10 bit = the "2" variant), args in r4. Adopted from the
  * JonathanDC64/ps3recomp fork (aaea4158) which uses this to run SPURS tasks clean. */
+/* Write the event bits a PPU-side Set owed this wait object into guest memory,
+ * at object+0x00 (events) and every object+0x30 slot (pendingRecv).
+ *
+ * Called from the WAIT_SIGNAL handler immediately before control returns to the
+ * guest. Doing it at Set time loses a race: the guest reads object+0x30 the
+ * instant it resumes, and a task that took the latched-wake path was never
+ * parked for the Set to target. Here the guest demonstrably has not read yet.
+ *
+ * ponytail: fills all 16 slots rather than the one the guest picked -- the slot
+ * index is derived from state we do not model, and a wrong slot delivers
+ * nothing. Narrow it if a title ever cares which slot fired. */
+static void spu_ef_deliver_owed(spu_context* ctx, uint32_t wobj)
+{
+    (void)ctx;
+    static int s_od = -1;
+    if (s_od < 0) s_od = getenv("SPURS_EF_OBJ_DELIVER") ? 1 : 0;
+    if (!s_od || !wobj || !vm_base) return;
+    extern uint16_t spu_ef_bits_take(uint32_t);
+    uint16_t bits = spu_ef_bits_take(wobj);
+    if (!bits) return;
+    uint8_t* m = vm_base + wobj;
+    m[0] = (uint8_t)(bits >> 8); m[1] = (uint8_t)bits;          /* +0x00 events */
+    for (uint32_t s = 0; s < 16; s++) {                          /* +0x30 slots */
+        m[0x30 + 2*s]     = (uint8_t)(bits >> 8);
+        m[0x30 + 2*s + 1] = (uint8_t)bits;
+    }
+    { static int _n = 0; if (_n++ < 8)
+        fprintf(stderr, "[spu] delivered owed bits=0x%04X to object 0x%08X \n",
+                (unsigned)bits, wobj); }
+}
+
 #define YDKJ_TASKSET_PM_SYSCALL_ADDR 0xA70u
 void spu_spurs_taskset_syscall(spu_context* ctx)   /* non-static: also called by the pure interpreter (spu_interp.c) */
 {
@@ -941,6 +1258,18 @@ void spu_spurs_taskset_syscall(spu_context* ctx)   /* non-static: also called by
     { static int _n = 0; if (_n++ < 24)
         fprintf(stderr, "[spu] SPURS taskset syscall num=%u (raw=0x%X args=0x%08X) image=%d link/r0=0x%05X\n",
                 num, raw, ctx->gpr[4]._u32[0], ctx->image_id, ctx->gpr[0]._u32[0] & SPU_LS_MASK); }
+    /* The task-API argument is passed in LOCAL STORE at 0x2FD0, not in r4: the
+     * caller does shufb(arg,...) -> stqd 0x2FD0 and only then sets r3 = number
+     * (see func_00026DE0 / func_000272AC in image 22). Logging r4 shows caller
+     * leftovers and hides what the task actually asked for. */
+    { static int s_sa = -1; if (s_sa < 0) s_sa = getenv("YDKJ_SYSCALL_ARG") ? 1 : 0;
+      if (s_sa) { static int _n = 0; if (_n++ < 40) {
+        const uint8_t* a = &ctx->ls[0x2FD0];
+        fprintf(stderr, "[spu] syscall num=%u LS[0x2FD0]=%02X%02X%02X%02X %02X%02X%02X%02X"
+                        " %02X%02X%02X%02X %02X%02X%02X%02X img=%d\n",
+                num, a[0],a[1],a[2],a[3], a[4],a[5],a[6],a[7],
+                a[8],a[9],a[10],a[11], a[12],a[13],a[14],a[15], ctx->image_id);
+        fflush(stderr); } } }
     /* NOTE (YDKJ cri_mpv): the cri task's BOOTSTRAP (func_00003040) calls the
      * task-API syscall and EXPECTS IT TO RETURN, then branches to the real task
      * entry (0x3050). Halting on num=0 here kills the task at bootstrap before it
@@ -949,6 +1278,22 @@ void spu_spurs_taskset_syscall(spu_context* ctx)   /* non-static: also called by
      * spin; if that happens, gate a real halt after the task has done work.)
      * For non-cri images keep the fork's EXIT=halt semantics. Env YDKJ_CRI_EXIT_HALT
      * forces the old halt behaviour for comparison. */
+    /* The cri bootstrap calls EXIT once and EXPECTS IT TO RETURN, then branches to
+     * the real task entry -- so image 22 cannot halt on the first one. But a task
+     * that has since done work and calls EXIT again means it: returning there makes
+     * it re-enter and spin (observed: 6x num=0 from link 0x26E18 once the task is
+     * woken). Honour the first call, halt on the rest. Each task runs on its own
+     * host thread, so a thread-local count is per task. */
+    static _Thread_local int s_exit_seen = 0;
+    if (num == 0 && ctx->image_id == 22 && !getenv("YDKJ_CRI_EXIT_HALT")) {
+        if (s_exit_seen++ == 0) { ctx->gpr[3]._u32[0] = 0; return; }   /* bootstrap */
+        { static int _n = 0; if (_n++ < 8)
+            fprintf(stderr, "[spu] cri task EXIT #%d -- halting (was spinning)\n",
+                    s_exit_seen); }
+        ctx->status = SPU_STATUS_STOPPED_BY_STOP;
+        spu_halt(ctx);
+        return;
+    }
     if (num == 0 && (ctx->image_id != 22 || getenv("YDKJ_CRI_EXIT_HALT"))) {
         ctx->status = SPU_STATUS_STOPPED_BY_STOP;
         spu_halt(ctx);          /* longjmp out to spu_run_with_halt; post-run writes exit code */
@@ -968,6 +1313,45 @@ void spu_spurs_taskset_syscall(spu_context* ctx)   /* non-static: also called by
                        ((uint32_t)ctx->ls[0x27BE] << 8)  |  (uint32_t)ctx->ls[0x27BF];
         uint32_t tid = ((uint32_t)ctx->ls[0x27D4] << 24) | ((uint32_t)ctx->ls[0x27D5] << 16) |
                        ((uint32_t)ctx->ls[0x27D6] << 8)  |  (uint32_t)ctx->ls[0x27D7];
+        /* The guest names its wait OBJECT in the task-API argument at LS 0x2FD0
+         * (low nibble is flags). It reads its received event bits from
+         * object+0x30, so this is both who to wake and where to deliver. */
+        uint32_t wobj = (((uint32_t)ctx->ls[0x2FDC] << 24) |
+                         ((uint32_t)ctx->ls[0x2FDD] << 16) |
+                         ((uint32_t)ctx->ls[0x2FDE] << 8)  |
+                          (uint32_t)ctx->ls[0x2FDF]) & ~0xFu;
+        /* SPURS_EF_SPU_REPLY=1 -- DIAGNOSTIC BISECT, NOT A FIX.
+         *
+         * The guest task is supposed to set its SPU->PPU flag (object+0x100)
+         * when a work cycle completes; it never does, so the PPU blocks on that
+         * flag forever and can never enqueue the next unit of work. That is a
+         * cycle: we cannot see what the PPU would do next without breaking it.
+         *
+         * On RE-ENTRY to WAIT_SIGNAL for the same object the previous cycle has
+         * finished, so set the flag on the task`s behalf and watch where the PPU
+         * goes. This FABRICATES guest state -- the repo`s own history says faked
+         * success is the most expensive kind of bug (see the unresolved-NID note
+         * in ppu_hle.cpp), so it stays opt-in and must never become the default.
+         * If the PPU advances, the answer is what the task must do to earn it. */
+        { static int s_rp = -1;
+          if (s_rp < 0) { const char* e = getenv("SPURS_EF_SPU_REPLY");
+                          s_rp = e ? atoi(e) : 0; }   /* 2 = reply on EVERY entry */
+          if (s_rp && wobj) {
+              static uint32_t seen[8]; static int seen_n = 0;
+              int again = 0;
+              for (int i = 0; i < seen_n; i++) if (seen[i] == wobj) { again = 1; break; }
+              if (s_rp >= 2) again = 1;   /* force: answer "would the PPU move at all?" */
+              if (!again) { if (seen_n < 8) seen[seen_n++] = wobj; }
+              else {
+                  extern void spurs_ef_set_from_spu(uint32_t, uint16_t);
+                  spurs_ef_set_from_spu(wobj + 0x100u, 1);
+                  static int _n = 0;
+                  if (_n++ < 8)
+                      fprintf(stderr, "[spu] SPU-REPLY: set flag 0x%08X for object "
+                                      "0x%08X (cycle complete)\n", wobj + 0x100u, wobj);
+              }
+          } }
+
         if (ts) {
             extern int spu_taskset_wait_signal(uint32_t, uint32_t);
             /* Park = OS-level wait on this SPU's host thread. Under the lockstep
@@ -975,9 +1359,22 @@ void spu_spurs_taskset_syscall(spu_context* ctx)   /* non-static: also called by
              * releasing it starves every other lifted SPU (observed: FMOD task 1
              * parks in WAIT_SIGNAL holding the token -> the mixer never runs
              * again -> the PPU audio pump blocks forever on flag 0x94F600). */
+            /* Publish that this task is parked so a PPU-side event-flag Set can
+             * reach it even though it registered no wait slot in the flag. */
+            extern void spu_taskset_parked_add(uint32_t, uint32_t, uint32_t);
+            extern void spu_taskset_parked_del(uint32_t, uint32_t);
+            extern int spu_taskset_consume_wake(uint32_t);
+            if (spu_taskset_consume_wake(ts)) {   /* a Set beat us to the park */
+                spu_ef_deliver_owed(ctx, wobj);
+                ctx->gpr[3]._u32[0] = 0;
+                return;
+            }
             yz_lockstep_block_begin(ctx);
+            spu_taskset_parked_add(ts, tid, wobj);
             spu_taskset_wait_signal(ts, tid);
+            spu_taskset_parked_del(ts, tid);
             yz_lockstep_block_end(ctx);
+            spu_ef_deliver_owed(ctx, wobj);
         }
         ctx->gpr[3]._u32[0] = 0;
         return;
@@ -1254,6 +1651,14 @@ void spu_indirect_branch(spu_context* ctx)
     /* Resident overlay FIRST: streamed code overwrote that LS range, so its
      * lift is the truth there -- the base image's stale bytes at the same
      * addresses may also be registered (historical junk lifts) and must lose. */
+    /* SPU_PCHIST: the last few PCs this SPU thread actually dispatched.
+     * A branch into unlifted local store names its destination but not its
+     * origin, and with a trampoline dispatcher there is no host frame left to
+     * walk back to. ps1_netemu's GPU core (image 2) runs ~8,288 instructions
+     * and then leaves its image; this ring names the lifted function it left
+     * FROM, which is the only way to find the branch that computed the bad
+     * target. Cheap: one store per dispatch, no allocation, no formatting. */
+
     spu_fn fn = ctx->resident_ovl ? spu_lookup(ctx->pc, ctx->resident_ovl) : NULL;
     if (!fn) fn = spu_lookup(ctx->pc, ctx->image_id);
     /* The job returned through the link register we planted: it is finished.
@@ -1283,6 +1688,35 @@ void spu_indirect_branch(spu_context* ctx)
      * The guard is kept because branching into unlifted high local store is
      * still an error worth stopping at rather than executing whatever is
      * there -- but it is a backstop, not a kernel interface. */
+    /* SPU exit: the CRT does not branch to a `stop` in the image -- it BUILDS one
+     * in memory and jumps to it. ps1_netemu's GPU core ends with
+     *
+     *     ori $r80,$r3,0 / andi $r80,$r80,255 / iohl $r80,0x2000
+     *     stqd $r80,0x10($r1) / sync / ai $r3,$r1,16 / bi $r3
+     *
+     * i.e. `stop (0x2000 | status)` assembled onto the stack and executed there.
+     * That target is a stack address with no lifted code, so the unlifted-branch
+     * guard below called a clean exit "branched into unlifted LS 0x3FFB0 -- ending
+     * the job" and reported stop_code 0, which reads as a runaway and sent a long
+     * chase after phantom memory corruption. Decode the target word instead: a
+     * `stop` is opcode 0 in the top 11 bits, so this is unambiguous. */
+    if (!fn) {
+        uint32_t p0 = ctx->pc & SPU_LS_MASK;
+        if (p0 + 3 < SPU_LS_SIZE) {
+            uint32_t w = ((uint32_t)ctx->ls[p0] << 24) | ((uint32_t)ctx->ls[p0+1] << 16) |
+                         ((uint32_t)ctx->ls[p0+2] << 8) | ctx->ls[p0+3];
+            if ((w >> 21) == 0u) {                 /* stop / stopd */
+                ctx->stop_code = w & 0x3FFFu;
+                static int _n = 0;
+                if (_n++ < 8)
+                    fprintf(stderr, "[spu] img=%d exit: synthesised stop 0x%04X at LS 0x%05X\n",
+                            ctx->image_id, ctx->stop_code, p0);
+                spu_halt(ctx);
+                return;
+            }
+        }
+    }
+
     if (!fn && !ctx->policy_mode && ctx->pc >= SPU_JM2_KERNEL_BASE) {
         static uint32_t seen[16]; static int n_seen = 0;
         int known = 0;
@@ -1292,8 +1726,47 @@ void spu_indirect_branch(spu_context* ctx)
             fprintf(stderr, "[spu] img=%d branched into unlifted LS 0x%05X "
                     "(lr=0x%05X) -- ending the job\n",
                     ctx->image_id, ctx->pc, ctx->gpr[0]._u32[0] & SPU_LS_MASK);
+            { fprintf(stderr, "      last dispatched PCs (oldest first):");
+              for (unsigned q = 0; q < 8; q++) {
+                  unsigned idx = (g_spu_pch_n + q) & 7u;
+                  if (g_spu_pch_n > q || g_spu_pch[idx]) fprintf(stderr, " 0x%05X", g_spu_pch[idx]);
+              }
+              fprintf(stderr, "%c", 10); }
+            /* Is there real code at the target, or is the pc garbage? Eight
+             * words at the target and at the return address separate "the lift
+             * missed a function" from "this branch should never have happened". */
+            { uint32_t a[2]; a[0] = ctx->pc & SPU_LS_MASK;
+              a[1] = ctx->gpr[0]._u32[0] & SPU_LS_MASK;
+              for (int k = 0; k < 2; k++) {
+                  fprintf(stderr, "      LS[0x%05X]:", a[k]);
+                  for (uint32_t o = 0; o < 32 && a[k] + o + 3 < SPU_LS_SIZE; o += 4)
+                      fprintf(stderr, " %02X%02X%02X%02X",
+                              ctx->ls[a[k]+o], ctx->ls[a[k]+o+1],
+                              ctx->ls[a[k]+o+2], ctx->ls[a[k]+o+3]);
+                  fprintf(stderr, "\n");
+              } }
             fflush(stderr);
         }
+        /* SPU_INTERP_UNLIFTED=1: if real code is present at the target, run it
+         * through the interpreter instead of ending the job. No lift can exist
+         * for a module the title loads at runtime -- You Don't Know Jack's FMOD
+         * mixer relocates a DSP plugin into local store and calls it -- and the
+         * interpreter rejoins the compiled path as soon as it reaches a lifted
+         * address, which is what the plugin's return does. Opt-in so titles
+         * that reach here on a genuinely bad pc keep the loud stop. */
+        { uint32_t p = ctx->pc & SPU_LS_MASK;
+          uint32_t w0 = ((uint32_t)ctx->ls[p] << 24) | ((uint32_t)ctx->ls[p+1] << 16) |
+                        ((uint32_t)ctx->ls[p+2] << 8) | ctx->ls[p+3];
+          static int s_iu = -1;
+          if (s_iu < 0) { const char* e = getenv("SPU_INTERP_UNLIFTED"); s_iu = e ? 1 : 0; }
+          if (s_iu && w0) {
+              static int _n = 0;
+              if (_n++ < 8)
+                  fprintf(stderr, "[spu] img=%d interpreting unlifted LS 0x%05X "
+                          "(runtime-loaded code)\n", ctx->image_id, p);
+              spu_interp_run(ctx, p);
+              return;
+          } }
         spu_halt(ctx);
         return;
     }
