@@ -18,11 +18,12 @@ differences, and people learn to ignore it. So the check asserts that every key
 got exactly one ordinal and that no key outside the expected set ever appears.
 """
 import argparse
-import glob
 import os
 import shutil
 import subprocess
 import sys
+
+from msvc_env import find_vcvars
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRATCH = os.path.join(ROOT, "scratch")
@@ -112,19 +113,6 @@ int main(int argc, char** argv)
     return 0;
 }
 """
-
-
-def find_vcvars():
-    """Locate vcvars64.bat without hardcoding a Visual Studio version."""
-    pats = [
-        r"C:\Program Files\Microsoft Visual Studio\*\*\VC\Auxiliary\Build\vcvars64.bat",
-        r"C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Auxiliary\Build\vcvars64.bat",
-    ]
-    for p in pats:
-        hits = sorted(glob.glob(p), reverse=True)
-        if hits:
-            return hits[0]
-    return None
 
 
 def build(driver_c, exe):

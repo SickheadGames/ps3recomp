@@ -36,6 +36,8 @@ import subprocess
 import sys
 import tempfile
 
+from msvc_env import environ as toolchain_environ
+
 try:
     import tomllib
 except ModuleNotFoundError:                      # Python < 3.11
@@ -61,6 +63,49 @@ BUCKETS = ["0", "1", "2-9", "10-99", "100-999", "1k-9k", "10k-99k", "100k+"]
 # registry + log parsing
 # --------------------------------------------------------------------------
 
+def build_toolkit(spec):
+    """Build the toolkit itself before testing any port against it.
+
+    Without this the gate happily runs ports against whatever
+    ps3recomp_runtime.lib happened to be lying around, which is exactly the
+    false green it exists to prevent.
+    """
+    cmd = spec.get("build")
+    if not cmd:
+        return True, ""
+    cp = subprocess.run(expand(cmd), cwd=ROOT, shell=True,
+                        env=gate_env(), capture_output=True, text=True)
+    if cp.returncode != 0:
+        tail = (cp.stdout + cp.stderr).strip().splitlines()[-15:]
+        return False, "\n    ".join(tail)
+    return True, ""
+
+
+def expand(cmd):
+    """{toolkit} -> the repo root.
+
+    Registry commands run through the platform shell, and $VAR / %VAR% are
+    spelled differently in sh and cmd, so neither works on both. One explicit
+    placeholder does.
+    """
+    return cmd.replace("{toolkit}", ROOT.replace("\\", "/"))
+
+
+def gate_env():
+    """Environment for build and run steps.
+
+    On Windows this is where the MSVC toolchain comes from: clang-cl needs the
+    headers and import libraries vcvars sets up, and nothing outside CI does
+    that for us. PS3RECOMP_DIR tells a port which toolkit it is being built
+    against -- without it a port rebuilds against whatever sibling checkout it
+    normally points at, and the gate tests a different tree than the one being
+    changed.
+    """
+    env = toolchain_environ()
+    env["PS3RECOMP_DIR"] = ROOT
+    return env
+
+
 def load_registry():
     if tomllib is None:
         sys.exit("regress.py needs Python 3.11+ (tomllib) or `pip install tomli`")
@@ -68,10 +113,16 @@ def load_registry():
         sys.exit("no port registry at %s" % REGISTRY)
     with open(REGISTRY, "rb") as f:
         data = tomllib.load(f)
+    toolkit = data.get("toolkit", {})
     ports = {}
     for p in data.get("port", []):
+        # Every port so far takes the same two CMake cache variables and keeps
+        # its generated NID table in the same place, so the recipe lives once
+        # in [toolkit].port_build. A port sets its own `build` only if it
+        # genuinely differs.
+        p.setdefault("build", toolkit.get("port_build"))
         ports[p["name"]] = p
-    return ports
+    return ports, toolkit
 
 
 def parse_log(path):
@@ -120,13 +171,12 @@ def run_port(port, build=True):
     # build command uses it. Without that the port would happily rebuild against
     # whatever sibling checkout it normally points at, and the gate would be
     # testing a different tree than the one being changed.
-    penv = dict(os.environ)
-    penv["PS3RECOMP_DIR"] = ROOT
+    penv = gate_env()
     penv.update({str(k): str(v) for k, v in port.get("env", {}).items()})
 
     if build and port.get("build"):
-        cp = subprocess.run(port["build"], cwd=pdir, shell=True, env=penv,
-                            capture_output=True, text=True)
+        cp = subprocess.run(expand(port["build"]), cwd=pdir, shell=True,
+                            env=penv, capture_output=True, text=True)
         if cp.returncode != 0:
             tail = (cp.stdout + cp.stderr).strip().splitlines()[-15:]
             return "error", None, "build failed:\n    " + "\n    ".join(tail)
@@ -340,7 +390,7 @@ def main():
                    help="also show NEW / RAISED / ORDER on a passing port")
 
     args = ap.parse_args()
-    ports = load_registry()
+    ports, toolkit = load_registry()
 
     if args.cmd in ("record", "check"):
         unknown = [n for n in getattr(args, "names", []) if n not in ports]
@@ -348,6 +398,13 @@ def main():
             sys.exit("unknown port(s): %s (see: regress.py list)" % ", ".join(unknown))
         if args.cmd == "check" and not args.names and not args.all:
             sys.exit("name a port, or pass --all")
+
+    if args.cmd in ("record", "check") and not args.no_build:
+        ok, note = build_toolkit(toolkit)
+        if not ok:
+            print("[toolkit] BUILD FAILED -- not running any port against a stale library:")
+            print("    " + note)
+            return 2
 
     return {"list": cmd_list, "record": cmd_record, "check": cmd_check}[args.cmd](ports, args)
 
