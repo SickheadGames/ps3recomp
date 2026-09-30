@@ -76,6 +76,22 @@ def _is_stack_alloc(insn: Instruction) -> bool:
             return True
     return False
 
+def _is_prologue_filler(insn: Instruction) -> bool:
+    """Instructions that legitimately sit between a frame allocation and the
+    `mflr r0` that follows it: callee-saved and argument spills, CR/TOC setup,
+    register moves."""
+    mn = insn.mnemonic
+    ops = insn.operands.replace(" ", "")
+    if mn in ("std", "stw", "stfd", "stfs") and ops.endswith("(r1)"):
+        return True
+    if mn in ("mfcr", "mflr"):
+        return True
+    if mn in ("lwz", "ld") and ops.endswith("(r2)"):
+        return True
+    if mn == "or":
+        p = ops.split(",")
+        return len(p) == 3 and p[1] == p[2]
+    return False
 
 def _is_bl(insn: Instruction) -> bool:
     """Check for bl (branch-and-link, non-absolute)."""
@@ -199,10 +215,29 @@ class FunctionFinder:
             # real entry as a sub-min_size sliver. Back up to the stdu so the
             # start matches the actual call target.
             start_idx = i
-            if i > 0 and _is_stack_alloc(self.instructions[i - 1]):
-                start_idx = i - 1
-                prev = self.instructions[i - 1]
-                ops = prev.operands.replace(" ", "")
+            _alloc_idx = None
+            k = i - 1
+            while k >= 0:
+                if _is_stack_alloc(self.instructions[k]):
+                    _alloc_idx = k
+                    break
+                if not _is_prologue_filler(self.instructions[k]):
+                    break
+                k -= 1
+            if _alloc_idx is not None:
+                start_idx = _alloc_idx
+                k = start_idx - 1
+                while k >= 0 and _is_prologue_filler(self.instructions[k]):
+                    start_idx = k
+                    k -= 1
+                # A known .opd start just before the frame alloc is the real
+                # entry: SNC emits argument tests (`cmpdi r5,0`) between the
+                # entry and the stdu, which the filler walk stops at.
+                for k in range(max(0, start_idx - 4), start_idx):
+                    if self.instructions[k].addr in self.seeds:
+                        start_idx = k
+                        break
+                ops = self.instructions[_alloc_idx].operands.replace(" ", "")
                 try:
                     stack_size = abs(int(ops.split(",")[1].split("(")[0], 0))
                 except (ValueError, IndexError):
