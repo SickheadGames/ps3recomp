@@ -3326,7 +3326,7 @@ class PPULifter:
         return "\n".join(lines)
 
     def write_source_files(self, out_dir: str, base: str = "ppu_recomp",
-                           ext: str = ".cpp", max_lines: int = 600_000) -> list[str]:
+                           ext: str = ".cpp", max_lines: int = 50_000) -> list[str]:
         """Write the C source split across chunk files. MSVC refuses sources
         past 16,777,215 lines (C4049/C1088), which a large game exceeds in a
         single file; splitting also lets the build compile chunks in parallel
