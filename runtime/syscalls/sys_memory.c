@@ -488,6 +488,30 @@ int64_t sys_mmapper_map_shared_memory(ppu_context* ctx)
     return CELL_OK;
 }
 
+
+#define SYS_MEMORY_PAGE_FAULT_EVENT_KEY 0xfffe000000000000ULL
+int64_t event_port_create(uint32_t* out_port_id, int32_t port_type, uint64_t name);
+int64_t event_port_connect_local(uint32_t port_id, uint32_t queue_id);
+
+int64_t sys_mmapper_enable_page_fault_notification(ppu_context* ctx)
+{
+    uint32_t start_addr = LV2_ARG_U32(ctx, 0);
+    uint32_t event_queue_id = LV2_ARG_U32(ctx, 1);
+
+    uint32_t port_id = 0;
+    int64_t ret = event_port_create(&port_id, -1, SYS_MEMORY_PAGE_FAULT_EVENT_KEY);
+
+    if (ret == CELL_EAGAIN)
+    {
+        return CELL_EAGAIN;
+    }
+
+    event_port_connect_local(port_id, event_queue_id);
+
+
+    return CELL_OK;
+}
+
 /* ---------------------------------------------------------------------------
  * Registration
  * -----------------------------------------------------------------------*/
@@ -512,4 +536,5 @@ void sys_memory_init(lv2_syscall_table* tbl)
     lv2_syscall_register(tbl, SYS_MMAPPER_MAP_SHARED_MEMORY,  sys_mmapper_map_shared_memory);
     lv2_syscall_register(tbl, 341, sys_mmapper_allocate_memory);
     lv2_syscall_register(tbl, 342, sys_mmapper_allocate_memory_from_container);
+    lv2_syscall_register(tbl, 327, sys_mmapper_enable_page_fault_notification);    
 }

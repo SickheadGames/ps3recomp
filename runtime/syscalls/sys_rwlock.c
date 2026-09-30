@@ -289,3 +289,25 @@ void sys_rwlock_init(lv2_syscall_table* tbl)
     lv2_syscall_register(tbl, SYS_RWLOCK_TRYWLOCK, sys_rwlock_trywlock);
     lv2_syscall_register(tbl, SYS_RWLOCK_WUNLOCK,  sys_rwlock_wunlock);
 }
+
+
+
+
+void sys_spinlock_initialize(u32 lock)
+{
+}
+
+s32 sys_spinlock_trylock(u32 lock)
+{
+    return CELL_OK;
+}
+
+s32 sys_spinlock_lock(u32 lock)
+{
+    return CELL_OK;
+}
+
+s32 sys_spinlock_unlock(u32 lock)
+{
+    return CELL_OK;
+}

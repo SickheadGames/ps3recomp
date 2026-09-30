@@ -3048,3 +3048,22 @@ s32 cellSpursLFQueueAttachLv2EventQueue(u64 queue_ea)
     if (_n++ < 8) printf("[cellSpurs] LFQueueAttachLv2EventQueue(q=0x%08X)\n", (u32)queue_ea);
     return CELL_OK;
 }
+
+s32 cellSpursAddUrgentCommand(u64 jc_ea, u64 newCmd)
+{
+    if (!jc_ea)
+        return CELL_SPURS_TASK_ERROR_NULL_POINTER;
+
+    for (int i = 0; i < MAX_JOBCHAINS; i++) 
+    {
+        if (s_jobchains[i].jc_ea != (u32)jc_ea) 
+            continue;
+
+        // TODO: What?
+
+        return CELL_OK;
+    }
+
+    // ???
+    return CELL_SPURS_TASK_ERROR_FAULT;
+}

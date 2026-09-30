@@ -843,11 +843,8 @@ int64_t sys_event_port_destroy(ppu_context* ctx)
     return CELL_OK;
 }
 
-int64_t sys_event_port_connect_local(ppu_context* ctx)
+int64_t event_port_connect_local(uint32_t port_id, uint32_t queue_id)
 {
-    uint32_t port_id  = LV2_ARG_U32(ctx, 0);
-    uint32_t queue_id = LV2_ARG_U32(ctx, 1);
-
     if (port_id == 0 || port_id > SYS_EVENT_PORT_MAX)
         return (int64_t)(int32_t)CELL_ESRCH;
     if (queue_id == 0 || queue_id > SYS_EVENT_QUEUE_MAX)
@@ -882,6 +879,15 @@ int64_t sys_event_port_connect_local(ppu_context* ctx)
     fprintf(stderr, "[evt] port_connect_local(port=%u -> q=%u)\n", port_id, queue_id);
     return CELL_OK;
 }
+
+int64_t sys_event_port_connect_local(ppu_context* ctx)
+{
+    uint32_t port_id = LV2_ARG_U32(ctx, 0);
+    uint32_t queue_id = LV2_ARG_U32(ctx, 1);
+
+    return event_port_connect_local(port_id, queue_id);
+}
+
 
 int64_t sys_event_port_disconnect(ppu_context* ctx)
 {
@@ -952,8 +958,8 @@ int64_t sys_event_port_send(ppu_context* ctx)
     if (getenv("PS3_EVT_SEND_STACK")) { static unsigned char seen[8]={0}; unsigned pk=port_id&7;
         if(!seen[pk]){ seen[pk]=1; extern void ppu_dump_guest_stack(ppu_context*,const char*);
             char tag[40]; snprintf(tag,sizeof tag,"port_send producer port=%u",port_id); ppu_dump_guest_stack(ctx,tag); } }
-    fprintf(stderr, "[evt] port_send(port=%u data=0x%llX/0x%llX/0x%llX)\n",
-            port_id, (unsigned long long)data1, (unsigned long long)data2, (unsigned long long)data3);
+    fprintf(stderr, "[evt] port_send(port=%u data=0x%llX/0x%llX/0x%llX) tid=%lld lr=0x%llX\n",
+            port_id, (unsigned long long)data1, (unsigned long long)data2, (unsigned long long)data3, ctx->thread_id, ctx->lr);
 
     if (port_id == 0 || port_id > SYS_EVENT_PORT_MAX)
         return (int64_t)(int32_t)CELL_ESRCH;
@@ -1544,4 +1550,9 @@ void sys_event_init(lv2_syscall_table* tbl)
     lv2_syscall_register(tbl, SYS_EVENT_FLAG_SET,      sys_event_flag_set);
     lv2_syscall_register(tbl, SYS_EVENT_FLAG_CLEAR,    sys_event_flag_clear);
     lv2_syscall_register(tbl, SYS_EVENT_FLAG_GET,      sys_event_flag_get);
+}
+
+
+void sys_game_process_exitspawn(u64 ppu, char* path, char* argv, char* envp, u32 data, u32 data_size, s32 prio, u64 flags)
+{
 }
