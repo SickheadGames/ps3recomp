@@ -3375,7 +3375,7 @@ class PPULifter:
 # CLI
 # ---------------------------------------------------------------------------
 
-def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi):
+def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_bounds):
     """Find `mtctr rX; bctr` switch dispatchers and read their jump tables.
 
     Handles both absolute tables (entry = case address) and base-relative
@@ -3400,6 +3400,12 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi):
             print(f"  [JT_DEBUG 0x{addr:X}] {msg}")
     tables = {}
     n = len(all_insns)
+
+    # cache the start of the functions.
+    import bisect
+    _fn_starts = sorted(s for s, _ in func_bounds) if func_bounds else []
+    _insn_addrs = [w.addr for w in all_insns]
+
     for i in range(n):
         if all_insns[i].mnemonic != 'bctr':
             continue
@@ -3556,6 +3562,8 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi):
                             b = [x.strip() for x in w2.operands.split(',')]
                             if not b or b[0] != _mid:
                                 continue
+                            if w2.mnemonic in ('lwz', 'ld') and len(b) == 2 and '(r1)' in b[1]:
+                                continue          # callee-saved restore from own frame, not a redefinition
                             if w2.mnemonic in ('lwz', 'ld') and len(b) == 2 and '(r2)' in b[1]:
                                 disp = mem_disp(b[1]); r_base = cand
                                 base_is_ld = (w2.mnemonic == 'ld')
@@ -3565,10 +3573,10 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi):
                         if _resolved or _pass:
                             break
                         _lo = 0
-                        for _k in range(i - 1, -1, -1):
-                            if all_insns[_k].mnemonic == 'blr':
-                                _lo = _k + 1
-                                break
+                        if _fn_starts:
+                            _k = bisect.bisect_right(_fn_starts, all_insns[i].addr) - 1
+                            if _k >= 0:
+                                _lo = bisect.bisect_left(_insn_addrs, _fn_starts[_k])
                         _scan = all_insns[_lo:i]
                 break                           # first definition of cand wins/loses
             if disp is not None:
@@ -4034,6 +4042,35 @@ def main() -> None:
                 if _ao.startswith("r1,-") and _ao.endswith("(r1)"):
                     _first_alloc = _ordered[_jj]; break
             _jj += 1
+
+        # A function's prologue continues PAST its `stdu`: frame allocation is
+        # followed by callee-saved stores, mfcr/mflr, and the TOC load. Cutting
+        # at an `mflr` that appears after the stdu (AC1 func_00031638: mfcr,
+        # stdu -0x390, 20x std, lwz r30,d(r2), then mflr at +0x68) orphans the
+        # frame setup and the callee-save restores into the first fragment, so
+        # the second returns without restoring r14-r31. Only treat a prologue
+        # past the END of our own as a boundary.
+        _prologue_end = _first_alloc
+        if _first_alloc is not None:
+            _jj = _idx_of.get(_first_alloc)
+            if _jj is not None:
+                _jj += 1
+                while _jj < len(_ordered) and _ordered[_jj] < _e:
+                    _ai = _by_addr[_ordered[_jj]]
+                    _mn = _ai.mnemonic
+                    _op = _ai.operands.replace(" ", "")
+                    _is_pro = (
+                        (_mn in ("std", "stw", "stfd", "stfs") and _op.endswith("(r1)"))
+                        or _mn in ("mflr", "mfcr")
+                        or (_mn in ("lwz", "ld") and _op.endswith("(r2)"))
+                        or (_mn == "or" and len(_op.split(",")) == 3
+                            and _op.split(",")[1] == _op.split(",")[2])
+                    )
+                    if not _is_pro:
+                        break
+                    _prologue_end = _ordered[_jj]
+                    _jj += 1
+
         _cuts = []
         _j = _k + 1
         while _j < len(_ordered) and _ordered[_j] < _e:
@@ -4045,7 +4082,7 @@ def main() -> None:
             # cellSpursInitialize). A genuinely merged second function's prologue is
             # always past the first function's body, well beyond start+8.
             if (_ordered[_j] in _func_entries and _ordered[_j] > _s + 8
-                    and (_first_alloc is None or _ordered[_j] > _first_alloc)):
+                    and (_prologue_end is None or _ordered[_j] > _prologue_end)):
                 _cuts.append(_ordered[_j])
             _j += 1
         if not _cuts:
@@ -4091,7 +4128,7 @@ def main() -> None:
             return None
 
         tables = discover_jump_tables(all_insns, _raw_read_u32, [args.toc],
-                                      _raw_lo, _raw_hi)
+                                      _raw_lo, _raw_hi, func_bounds)
         jt_dispatchers = tables
         for ts in tables.values():
             jt_targets.update(ts)
@@ -4152,7 +4189,7 @@ def main() -> None:
                     toc_candidates.append(t)
             if len(toc_candidates) > 1:
                 print(f"  TOC candidates: {', '.join(hex(t) for t in toc_candidates)}")
-            tables = discover_jump_tables(all_insns, _read_u32, toc_candidates, text_lo, text_hi)
+            tables = discover_jump_tables(all_insns, _read_u32, toc_candidates, text_lo, text_hi, func_bounds)
             jt_dispatchers = tables
             for ts in tables.values():
                 jt_targets.update(ts)
