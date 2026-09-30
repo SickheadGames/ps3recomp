@@ -120,3 +120,8 @@ s32 cellFsUtilExists(const char* path)
     struct stat st;
     return (stat(path, &st) == 0) ? 1 : 0;
 }
+
+s32 cellFsStReadFinish(int fd)
+{
+    return CELL_OK;
+}

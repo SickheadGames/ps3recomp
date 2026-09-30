@@ -14,6 +14,8 @@
  */
 #include "ps3emu/milestone.h"
 
+#include "ps3emu/portable_builtins.h"
+
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -74,7 +76,7 @@ static void ms_maybe_counts_locked(void);
 
 static void ms_lock(void)
 {
-    while (__atomic_exchange_n(&g_lock, 1, __ATOMIC_ACQUIRE)) {
+    while (port_atomic_exchange32(&g_lock, 1)) {
         /* Contention here is inserts racing inserts: bounded, brief, and only
          * during bring-up while keys are still new. A spin costs less than
          * dragging a platform mutex into a module whose whole job is to not
@@ -82,7 +84,7 @@ static void ms_lock(void)
     }
 }
 
-static void ms_unlock(void) { __atomic_store_n(&g_lock, 0, __ATOMIC_RELEASE); }
+static void ms_unlock(void) { port_atomic_store32(&g_lock, 0); }
 
 static unsigned ms_hash(const char* s)
 {
@@ -95,11 +97,11 @@ static unsigned ms_hash(const char* s)
  * that the rest of this file exists to keep cheap. */
 static int ms_enabled(void)
 {
-    int e = __atomic_load_n(&g_enabled, __ATOMIC_RELAXED);
+    int e = port_atomic_load32(&g_enabled);
     if (e >= 0) return e;
 
     ms_lock();
-    e = __atomic_load_n(&g_enabled, __ATOMIC_RELAXED);
+    e = port_atomic_load32(&g_enabled);
     if (e < 0) {
         const char* path = getenv("PS3_MILESTONE_OUT");
         e = 0;
@@ -114,7 +116,7 @@ static int ms_enabled(void)
                 fprintf(stderr, "[milestone] cannot open %s -- log disabled\n", path);
             }
         }
-        __atomic_store_n(&g_enabled, e, __ATOMIC_RELAXED);
+        port_atomic_store32(&g_enabled, e);
     }
     ms_unlock();
     return e;
@@ -133,7 +135,7 @@ static void ms_insert(const char* key, unsigned h)
             snprintf(s->key, sizeof s->key, "%s", key);
             s->ord  = ++g_next_ord;
             s->hits = 1;
-            __atomic_store_n(&s->state, 2, __ATOMIC_RELEASE);
+            port_atomic_store32(&s->state, 2);
             if (g_out) {
                 /* Appended and flushed as it happens, so a title killed on a
                  * timeout still leaves everything it reached. */
@@ -148,7 +150,7 @@ static void ms_insert(const char* key, unsigned h)
             return;
         }
         if (s->state == 2 && strcmp(s->key, key) == 0) {
-            __atomic_fetch_add(&s->hits, 1u, __ATOMIC_RELAXED);
+            port_atomic_fetch_add32(&s->hits, 1u);
             ms_unlock();
             return;
         }
@@ -167,16 +169,16 @@ void ps3_ms(const char* key)
     unsigned h, i;
     if (!key || !*key || !ms_enabled()) return;
 
-    if ((__atomic_add_fetch(&g_calls, 1u, __ATOMIC_RELAXED) & (MS_TICK - 1)) == 0)
+    if ((port_atomic_add_fetch32(&g_calls, 1u) & (MS_TICK - 1)) == 0)
         ms_checkpoint();
 
     h = ms_hash(key);
     for (i = 0; i < MS_CAP; i++) {
         ms_slot* s = &g_slots[(h + i) & (MS_CAP - 1)];
-        int st = __atomic_load_n(&s->state, __ATOMIC_ACQUIRE);
+        int st = port_atomic_load32(&s->state);
         if (st == 0) break;                       /* certainly absent -> insert */
         if (st == 2 && strcmp(s->key, key) == 0) {
-            __atomic_fetch_add(&s->hits, 1u, __ATOMIC_RELAXED);
+            port_atomic_fetch_add32(&s->hits, 1u);
             return;                               /* the common case */
         }
         /* st == 1: a concurrent insert owns this slot. Probe past it; the

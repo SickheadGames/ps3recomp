@@ -24,6 +24,8 @@
 #include <stdio.h>
 #include <stdlib.h>       /* getenv, atoi (boot trace) */
 
+#include "ps3emu/portable_builtins.h"
+
 /* Single flat NID -> handler table (all modules share it; resolution is by
  * NID which is globally unique). Sized for the firmware import surface. */
 #define HLE_NID_CAP 4096
@@ -46,6 +48,15 @@ typedef void (*hle_ctx_fn)(ppu_context*);
 #define HLE_CTX_CAP 256
 static struct { uint32_t nid; hle_ctx_fn fn; const char* name; } g_ctx[HLE_CTX_CAP];
 static uint32_t g_ctx_count = 0;
+
+static const char* ps3_hle_get_name(uint32_t nid)
+{
+    for (uint32_t i = 0; i < g_ctx_count; i++)
+        if (g_ctx[i].nid == nid)
+            return g_ctx[i].name;
+
+    return "[unknown]";
+}
 
 extern "C" void ps3_hle_register_ctx(uint32_t nid, const char* name, hle_ctx_fn fn)
 {
@@ -240,7 +251,7 @@ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
         return;
     }
     /* Guest-PC breadcrumb for the sampling profiler (see lv2_syscall). */
-    ppu_prof_stamp(ctx, ppu_prof_resolve_host(__builtin_return_address(0)));
+    ppu_prof_stamp(ctx, ppu_prof_resolve_host(PORT_RETURN_ADDRESS()));
     g_last_hle_nid = nid;
 
     /* Boot trace: log the first N HLE calls (PS3_HLE_TRACE=N). Invaluable for
@@ -249,8 +260,8 @@ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
     if (s_trace == -2) { const char* e = getenv("PS3_HLE_TRACE"); s_trace = e ? atoi(e) : 0; }
     if (s_trace > 0) {
         s_trace--;
-        fprintf(stderr, "[HLETRACE] nid=0x%08X r3=0x%08X r4=0x%08X r5=0x%08X lr=0x%08X\n",
-                nid, (uint32_t)ctx->gpr[3], (uint32_t)ctx->gpr[4],
+        fprintf(stderr, "[HLETRACE] %s nid=0x%08X r3=0x%08X r4=0x%08X r5=0x%08X lr=0x%08X\n",
+                ps3_hle_get_name(nid), nid, (uint32_t)ctx->gpr[3], (uint32_t)ctx->gpr[4],
                 (uint32_t)ctx->gpr[5], (uint32_t)ctx->lr);
     }
     /* PS3_HLE_ARGS=<nid-hex>: dump the full PPC64 argument register set (r3-r10)

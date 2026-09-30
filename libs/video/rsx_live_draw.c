@@ -23,6 +23,8 @@
 #include "ps3emu/yz_runtime_config.h"
 #include "ps3emu/yz_frontier_trace.h"
 
+#include "ps3emu/portable_builtins.h"
+
 #if !defined(_WIN32)
 
 /* Non-Windows: the whole path is a no-op (D3D12 is Windows-only). */
@@ -8730,7 +8732,7 @@ void rsx_live_draw_present(u32 buffer_id)
                         if (ev && !ev_done && ++ev_beats >= 3) {
                             ev_done = 1;
                             const u32 ram = vm_read32(0x001BC35Cu);
-                            #define PS1LE(a) __builtin_bswap32(vm_read32((ram) + (u32)(a)))
+                            #define PS1LE(a) PORT_BSWAP32(vm_read32((ram) + (u32)(a)))
                             const u32 tot_evcb = PS1LE(0x0120);
                             const u32 tot_size = PS1LE(0x0124);
                             fprintf(stderr, "[ps1ev] ram=0x%08X  EvCB tbl=0x%08X size=%u\n",

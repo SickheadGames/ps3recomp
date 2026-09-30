@@ -727,3 +727,9 @@ int32_t* sys_net_errno_loc(void)
 {
     return &s_net_errno;
 }
+
+
+int32_t sys_socketselect(int32_t nfds, fd_set* readfds, fd_set* writefds, fd_set* exceptfds, struct timeval* timeout)
+{
+    return 1;
+}

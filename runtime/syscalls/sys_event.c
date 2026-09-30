@@ -63,6 +63,17 @@ static void write_be32(uint32_t addr, uint32_t val)
     *p = val;
 }
 
+static uint32_t read_be32(uint32_t addr)
+{
+    uint32_t v; uint32_t* p = (uint32_t*)vm_to_host(addr);
+    v = *p;
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ || defined(_WIN32)
+    v = ((v >> 24) & 0xFF) | ((v >> 8) & 0xFF00) |
+        ((v << 8) & 0xFF0000) | ((v << 24) & 0xFF000000u);
+#endif
+    return v;
+}
+
 static uint64_t bswap64(uint64_t v)
 {
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ || defined(_WIN32)
@@ -167,8 +178,8 @@ int64_t sys_event_queue_create(ppu_context* ctx)
     q->tail     = 0;
     q->count    = 0;
     q->type     = SYS_PPU_QUEUE;
-    fprintf(stderr, "[evt] queue_create -> id=%d key=0x%llX size=%d\n",
-            slot + 1, (unsigned long long)key, size);
+    fprintf(stderr, "[evt] queue_create -> id=%d key=0x%llX size=%d lr=0x%llX\n",
+            slot + 1, (unsigned long long)key, size, ctx->lr);
 
     if (attr_addr != 0) {
         uint8_t* attr_raw = (uint8_t*)vm_to_host(attr_addr);
@@ -757,12 +768,8 @@ int sys_event_queue_inject(uint32_t qid, uint64_t source,
     return event_queue_push(q, &evt);
 }
 
-int64_t sys_event_port_create(ppu_context* ctx)
+int64_t event_port_create(uint32_t* out_port_id, int32_t port_type, uint64_t name)
 {
-    uint32_t id_out_addr = LV2_ARG_PTR(ctx, 0);
-    int32_t  port_type   = LV2_ARG_S32(ctx, 1);
-    uint64_t name        = LV2_ARG_U64(ctx, 2);
-
     evt_table_lock();
 
     int slot = -1;
@@ -774,6 +781,14 @@ int64_t sys_event_port_create(ppu_context* ctx)
         return (int64_t)(int32_t)CELL_EAGAIN;
     }
 
+    uint32_t port_id = (uint32_t)(slot + 1);
+
+    if (name == 0) // SYS_EVENT_PORT_NO_NAME
+    {
+        uint64_t pid = sys_process_getpid();
+        name = (pid << 32) | port_id;
+    }
+
     sys_event_port_info* p = &g_sys_event_ports[slot];
     memset(p, 0, sizeof(*p));
     p->active = 1;
@@ -781,15 +796,31 @@ int64_t sys_event_port_create(ppu_context* ctx)
     p->name   = name;
     p->connected_queue = 0;
 
-    uint32_t port_id = (uint32_t)(slot + 1);
     fprintf(stderr, "[evt] port_create -> id=%u type=%d name=0x%llX\n",
             port_id, (int)port_type, (unsigned long long)name);
-    if (id_out_addr != 0) {
-        write_be32(id_out_addr, port_id);
-    }
+    
+    *out_port_id = port_id;
 
     evt_table_unlock();
     return CELL_OK;
+}
+
+int64_t sys_event_port_create(ppu_context* ctx)
+{
+    uint32_t id_out_addr = LV2_ARG_PTR(ctx, 0);
+    int32_t  port_type = LV2_ARG_S32(ctx, 1);
+    uint64_t name = LV2_ARG_U64(ctx, 2);
+
+    uint32_t port_id = read_be32(id_out_addr);
+
+    int64_t ret = event_port_create(&port_id, port_type, name);
+
+    if (port_id != 0)
+        write_be32(id_out_addr, port_id);
+
+    fprintf(stderr, "[evt] port_create lr=0x%llX\n", ctx->lr);
+
+    return ret;
 }
 
 int64_t sys_event_port_destroy(ppu_context* ctx)

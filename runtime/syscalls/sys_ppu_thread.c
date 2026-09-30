@@ -38,6 +38,9 @@ static PPU_TLS int     s_exit_armed = 0;
                         * returns 0 on those threads). */
 #endif
 
+#include "ps3emu/portable_builtins.h"
+
+
 /* ---------------------------------------------------------------------------
  * Globals
  * -----------------------------------------------------------------------*/
@@ -113,6 +116,10 @@ static void* ppu_host_thread_proc(void* param)
      * then dies silently with an access violation INSIDE the handler and the
      * backtrace that would name the recursing function is lost. */
     { ULONG g = 256 * 1024; SetThreadStackGuarantee(&g); }
+
+    WCHAR name[128];
+    MultiByteToWideChar(CP_ACP, 0, info->name, -1, name, 128);
+    SetThreadDescription(info->host_thread, name);
 #endif
 
     /* Register this thread's context for lwarx/stwcx cross-thread reservation
@@ -122,7 +129,7 @@ static void* ppu_host_thread_proc(void* param)
 
     fprintf(stderr, "[THREAD %llu] host thread started, entry=0x%08llX hosttid=%lu\n",
             (unsigned long long)info->ctx.thread_id,
-            (unsigned long long)info->entry_addr), (unsigned long)GetCurrentThreadId();
+            (unsigned long long)info->entry_addr, (unsigned long)GetCurrentThreadId());
 
     /* Invoke the recompiled entry point */
     if (g_ppu_thread_entry_trampoline) {
@@ -797,7 +804,7 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                   static unsigned long tot;
                   const uint32_t ram = vm_read32(0x001BC35Cu);
                   const uint32_t insn =
-                      __builtin_bswap32(vm_read32(ram + (pc & 0x001FFFFCu)));
+                      PORT_BSWAP32(vm_read32(ram + (pc & 0x001FFFFCu)));
                   const uint32_t op = insn >> 26;
                   op_n[op & 63]++;
                   if (op == 0) sp_n[insn & 63]++;
@@ -964,14 +971,14 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                           fprintf(stderr, "  handles:");
                           for (int q = 0; q < 5; q++)
                               fprintf(stderr, " %08X",
-                                      __builtin_bswap32(vm_read32(ram + sl[q])));
+                                    PORT_BSWAP32(vm_read32(ram + sl[q])));
                           /* And each CD event's STATUS, from its EvCB. This is
                            * the delivery question: EvStACTIVE (0x2000) means
                            * open and waiting; EvStALREADY (0x4000) means it has
                            * been DELIVERED and not yet consumed. All 0x2000
                            * forever = the CD interrupt never fires. Read here,
                            * in the same report, deliberately. */
-                          { const uint32_t tot = __builtin_bswap32(vm_read32(ram + 0x0120u));
+                          { const uint32_t tot = PORT_BSWAP32(vm_read32(ram + 0x0120u));
                             const uint32_t tb = tot & 0x1FFFFFu;
                             fprintf(stderr, "  I_STAT_or=%08X I_MASK_or=%08X"
                                           " SR_or=%08X CAUSE_or=%08X line_or=%X",
@@ -1001,12 +1008,12 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                           fprintf(stderr, "  ev[cls/status]:");
                             for (int q = 0; q < 5; q++) {
                                 const uint32_t h =
-                                    __builtin_bswap32(vm_read32(ram + sl[q]));
+                                    PORT_BSWAP32(vm_read32(ram + sl[q]));
                                 if ((h >> 24) != 0xF1u) { fprintf(stderr, " -"); continue; }
                                 const uint32_t cb = tb + (h & 0xFFFFu) * 0x1Cu;
                                 fprintf(stderr, " %X/%04X",
-                                        __builtin_bswap32(vm_read32(ram + cb)) & 0xFu,
-                                        __builtin_bswap32(vm_read32(ram + cb + 4)) & 0xFFFFu);
+                                    PORT_BSWAP32(vm_read32(ram + cb)) & 0xFu,
+                                    PORT_BSWAP32(vm_read32(ram + cb + 4)) & 0xFFFFu);
                             } }
                         }
                         fprintf(stderr, "\n");
@@ -1051,7 +1058,7 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                       fprintf(stderr, "[r3000mem] %08X:", 0x80000000u | base);
                       for (int q = 0; q < 16; q++)
                           fprintf(stderr, " %08X",
-                                  __builtin_bswap32(vm_read32(ram + base + q * 4u)));
+                              PORT_BSWAP32(vm_read32(ram + base + q * 4u)));
                       fprintf(stderr, "\n");
                       { static const char* rn[32] = {
                             "zr","at","v0","v1","a0","a1","a2","a3",
