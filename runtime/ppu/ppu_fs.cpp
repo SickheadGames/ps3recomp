@@ -342,6 +342,9 @@ static void cellFsClose(ppu_context* ctx)
     int fd = (int)(uint32_t)ctx->gpr[3];
     if (getenv("FS_CALLER")) { char w[64]="?"; ppu_guest_caller(w,sizeof w);
         fprintf(stderr, "[fs] close fd=%d  (by %s)\n", fd, w); }
+    else
+        fprintf(stderr, "[fs] close fd=%d\n", fd);
+
     if (fd >= 0 && fd < FS_MAX && g_files[fd]) {
         if (g_fd_usm[fd] && getenv("PS3_FSLOG_READS")) fprintf(stderr, "[USMRD] CLOSE usm fd=%d\n", fd);
         fclose(g_files[fd]); g_files[fd] = nullptr; g_fd_usm[fd] = 0;
@@ -522,10 +525,14 @@ static void cellFsStat(ppu_context* ctx)
         if (getenv("PS3_FSLOG")) fprintf(stderr, "[fs] stat '%s' -> ENOENT\n", gpath);
         ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_ENOENT; return;
     }
-    if (getenv("PS3_FSLOG")) fprintf(stderr, "[fs] stat '%s' -> OK (size=%lld)\n", gpath, (long long)st.st_size);
     uint32_t mode = (st.st_mode & S_IFDIR) ? (CELL_FS_S_IFDIR | 0x1FF)
-                                           : (CELL_FS_S_IFREG | 0x1B6);
-    if (sb) write_stat(sb, mode, (uint64_t)st.st_size);
+        : (CELL_FS_S_IFREG | 0x1B6);
+
+    // Directories get the drive block size.
+    uint64_t size = (st.st_mode & S_IFDIR) ? 4096 : st.st_size;
+
+    if (getenv("PS3_FSLOG")) fprintf(stderr, "[fs] stat '%s' -> OK (size=%lld mode=%d)\n", gpath, size, mode);
+    if (sb) write_stat(sb, mode, size);
     if (getenv("PS3_FSLOG") && strstr(gpath,".toc")) fprintf(stderr,"[FSDBG] cellFsStat('%s') -> size=0x%llX\n",gpath,(unsigned long long)st.st_size);
     ctx->gpr[3] = CELL_OK;
 }
@@ -721,8 +728,8 @@ static void cellFsAioRead(ppu_context* ctx)
                 id, fd, (unsigned long long)offset, (unsigned long long)size, n);
 
     ctx->gpr[3] = CELL_OK;
-    if (cb_opd) ps3_invoke_guest(cb_opd, aio, (uint64_t)(int64_t)err,
-                                 (uint64_t)(int64_t)id, (uint64_t)n, 0, 0, 0, 0);
+    if (cb_opd) 
+        ps3_invoke_guest(cb_opd, aio, (uint64_t)(int64_t)err, (uint64_t)(int64_t)id, (uint64_t)n, 0, 0, 0, 0);
 }
 
 extern "C" void ppu_fs_register(void)
