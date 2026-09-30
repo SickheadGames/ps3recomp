@@ -31,6 +31,58 @@ extern "C" void     vm_write64(uint64_t a, uint64_t v);
 /* Simple bump allocator for TLS areas, in a free vm region below the stack. */
 static uint32_t s_tls_next = 0x0E000000u;
 
+/* Simple mutex for thread table access */
+#ifdef _WIN32
+static CRITICAL_SECTION s_tls_lock;
+static int              s_tls_lock_init = 0;
+#else
+static pthread_mutex_t  s_tls_lock = PTHREAD_MUTEX_INITIALIZER;
+#endif
+
+static void tls_lock(void)
+{
+#ifdef _WIN32
+    if (!s_tls_lock_init) {
+        InitializeCriticalSection(&s_tls_lock);
+        s_tls_lock_init = 1;
+    }
+    EnterCriticalSection(&s_tls_lock);
+#else
+    pthread_mutex_lock(&s_tls_lock);
+#endif
+}
+
+static void tls_unlock(void)
+{
+#ifdef _WIN32
+    LeaveCriticalSection(&s_tls_lock);
+#else
+    pthread_mutex_unlock(&s_tls_lock);
+#endif
+}
+
+extern "C" uint32_t g_tls_vaddr;
+extern "C" uint32_t g_tls_filesz;
+extern "C" uint32_t g_tls_memsz;
+
+extern "C" uint32_t ppu_tls_alloc(uint32_t* out_block)
+{
+    tls_lock();
+
+    uint32_t block = s_tls_next;
+    uint32_t total = ((g_tls_memsz + 0x7000u + 0x1000u) + 0xFFFu) & ~0xFFFu;
+    s_tls_next += total;
+
+    tls_unlock();
+
+    memset(vm_base + block, 0, total);
+    if (g_tls_vaddr && g_tls_filesz)
+        memcpy(vm_base + block, vm_base + g_tls_vaddr, g_tls_filesz);
+
+    if (out_block) *out_block = block;
+    return block + 0x7000u;
+}
+
 /* sys_initialize_tls(u64 main_thread_id, u32 tls_seg_addr, u32 tls_seg_size,
  *                     u32 tls_mem_size) -- set up the main thread's TLS block
  * and point r13 (the PPC64 thread pointer) at it. TLS variables are accessed

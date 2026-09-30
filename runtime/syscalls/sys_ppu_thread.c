@@ -328,6 +328,9 @@ void ppu_prof_stamp(void* vctx, unsigned lr)
         t->prof_pc = lr;
 }
 
+
+extern uint32_t ppu_tls_alloc(uint32_t* out_block);
+
 int64_t sys_ppu_thread_create(ppu_context* ctx)
 {
     uint32_t tid_out_addr = LV2_ARG_PTR(ctx, 0);
@@ -364,8 +367,12 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
     t->ctx.cia = entry;
     t->ctx.gpr[3] = arg;
     ppu_set_stack(&t->ctx, (uint64_t)stack_addr, (uint64_t)stack_size);
+
     /* Copy TOC from creating thread */
     t->ctx.gpr[2] = ctx->gpr[2];
+
+    // Per-thread TLS
+    t->ctx.gpr[13] = ppu_tls_alloc(&t->tls_addr);
 
     uint64_t thread_id = (uint64_t)(slot + 1);
     t->ctx.thread_id = thread_id;
@@ -411,9 +418,11 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
         *out = be_id;
     }
 
-    fprintf(stderr, "[SYS] sys_ppu_thread_create tid=%llu name=\"%s\" entry=0x%08llX arg=0x%llX stack=0x%X prio=%d\n",
+    fprintf(stderr, "[SYS] sys_ppu_thread_create tid=%llu name=\"%s\" entry=0x%08llX arg=0x%llX stack=0x%X prio=%d tls block=0x%08X r13=0x%08X\n",
             (unsigned long long)thread_id, t->name, (unsigned long long)entry, (unsigned long long)arg,
-            stack_size, priority);
+            stack_size, priority,
+            t->tls_addr, (uint32_t)t->ctx.gpr[13]);
+
     /* YDKJ: dump the worker arg-object: func_000750A8 (thread body) does
      * this=[arg+0x8], vtable=[arg+0xC], method=[vtable+0]. If this(+0x8) is null
      * the worker dispatches its job on a null object -> construction never runs. */
