@@ -54,6 +54,11 @@ endif()
 # to a stub wherever the shader tools are absent, so it is part of the
 # library everywhere. See the "Guest shaders on Metal" section below.
 list(APPEND HLE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_shader_msl.cpp")
+# cellAtrac decodes with FFmpeg's ATRAC3plus decoder as extracted by PPSSPP
+# (LGPL-2.1, kept separate in third_party/at3_standalone -- see its README).
+file(GLOB AT3_SOURCES "third_party/at3_standalone/*.cpp")
+set_source_files_properties(${AT3_SOURCES} PROPERTIES COMPILE_OPTIONS "-w")  # upstream code
+list(APPEND HLE_SOURCES ${AT3_SOURCES})
 
 # Runtime core (syscalls, PPU, SPU, memory)
 file(GLOB_RECURSE RUNTIME_SOURCES
@@ -67,7 +72,12 @@ file(GLOB_RECURSE RUNTIME_SOURCES
 #    per-game against the lifter-generated ppu_recomp.h (and the game's RSX/D3D12
 #    backend), not as part of the game-agnostic runtime library. See
 #    docs/PPU_RECOMP.md.
-list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/tests/|/runtime/ppu/|/runtime/host/")
+#  - spu_dispatch_mt.c: the musttail SPU indirect-branch fast path. It uses
+#    __attribute__((musttail)), which MSVC cannot parse, and it must be compiled
+#    *inside the game build* by clang so the tail call is guaranteed -- a plain
+#    call leaks one resolver frame per guest loop iteration. A port adds it to
+#    its own target; see templates/project/CMakeLists.txt.
+list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/tests/|/runtime/ppu/|/runtime/host/|/spu_dispatch_mt\.c$")
 
 # ---------------------------------------------------------------------------
 # Static library
@@ -242,6 +252,14 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
         # the base ISA and Clang fuses by default there. A PPC fmadd is
         # spelt as one where the lifter means one.
         -ffp-contract=off
+        # Explicit, because the per-config defaults cannot be trusted: this
+        # tree's caches carry CMAKE_C_FLAGS_RELEASE="" and CMAKE_CXX_FLAGS_RELEASE="",
+        # and clang-cl with no /O flag compiles at /Od -- a "Release" runtime
+        # was unoptimised without a word. Duplicating a default -O2 is harmless.
+        $<$<CONFIG:Release,RelWithDebInfo>:-O2>
+        # SSE4.1 (any x86-64 since ~2008): pshufb/blendv for spu_shufb, the
+        # hottest SPU op in lifted audio code.
+        -msse4.1
     )
 elseif(MSVC)
     # Real cl.exe -- clang-cl reports its id as Clang and is handled above.

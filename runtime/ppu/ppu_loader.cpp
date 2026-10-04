@@ -457,6 +457,16 @@ static uint32_t samp_lookup(uintptr_t rip)
      * describes one function. Kept in preference to RtlLookupFunctionEntry
      * because the lifted TU carries no .pdata (the startup self-check says so),
      * which makes the exact path blind to guest code entirely. */
+    /* CAVEAT -- identical code folding. The linker merges functions with
+     * identical bodies, and a lifted tree has thousands of `{ return; }`
+     * stubs, so many guest addresses share ONE host address. The map then
+     * holds several entries at that address and this search picks whichever
+     * the sort left first: the name is then one arbitrary member of the fold,
+     * not the function that ran. Guitar Hero III profiled as 9% in
+     * func_009927A4, which is `{ return; }` -- a hot empty stub is the
+     * signature of this, not a finding. A folded attribution says "some
+     * trivial function", nothing more; only a name with a real body is
+     * evidence. */
     uintptr_t next = (k + 1 < s_samp_n) ? s_samp_map[k + 1].h : s_samp_map[k].h + 0x20000;
     if (rip >= next) return 0;
     return s_samp_map[k].spu ? (0x80000000u | s_samp_map[k].g) : s_samp_map[k].g;
@@ -522,6 +532,26 @@ static int samp_mod_hit(uintptr_t rip)
     return 0;
 }
 
+/* Host-code RVAs in the main exe, 16-byte buckets: the module line only says
+ * "gh3.exe", this says which runtime/backend function. Resolve offline
+ * against the link map. */
+#define SAMP_RVAS 8192
+static uint32_t s_rva_key[SAMP_RVAS];
+static uint64_t s_rva_ct[SAMP_RVAS];
+
+static void samp_rva_hit(uintptr_t rip)
+{
+    static uintptr_t base;
+    if (!base) base = (uintptr_t)GetModuleHandleA(NULL);
+    uintptr_t off = rip - base;
+    if (off >= 0x40000000u) return;
+    uint32_t key = (uint32_t)(off >> 4) + 1;
+    for (uint32_t i = (key * 2654435761u) % SAMP_RVAS, n = 0; n < SAMP_RVAS; n++, i = (i + 1) % SAMP_RVAS) {
+        if (s_rva_key[i] == key) { s_rva_ct[i]++; return; }
+        if (!s_rva_key[i]) { s_rva_key[i] = key; s_rva_ct[i] = 1; return; }
+    }
+}
+
 static void samp_report(void)
 {
     fprintf(stderr, "[samp] %llu samples, %llu in guest code (%.1f%%)\n",
@@ -565,7 +595,42 @@ static void samp_report(void)
                 s_t2_id[k], (unsigned long long)s_t2_guest[k],
                 (unsigned long long)s_t2_ntdll[k], (unsigned long long)s_t2_other[k]);
     }
+    for (int rank = 0; rank < 25; rank++) {
+        uint64_t best = 0; int bi = -1;
+        for (int k = 0; k < SAMP_RVAS; k++)
+            if (s_rva_ct[k] > best) { best = s_rva_ct[k]; bi = k; }
+        if (bi < 0 || !best) break;
+        fprintf(stderr, "[samp] rva 0x%08X %5.1f%% (%llu)\n", (s_rva_key[bi] - 1) << 4,
+                s_samp_total ? 100.0 * (double)best / (double)s_samp_total : 0.0,
+                (unsigned long long)best);
+        s_rva_ct[bi] = 0;
+    }
+    memset(s_rva_key, 0, sizeof s_rva_key); memset(s_rva_ct, 0, sizeof s_rva_ct);
+    memset(s_t2_id, 0, sizeof s_t2_id); memset(s_t2_guest, 0, sizeof s_t2_guest);
+    memset(s_t2_ntdll, 0, sizeof s_t2_ntdll); memset(s_t2_other, 0, sizeof s_t2_other);
+    s_samp_total = s_samp_guest = 0;
     fflush(stderr);
+}
+
+/* PS3_SAMPLE_MAIN=1: profile ONLY the boot thread (guest tid 1), and credit a
+ * sample whose RIP is in runtime code (vm_read32, ps3_indirect_call, ...) to
+ * the nearest lifted return address on its stack. A thread that is busy but
+ * mostly inside non-inline memory helpers otherwise reads as "other" and the
+ * guest histogram says nothing about where it loops. */
+static DWORD s_samp_boot_tid;
+static int   s_samp_main = -1;
+
+static uint32_t samp_stack_guest(HANDLE h, const CONTEXT* c)
+{
+    (void)h;
+    const uintptr_t* sp = (const uintptr_t*)c->Rsp;
+    for (int i = 0; i < 512; i++) {          /* 4 KB of stack */
+        uintptr_t v;
+        __try { v = sp[i]; } __except (1) { return 0; }
+        uint32_t g = samp_lookup(v);
+        if (g) return g;
+    }
+    return 0;
 }
 
 static DWORD WINAPI samp_thread(LPVOID p)
@@ -587,6 +652,7 @@ static DWORD WINAPI samp_thread(LPVOID p)
             THREADENTRY32 te; te.dwSize = sizeof te;
             if (Thread32First(snap, &te)) do {
                 if (te.th32OwnerProcessID != pid || te.th32ThreadID == self) continue;
+                if (s_samp_main > 0 && te.th32ThreadID != s_samp_boot_tid) continue;
                 HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT,
                                       FALSE, te.th32ThreadID);
                 if (!h) continue;
@@ -595,9 +661,11 @@ static DWORD WINAPI samp_thread(LPVOID p)
                     if (GetThreadContext(h, &c)) {
                         s_samp_total++;
                         uint32_t g = samp_lookup((uintptr_t)c.Rip);
+                        if (!g && s_samp_main > 0) g = samp_stack_guest(h, &c);
                         if (g) { s_samp_guest++; samp_hit(g); samp_tid_hit(te.th32ThreadID);
                                  samp_tid2(te.th32ThreadID, 1, 0); }
                         else { int nt = samp_mod_hit((uintptr_t)c.Rip);
+                               if (!nt) samp_rva_hit((uintptr_t)c.Rip);
                                samp_tid2(te.th32ThreadID, 0, nt); }
                     }
                     ResumeThread(h);
@@ -618,11 +686,56 @@ static DWORD WINAPI samp_thread(LPVOID p)
     return 0;
 }
 
+/* PPU_POKE_ADDR=<hexEA> PPU_POKE_VAL=<hex> [PPU_POKE_MS=<ms>]: WRITE a guest
+ * word periodically.
+ *
+ * DIAGNOSTIC THAT FABRICATES GUEST STATE -- opt-in, never a default, same
+ * standing as SPURS_EF_SPU_REPLY. It exists because PPU_FORCE_READ_ADDR
+ * cannot answer "what happens once this counter reaches 0": forcing the READ
+ * also fakes the lwarx that loads a store-conditional's expected value, so the
+ * CAS compares against a value memory does not hold and retries forever. That
+ * is a livelock the force itself created -- measured at 1.4M failed
+ * store-conditionals on one address in Guitar Hero III, all of them mine.
+ *
+ * Writing the word leaves memory self-consistent: lwarx, the CAS and the
+ * polling reader all see the same thing, so the guest behaves as it would if
+ * whatever should have cleared the counter had done so. */
+extern "C" void ppu_resv_break(uint64_t ea);
+static DWORD WINAPI poke_thread(LPVOID p)
+{
+    const uint32_t ea  = (uint32_t)(uintptr_t)p;
+    uint32_t val = 0; unsigned ms = 10;
+    { const char* e = getenv("PPU_POKE_VAL"); if (e) val = (uint32_t)strtoul(e, 0, 16);
+      const char* m = getenv("PPU_POKE_MS");  if (m) { ms = (unsigned)atoi(m); if (!ms) ms = 1; } }
+    const uint32_t be = __builtin_bswap32(val);
+    fprintf(stderr, "[poke] writing 0x%08X to guest 0x%08X every %ums (FABRICATED state)\n",
+            val, ea, ms);
+    fflush(stderr);
+    for (;;) {
+        if (vm_base) {
+            __atomic_store_n((uint32_t*)(vm_base + ea), be, __ATOMIC_SEQ_CST);
+            ppu_resv_break(ea);   /* a real writer would break reservations too */
+        }
+        Sleep(ms);
+    }
+}
+static void ppu_poke_start(void)
+{
+    const char* e = getenv("PPU_POKE_ADDR");
+    if (!e) return;
+    uint32_t ea = (uint32_t)strtoul(e, 0, 16);
+    if (!ea) return;
+    CreateThread(NULL, 0, poke_thread, (LPVOID)(uintptr_t)ea, 0, NULL);
+}
+
 void ps3_sampler_start(void)
 {
+    ppu_poke_start();                     /* independent of PS3_SAMPLE */
     const char* e = getenv("PS3_SAMPLE");
     if (!e) return;
     unsigned ms = (unsigned)atoi(e); if (!ms) ms = 5;
+    s_samp_boot_tid = GetCurrentThreadId();
+    s_samp_main = getenv("PS3_SAMPLE_MAIN") ? 1 : 0;
     /* Self-check: does .pdata actually describe the lifted bodies? If not, the
      * exact attribution mode misses ALL guest code by construction and its "0
      * guest samples" means nothing. Print it rather than assume either way. */
@@ -711,6 +824,49 @@ extern "C" void ppu_resv_register(ppu_context* c)
     long i = _InterlockedExchangeAdd(&g_resv_ctx_n, 1);
     if (i < PPU_RESV_MAX) g_resv_ctxs[i] = c;
 }
+/* Where every guest thread is, as a GUEST address.
+ *
+ * This is the probe the tree was missing. A thread stuck in lifted code is
+ * invisible to everything else: PS3_SCBLOCK_PROF only times lv2 syscalls, the
+ * usleep histogram only sees threads that sleep, g_hle_inflight only sees HLE
+ * handlers, and the sampler resolves a host RIP -- which the lifted TU has no
+ * .pdata for, and which identical code folding makes ambiguous anyway (a hot
+ * `{ return; }` stub is the tell). Guitar Hero III's main thread went dark to
+ * all four at once.
+ *
+ * ctx->lr needs none of that machinery: the lifter writes it before every call,
+ * it is already a guest address, and sys_ppu_thread_create registers every
+ * thread's context here for the reservation set. So the answer was sitting in
+ * an array nobody read. Best-effort and unlocked -- a torn read of one word
+ * costs a wrong digit in a diagnostic, and the alternative is taking a lock on
+ * the reservation path to print a log line.
+ *
+ * CAVEAT: an unchanged lr does NOT mean the thread has made no calls. A
+ * lifted INDIRECT call (ps3_indirect_call, bctrl through a vtable) does not
+ * write lr, so a thread looping on one sits at the same lr indefinitely
+ * while calling out every pass. Reading a pinned lr as "no calls since
+ * entry" narrowed a search to the wrong loop once already. lr names the
+ * last DIRECT call site and nothing more. */
+extern "C" void ppu_report_guest_lrs(void)
+{
+    long n = g_resv_ctx_n; if (n > PPU_RESV_MAX) n = PPU_RESV_MAX;
+    for (long i = 0; i < n; i++) {
+        ppu_context* c = g_resv_ctxs[i];
+        if (!c) continue;
+        fprintf(stderr, "[WATCHDOG]   guest-tid %-3u lr=0x%08X  r3=0x%08X sp=0x%08X\n",
+                (unsigned)c->thread_id, (uint32_t)c->lr,
+                (uint32_t)c->gpr[3], (uint32_t)c->gpr[1]);
+        /* With BCTRL_RING armed, follow it with that thread's recent INDIRECT
+         * targets. lr cannot see those (bctrl does not write it), so for a
+         * thread looping on a vtable call the ring is the only record of where
+         * it has actually been -- and the two together distinguish "grinding
+         * through varied work" from "retrying one target". */
+        { extern void ppu_dump_bctrl_ring(uint32_t, const char*);
+          if (getenv("BCTRL_RING")) ppu_dump_bctrl_ring((uint32_t)c->thread_id, "watchdog"); }
+    }
+    fflush(stderr);
+}
+
 /* Break every reservation on ea's word (real-PPC granule semantics on a store).
  * Best-effort/unlocked: the break is a single word write; a concurrent stwcx
  * recheck reads reserve_addr under its slot lock and the value-CAS backstops the
@@ -759,6 +915,15 @@ static void resv_check_reg(ppu_context* self)
  * other thread's reservation on that word so their stwcx retries. */
 /* PPU_RESV_OFF=1 -> plain value-CAS (v0 baseline, for A/B diagnosis). */
 static inline int resv_off() { static int v = -1; if (v < 0) v = getenv("PPU_RESV_OFF") ? 1 : 0; return v; }
+/* A successful stwcx./stdcx. is a STORE, and the write watch could not see
+ * one: PPU_WWATCH hooks vm_write*, and a lifted stwcx. goes straight to a
+ * host compare-exchange on guest memory. So any field maintained with
+ * atomics -- every refcount and every job counter -- read as "nothing ever
+ * writes this", which is the most confident kind of wrong answer a probe
+ * can give. Report the commit through the same path as an ordinary store. */
+extern "C" void ppu_ww_note_atomic(uint32_t ea, uint32_t val, int width, void* ra);
+extern "C" uint32_t g_ww_lo, g_ww_hi;
+
 extern "C" int ppu_stwcx32(uint64_t ea, uint32_t expected, uint32_t val)
 {
     uint32_t exp_raw = PORT_BSWAP32(expected);
@@ -775,6 +940,16 @@ extern "C" int ppu_stwcx32(uint64_t ea, uint32_t expected, uint32_t val)
      * cannot land inside an SPU PUTLLC's compare/commit window (nor the
      * reverse), and the reserving SPU gets its lost-reservation event. */
     int coh = spu_coh_is_reserved((uint32_t)ea);
+    /* SPU_PUTLLC_WHY=1: count PPU commits that land on a line an SPU has
+     * reserved. If an SPU's PUTLLC never succeeds for "no reservation", the
+     * PPU hammering the same 128-byte line is one of only two agents that can
+     * be taking it. */
+    if (coh) { static int s_w = -1;
+        if (s_w < 0) s_w = getenv("SPU_PUTLLC_WHY") ? 1 : 0;
+        if (s_w) { static unsigned long long n;
+            if ((++n % 100000) == 1)
+                fprintf(stderr, "[ppu-steals-resv] %llu: PPU CAS on reserved line 0x%08X\n",
+                        n, (uint32_t)ea & ~127u); } }
     if (coh) spu_lockline_lock();
     int ok = port_atomic_casU32((uint32_t*)(vm_base + ea), &exp_raw, new_raw) ? 1 : 0;
     if (coh) {
@@ -783,6 +958,53 @@ extern "C" int ppu_stwcx32(uint64_t ea, uint32_t expected, uint32_t val)
     }
     if (ok) ppu_resv_break(ea);
     resv_unlock(L);
+    /* PPU_CASWATCH=<hex ea>: log successful stwcx. on that 128-byte line.
+     * PPU_WWATCH hooks plain stores only; an atomic counter (a semaphore an SPU
+     * spins on) is written exclusively through here and looked untouched. */
+    { static int64_t s_cw = -2;
+      if (s_cw == -2) { const char* e = getenv("PPU_CASWATCH"); s_cw = e ? (int64_t)(strtoul(e, 0, 16) & ~127u) : -1; }
+      if (ok && s_cw >= 0 && ((uint32_t)ea & ~127u) == (uint32_t)s_cw) {
+          static int n; if (n++ < 200)
+              fprintf(stderr, "[caswatch] 0x%08X %08X -> %08X lr=0x%08X tid=%u\n", (uint32_t)ea, expected, val,
+                      self ? (uint32_t)self->lr : 0u, self ? (unsigned)self->thread_id : 0u); } }
+    /* PPU_CAS_FAIL=1: histogram the EAs whose store-conditional keeps FAILING.
+     *
+     * A lwarx/stwcx. retry loop that never succeeds is a livelock, and it is
+     * invisible to every other probe: the thread issues no syscall, sleeps
+     * nowhere, enters no HLE, and its lr stays pinned at whatever call brought
+     * it in. "Which address" is the whole question, and nothing could answer
+     * it -- so count failures per address and name the top ones. */
+    { static int s_cf = -1;
+      if (s_cf < 0) s_cf = getenv("PPU_CAS_FAIL") ? 1 : 0;
+      if (s_cf && !ok) {
+          enum { CF_N = 64 };
+          static uint32_t cf_ea[CF_N]; static uint32_t cf_n[CF_N];
+          static int cf_used = 0; static long cf_total = 0;
+          uint32_t a32 = (uint32_t)ea;
+          int i = 0;
+          for (; i < cf_used; i++) if (cf_ea[i] == a32) break;
+          if (i == cf_used && cf_used < CF_N) { cf_ea[cf_used] = a32; cf_used++; }
+          if (i < CF_N) cf_n[i]++;
+          if ((++cf_total % 200000) == 0) {
+              fprintf(stderr, "[cas-fail] %ld failed store-conditionals; top EAs:\n",
+                      cf_total);
+              for (int k = 0; k < 5; k++) {
+                  int best = -1;
+                  for (int j = 0; j < cf_used; j++)
+                      if (cf_n[j] && (best < 0 || cf_n[j] > cf_n[best])) best = j;
+                  if (best < 0) break;
+                  fprintf(stderr, "[cas-fail]   0x%08X  x%u\n", cf_ea[best], cf_n[best]);
+                  cf_n[best] = 0;
+              }
+              fflush(stderr);
+              for (int j = 0; j < cf_used; j++) cf_n[j] = 0;
+          }
+      } }
+    /* Gate on the armed window before the call: this sits on EVERY successful
+     * stwcx., which locks use, so the disabled cost has to be two compares and
+     * no call at all. */
+    if (ok && g_ww_lo && (uint32_t)ea >= g_ww_lo && (uint32_t)ea < g_ww_hi)
+        ppu_ww_note_atomic((uint32_t)ea, val, 4, __builtin_return_address(0));
     return ok;
 }
 extern "C" int ppu_stdcx64(uint64_t ea, uint64_t expected, uint64_t val)
@@ -805,6 +1027,14 @@ extern "C" int ppu_stdcx64(uint64_t ea, uint64_t expected, uint64_t val)
     }
     if (ok) { ppu_resv_break(ea); ppu_resv_break(ea + 4); }  /* 8-byte store spans two words */
     resv_unlock(L);
+    if (ok && g_ww_lo && (uint32_t)ea + 4u >= g_ww_lo && (uint32_t)ea < g_ww_hi) {
+        /* Report as two words: the watch window is word-granular, and a
+         * doubleword CAS on a counter pair is exactly the case worth seeing. */
+        ppu_ww_note_atomic((uint32_t)ea,     (uint32_t)(val >> 32), 4,
+                           __builtin_return_address(0));
+        ppu_ww_note_atomic((uint32_t)ea + 4, (uint32_t)val, 4,
+                           __builtin_return_address(0));
+    }
     return ok;
 }
 
@@ -936,6 +1166,13 @@ extern "C" void ppu_guard_page(uint32_t guest_ea)
     s_guard_ea   = guest_ea;
     s_guard_page = ((uintptr_t)vm_base + guest_ea) & ~(uintptr_t)0xFFF;
     AddVectoredExceptionHandler(1, ppu_guard_veh);   /* runs before vm_commit_veh */
+    /* Commit first: VirtualProtect fails silently on a reserved page, and a
+     * page nothing has touched yet (VRAM, early in boot) is exactly that --
+     * the guard then reported "no writer" for a buffer that was written. */
+    /* The whole 64 KB demand-commit block: vm_commit_veh commits a block at a
+     * time on first touch, and doing so later re-commits this page read-write,
+     * silently disarming the guard. */
+    VirtualAlloc((void*)(s_guard_page & ~(uintptr_t)0xFFFF), 0x10000, MEM_COMMIT, PAGE_READWRITE);
     DWORD old;
     VirtualProtect((void*)s_guard_page, 0x1000, PAGE_READONLY, &old);
     fprintf(stderr, "[GUARD] armed on guest 0x%08X (host page %p)\n", guest_ea, (void*)s_guard_page);
@@ -1020,6 +1257,120 @@ static inline int vm_oob(uint32_t a, uint32_t n)
     if (PORT_LIKELY(ppu_vm_size == 0)) return 0;
     if (PORT_LIKELY((uint64_t)a + n <= ppu_vm_size)) return 0;
     return vm_oob_report(a, n);
+}
+
+/* A guest STORE into the first page. PS3 userspace starts at 0x10000, so a
+ * store below it is a write through a null (or near-null) pointer and would
+ * fault on real hardware before it landed.
+ *
+ * Here the whole 32-bit guest space is backed, so address 0 is ordinary
+ * writable memory and such a store lands silently. That is not a harmless
+ * difference: Guitar Hero III calls memset() on a null buffer with a large
+ * length, and the sweep runs up from page 0 -- invisible while it crosses the
+ * unused copy of the code image, then straight through .data/.opd/.toc at
+ * 0x009D0000. It zeroes the TOC itself, so afterwards every TOC-relative
+ * global reads as 0: allocator pools go null, vtable dispatch calls address 0,
+ * and the guest reads NULL ten million times. Every one of those looks like a
+ * separate bug, and none of them is where the damage happened.
+ *
+ * So drop the store -- hardware never lets it land -- and say so once per
+ * writing function. [null-read] is the read-side twin; this is the store side,
+ * and it is the more important of the two because a read returns a wrong value
+ * while a write destroys state that was correct.
+ *
+ * ponytail: first page only, not the whole 0..0x10000 userspace hole. A null
+ * pointer plus a struct offset is what this is for; widen it if a title turns
+ * out to scribble higher. */
+extern "C" PPU_THREAD_LOCAL ppu_context* g_active_ctx;
+extern "C" void ppu_dump_guest_stack(ppu_context*, const char*);
+extern "C" uint32_t g_null_sweep_hi = 0;   /* 0 = not sweeping */
+static uint32_t g_null_sweep_last = 0;
+static unsigned g_null_sweep_tid = 0;
+static int vm_null_store_report(uint32_t a, uint32_t v, int width, void* ra)
+{
+    static int en = -1;
+    if (en < 0) { const char* e = getenv("PS3_NULL_WRITE");
+                  en = (e && *e == (char)48) ? 0 : 1; }   /* PS3_NULL_WRITE=0 */
+    if (!en) return 0;                                    /* let it land */
+    { static int sweep = -1;
+      if (sweep < 0) { const char* e = getenv("PS3_NULL_SWEEP"); sweep = e ? 1 : 0; }
+      if (sweep) { g_null_sweep_hi = 1; g_null_sweep_last = a;
+                   g_null_sweep_tid = g_active_ctx
+                                    ? (unsigned)g_active_ctx->thread_id : 0u; } }
+    { static long n = 0;
+      enum { NW_MAX = 8 };
+      long i = n++;
+      if (i < NW_MAX)
+          fprintf(stderr, "[null-write] guest wrote%d 0x%X to 0x%08X (NULL+0x%X)"
+                          " by guest-fn=0x%08X -- DROPPED\n",
+                  width * 8, v, a, a, ppu_prof_resolve_host(ra));
+      else if (i == NW_MAX)
+          fprintf(stderr, "[null-write] further stores into the null page are"
+                          " dropped without a word\n");
+      /* and the guest call chain on the first one: the sampled guest-fn is a
+       * memset/memcpy nine times out of ten, which says nothing about WHICH
+       * buffer was null. The chain names the allocation that failed. */
+      /* ...once per distinct writer, not once overall. The first null store of
+       * a boot is usually a harmless CRT one, and a single global "first" spends
+       * the dump on it and shows nothing for the runaway memset that follows. */
+      { static uint32_t last_fn = 0; uint32_t fn = ppu_prof_resolve_host(ra);
+        if (i < NW_MAX && fn != last_fn && g_active_ctx) {
+            last_fn = fn; ppu_dump_guest_stack(g_active_ctx, "nw"); } }
+      if (i <= NW_MAX) fflush(stderr); }
+    return 1;
+}
+
+/* PS3_NULL_SWEEP=1: contain a runaway sweep that started from a null pointer.
+ *
+ * Dropping the page-0 stores alone does not save the image. memset(NULL, 0, n)
+ * with a large n walks UP out of the null page and keeps going -- Guitar Hero
+ * III clears 82 MB that way, straight through its own .data, .opd and TOC.
+ *
+ * On real hardware that never happens: the FIRST store takes a data-storage
+ * exception and the memset does not continue. So dropping the tail as well is
+ * closer to the machine than letting it land, not further from it.
+ *
+ * ponytail: a monotonic-run heuristic, not dataflow. Once a null-page store is
+ * seen, keep dropping while addresses climb within 0x1000 of the last dropped
+ * one, and stop the moment the pattern breaks. That is enough for a memset or
+ * memcpy and nothing else. It is OFF by default because a false positive drops
+ * a real store; turn it on to test whether the sweep is what is killing a
+ * title. If it becomes load-bearing, replace it with a faulting store. */
+
+
+static int vm_null_sweep(uint32_t a)
+{
+    /* Only the sweeping thread's stores count. The flag is global so the hot
+     * path stays one compare, but every other thread keeps storing while a
+     * memset runs -- and treating those as "the pattern broke" ended the sweep
+     * on its very first store, containing nothing. */
+    if (!g_active_ctx || (unsigned)g_active_ctx->thread_id != g_null_sweep_tid)
+        return 0;   /* another thread, or a host-side store: not our business */
+    /* A WINDOW around the last dropped address, not a monotonic run: a memset
+     * stores descending within each 64-byte block and ascends block to block,
+     * so "strictly increasing" breaks on the second store and contains nothing. */
+    uint32_t d = a > g_null_sweep_last ? a - g_null_sweep_last
+                                       : g_null_sweep_last - a;
+    if (d <= 0x1000u) {
+        if (a > g_null_sweep_last) g_null_sweep_last = a;
+        return 1;                       /* still the same sweep: drop */
+    }
+    g_null_sweep_hi = 0;                /* pattern broken: it is over */
+    { static int said = 0;
+      if (!said) { said = 1;
+          fprintf(stderr, "[null-write] sweep contained, ended at 0x%08X\n",
+                  g_null_sweep_last); fflush(stderr); } }
+    return 0;
+}
+
+/* Hot path: one predictable compare, cold half out of line. */
+static inline int vm_null_store(uint32_t a, uint32_t v, int width, void* ra)
+{
+    if (__builtin_expect(a >= 0x1000u, 1)) {
+        if (__builtin_expect(g_null_sweep_hi == 0, 1)) return 0;
+        return vm_null_sweep(a);
+    }
+    return vm_null_store_report(a, v, width, ra);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1112,14 +1463,74 @@ static inline void ppu_rwatch_hit(uint32_t a, int width, void* ra)
     if (s_lo < 0) return;
     if (a < (uint32_t)s_lo || a >= (uint32_t)s_lo + s_len) return;
     static unsigned long rn;
-    if (++rn <= 24 || (rn % 4096) == 0)
-        fprintf(stderr, "[rwatch] n=%lu read%d 0x%08X guest-fn=0x%08X\n",
-                rn, width, a, ppu_prof_resolve_host(ra));
+    if (++rn <= 24 || (rn % 4096) == 0) {
+        /* ...and the VALUE. PPU_WWATCH has always printed what was written;
+         * the read side printed only the address, so answering "what did it
+         * actually get" meant a second run with a write watch, or a guess --
+         * and a read watch is usually armed precisely because a field reads
+         * wrong. */
+        uint32_t v = 0;
+        if (!vm_oob(a, (uint32_t)width)) {
+            uint32_t t = 0; memcpy(&t, vm_base + a, (size_t)width);
+            v = __builtin_bswap32(t) >> ((4 - width) * 8);
+        }
+        fprintf(stderr, "[rwatch] n=%lu read%d 0x%08X = 0x%X guest-fn=0x%08X\n",
+                rn, width, a, v, ppu_prof_resolve_host(ra));
+    }
+    /* ...and the guest call chain on the first hit, as PPU_WWATCH does. The
+     * sampled guest-fn is a HOST return address that identical code folding
+     * makes ambiguous, and it names the reading function but never who called
+     * it -- which is the question whenever a field reads as garbage. */
+    if (rn == 1 && g_active_ctx) ppu_dump_guest_stack(g_active_ctx, "rw");
 }
+/* Report a guest read through a NULL-ish pointer.
+ *
+ * On a PS3 the first 64 KB is unmapped: dereferencing NULL takes a data-storage
+ * exception and the title dies immediately, holding the pointer that did it.
+ * Our VM is flat and demand-committed, so address 0 reads back as ZERO and the
+ * bug becomes invisible -- which is strictly worse than crashing, because the
+ * guest then computes with the zero.
+ *
+ * Guitar Hero III is the case that earned this. An iterator does
+ *
+ *     end = obj + obj->size;  cur = obj + 0x1C;
+ *     while (end != cur) cur = step(cur);
+ *
+ * with obj == NULL. `obj->size` read as 0, so end was 0 and cur started at
+ * 0x1C, and an equality-terminated loop that can never be equal ran 48 MILLION
+ * iterations, climbing through 2.8 GB of address space and pinning a core --
+ * presenting as "the title boots and then hangs" with nothing pointing at the
+ * NULL. Capped so a title that does this in a hot path cannot flood the log.
+ *
+ * Off with PS3_NULL_READ=0 for a title that dereferences low addresses on
+ * purpose (a few use page 0 as a scratch constant pool). */
+static inline void ppu_null_read_report(uint32_t a, int width, void* ra)
+{
+    static int s_on = -1;
+    if (s_on < 0) { const char* e = getenv("PS3_NULL_READ"); s_on = (e && *e == '0') ? 0 : 1; }
+    if (!s_on) return;
+    static long s_n = 0;
+    if (s_n++ >= 16) return;
+    fprintf(stderr, "[null-read] guest read%d from 0x%08X (NULL+0x%X) by guest-fn=0x%08X%s" "\n",
+            width * 8, a, a, ppu_prof_resolve_host(ra),
+            s_n == 16 ? "  [further NULL reads not reported]" : "");
+    fflush(stderr);
+}
+
 uint8_t  vm_read8 (uint64_t a) { if (vm_oob((uint32_t)a,1)) return 0; vm_hotmap((uint32_t)a,1);
+    if ((uint32_t)a < 0x10000u) ppu_null_read_report((uint32_t)a, 1, __builtin_return_address(0));
 #ifdef VM_SAMPLE_READS
     { static uint64_t c=0; if ((++c % 2000000ull)==0) fprintf(stderr, "[sample] read8  0x%08X ra0=%p ra1=%p\n", (uint32_t)a, PORT_RETURN_ADDRESS(), __builtin_return_address(1)); }
 #endif
+    /* PPU_FORCE_READ_ADDR also applies at byte width. The u32 path has had this
+     * for a while; a title's own feature flags are usually BYTES, so the u32
+     * hook could not reach the thing you most want to pin. Virtua Fighter 5's
+     * render gate is one byte at 0x104D320A -- a constructor clears it and
+     * nothing sets it back, and holding it lets the title flip again. */
+    { static int64_t _fa8=-2; static uint32_t _fv8=0;
+      if(_fa8==-2){ const char* e=getenv("PPU_FORCE_READ_ADDR"); _fa8=e?(int64_t)strtoul(e,0,16):-1;
+                    const char* ev=getenv("PPU_FORCE_READ_VAL"); _fv8=ev?(uint32_t)strtoul(ev,0,16):0; }
+      if (_fa8>=0 && (uint32_t)a==(uint32_t)_fa8) return (uint8_t)_fv8; }
     /* PPU_RWATCH=<hex>[,len]: log the first reads of a guest address range, with
      * the guest function that read it.
      *
@@ -1147,6 +1558,7 @@ uint16_t vm_read16(uint64_t a) { if (vm_oob((uint32_t)a,2)) return 0; ppu_rwatch
       if ((uint32_t)a==last) { if (++n==200000) { fprintf(stderr, "[HOTREAD16] spinning on 0x%08X\n", (uint32_t)a); n=0; } } else { last=(uint32_t)a; n=0; } }
     return PORT_BSWAP16(v); }
 uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0; ppu_rwatch_hit((uint32_t)a, 4, PORT_RETURN_ADDRESS());
+    if ((uint32_t)a < 0x10000u) ppu_null_read_report((uint32_t)a, 4, PORT_RETURN_ADDRESS());
     /* Raw SPU problem state: reading the outbound mailbox POPS it, so that one
      * cannot be served out of memory. Everything else in the window the SPU
      * thread keeps current, so it falls through to the plain load. */
@@ -1258,7 +1670,8 @@ uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0; ppu_rwatch
       } }
       else { last=(uint32_t)a; n=0; } }
     return PORT_BSWAP32(v); }
-uint64_t vm_read64(uint64_t a) { if (vm_oob((uint32_t)a,8)) return 0; vm_hotmap((uint32_t)a,8); uint64_t v; memcpy(&v, vm_base + (uint32_t)a, 8);
+uint64_t vm_read64(uint64_t a) { if (vm_oob((uint32_t)a,8)) return 0; vm_hotmap((uint32_t)a,8);
+    if ((uint32_t)a < 0x10000u) ppu_null_read_report((uint32_t)a, 8, __builtin_return_address(0)); uint64_t v; memcpy(&v, vm_base + (uint32_t)a, 8);
 #ifdef VM_SAMPLE_READS
     { static uint64_t c=0; if ((++c % 2000000ull)==0) fprintf(stderr, "[sample] read64 0x%08X\n", (uint32_t)a); }
 #endif
@@ -1340,7 +1753,11 @@ static inline void barrier_watch_hit(uint32_t a, uint32_t v, int width, void* ra
                                  const char* hi = getenv("PPU_WVAL_HI");
                                  s_wvlo = lo ? (uint32_t)strtoul(lo, 0, 0) : 0;
                                  s_wvhi = hi ? (uint32_t)strtoul(hi, 0, 0) : 0xFFFFFFFFu; }
-      if (s_wv && v == s_wv && a >= s_wvlo && a < s_wvhi) {
+      /* PPU_WVAL_GATE=<file>: only while <file> exists (checked on matches). */
+      static const char* s_wvg = (const char*)-1;
+      if (s_wvg == (const char*)-1) s_wvg = getenv("PPU_WVAL_GATE");
+      if (s_wv && v == s_wv && a >= s_wvlo && a < s_wvhi &&
+          (!s_wvg || GetFileAttributesA(s_wvg) != INVALID_FILE_ATTRIBUTES)) {
           static int _n = 0;
           if (_n++ < 24) {
               fprintf(stderr, "[wv] 0x%08X <- 0x%X (w%d) guest-fn=0x%08X\n",
@@ -1356,7 +1773,14 @@ static inline void barrier_watch_hit(uint32_t a, uint32_t v, int width, void* ra
      * with the writing guest function -- to find who fills (or fails to fill)
      * a struct field (e.g. FMOD's overlay descriptor source at 0x94F680). */
     { static uint32_t s_ww = 0xFFFFFFFFu;
-      if (s_ww == 0xFFFFFFFFu) { const char* e = getenv("PPU_WWATCH"); s_ww = e ? (uint32_t)strtoul(e,0,0) : 0;
+      if (s_ww == 0xFFFFFFFFu) { const char* e = getenv("PPU_WWATCH");
+                                 /* base 16, not 0: the variable is documented as <hexEA>
+                                  * and everyone writes it bare. Under base 0 "10708A14"
+                                  * parses as DECIMAL and stops at the 'A', arming the
+                                  * watch on a different address entirely -- which then
+                                  * reports "nothing writes this" for an address that is
+                                  * written constantly. A 0x prefix still works. */
+                                 s_ww = e ? (uint32_t)strtoul(e,0,16) : 0;
                                  ww_arm_inline_window(s_ww); }
       /* PPU_WWATCH_LEN=<bytes>: widen the watched span. 0x20 is fine for a single
        * field but useless for "who fills this struct" -- the SPURS instance is
@@ -1396,11 +1820,19 @@ static inline void barrier_watch_hit(uint32_t a, uint32_t v, int width, void* ra
                           _cap = e ? atol(e) : 64; }
           long _i = ++_n;
           if (_cap == 0 || _i <= _cap) {
-              fprintf(stderr, "[ww] 0x%08X <- 0x%X (w%d) guest-fn=0x%08X\n",
-                      a, v, width, ppu_prof_resolve_host(ra));
+              /* guest lr and tid as well as the host-sampled function. The
+               * sampler resolves a HOST return address, and identical code
+               * folding makes that ambiguous -- GH3's runaway memset reported
+               * as three different guest functions. ctx->lr is written by the
+               * lifter at every direct call site, so it names the real caller. */
+              extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
+              fprintf(stderr, "[ww] 0x%08X <- 0x%X (w%d) guest-fn=0x%08X"
+                              " lr=0x%08X tid=%u\n",
+                      a, v, width, ppu_prof_resolve_host(ra),
+                      g_active_ctx ? (uint32_t)g_active_ctx->lr : 0u,
+                      g_active_ctx ? (unsigned)g_active_ctx->thread_id : 0u);
               /* On the first write to the watched word, dump the guest caller
                * chain so the origin of a null field can be walked up-stack. */
-              extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
               extern void ppu_dump_guest_stack(ppu_context*, const char*);
               if (_i == 1 && g_active_ctx) ppu_dump_guest_stack(g_active_ctx, "ww");
           } else if (_i == _cap + 1) {
@@ -1419,7 +1851,13 @@ static inline void barrier_watch_hit(uint32_t a, uint32_t v, int width, void* ra
                     a - b, v, width, ppu_prof_resolve_host(ra));
     }
 }
-void vm_write8 (uint64_t a, uint8_t  v) { barrier_watch_hit((uint32_t)a, v, 1, PORT_RETURN_ADDRESS()); if (vm_oob((uint32_t)a,1)) return;
+
+/* See the note on the forward declaration above ppu_stwcx32. */
+extern "C" void ppu_ww_note_atomic(uint32_t ea, uint32_t val, int width, void* ra)
+{
+    barrier_watch_hit(ea, val, width, ra);
+}
+void vm_write8 (uint64_t a, uint8_t  v) { barrier_watch_hit((uint32_t)a, v, 1, PORT_RETURN_ADDRESS()); if (vm_oob((uint32_t)a,1) || vm_null_store((uint32_t)a, v, 1, PORT_RETURN_ADDRESS())) return;
 #ifdef _WIN32
     /* PT detector: does this byte-write turn its word into the hunted truncated value? */
     { if(g_pt_val==-2){const char*e=getenv("PT"); g_pt_val=e?(int64_t)strtoul(e,0,16):-1;}
@@ -1429,9 +1867,9 @@ void vm_write8 (uint64_t a, uint8_t  v) { barrier_watch_hit((uint32_t)a, v, 1, P
         else if(((uint32_t)a&3)==0 && v!=0) pt_restore(wa); /* MSB byte set non-zero = restored */ } }
 #endif
     VM_WRITE_COH(a, &v, 1); }
-void vm_write16(uint64_t a, uint16_t v) { barrier_watch_hit((uint32_t)a, v, 2, PORT_RETURN_ADDRESS()); if (vm_oob((uint32_t)a,2)) return;
+void vm_write16(uint64_t a, uint16_t v) { barrier_watch_hit((uint32_t)a, v, 2, PORT_RETURN_ADDRESS()); if (vm_oob((uint32_t)a,2) || vm_null_store((uint32_t)a, v, 2, PORT_RETURN_ADDRESS())) return;
     v = PORT_BSWAP16(v); VM_WRITE_COH(a, &v, 2); }
-void vm_write32(uint64_t a, uint32_t v) { barrier_watch_hit((uint32_t)a, v, 4, PORT_RETURN_ADDRESS()); if (vm_oob((uint32_t)a,4)) return;
+void vm_write32(uint64_t a, uint32_t v) { barrier_watch_hit((uint32_t)a, v, 4, PORT_RETURN_ADDRESS()); if (vm_oob((uint32_t)a,4) || vm_null_store((uint32_t)a, v, 4, PORT_RETURN_ADDRESS())) return;
 #ifdef _WIN32
     /* PT restore: a full-word store of a valid pointer (high byte set) to a
      * previously-truncated slot clears the record (that truncation was transient). */
@@ -1451,10 +1889,8 @@ void vm_write64(uint64_t a, uint64_t v) {
      * 8-byte store still shows up when only its low or high word is watched. */
     barrier_watch_hit((uint32_t)a,     (uint32_t)(v >> 32), 4, PORT_RETURN_ADDRESS());
     barrier_watch_hit((uint32_t)a + 4, (uint32_t)v,         4, PORT_RETURN_ADDRESS());
-    if (vm_oob((uint32_t)a,8)) 
-        return;
-    v = PORT_BSWAP64(v); 
-    VM_WRITE_COH(a, &v, 8); }
+    if (vm_oob((uint32_t)a,8) || vm_null_store((uint32_t)a, (uint32_t)(v >> 32), 8, PORT_RETURN_ADDRESS())) return;
+    v = PORT_BSWAP64(v); VM_WRITE_COH(a, &v, 8); }
 }
 
 /* ---- malloc allocation tracker (PS3_ALLOCTAG) -------------------------------
@@ -1621,14 +2057,56 @@ extern "C" void ppu_recomp_register(void)
 /* Reusable guest-stack dumper: scan the guest stack for saved return addresses
  * (words landing inside a lifted function) and resolve them via function_table.
  * Callable from other TUs (e.g. sys_event.c) to identify a blocked thread's chain. */
+/* Upper bound of guest code, from the function table rather than a constant.
+ *
+ * Both stack walkers filtered candidate return addresses with a hardcoded
+ * `< 0x600000`. That is fine for a small title and silently wrong for a big
+ * one: Guitar Hero III's text runs to 0x009CD550, so every frame between
+ * 0x600000 and there was DROPPED -- which is most of its engine. Four separate
+ * walks returned the IDENTICAL chain no matter which frame they started from,
+ * because everything in between was filtered out, and that chain looked
+ * plausible enough to base three wrong conclusions on. */
+static uint32_t ppu_code_hi(void)
+{
+    static uint32_t hi = 0;
+    if (!hi) {
+        uint32_t m = 0;
+        for (uint64_t k = 0; k < function_table_count; k++)
+            if (function_table[k].addr > m) m = function_table[k].addr;
+        hi = m ? m + 0x10000u : 0x600000u;   /* + a margin for the last body */
+    }
+    return hi;
+}
+
 extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
 {
     if (!ctx || !vm_base) return;
     uint32_t sp = (uint32_t)ctx->gpr[1];
     /* also show cia/lr and a few key regs (r3/r31 = likely 'this'/object) + raw stack */
-    fprintf(stderr, "[GSTACK:%s] sp=0x%08X cia=0x%08X lr=0x%08X r3=0x%08X r31=0x%08X r30=0x%08X\n",
+    /* r13 too: it is the thread pointer, so it says WHICH TLS block this
+     * thread is on -- the difference between "nothing writes this per-thread
+     * slot" and "you were watching another thread's copy of it". */
+    fprintf(stderr, "[GSTACK:%s] sp=0x%08X cia=0x%08X lr=0x%08X r3=0x%08X"
+                    " r4=0x%08X r5=0x%08X r28=0x%08X r29=0x%08X r31=0x%08X r30=0x%08X r13=0x%08X tid=%u\n",
             tag?tag:"?", sp, (uint32_t)ctx->cia, (uint32_t)ctx->lr,
-            (uint32_t)ctx->gpr[3], (uint32_t)ctx->gpr[31], (uint32_t)ctx->gpr[30]);
+            (uint32_t)ctx->gpr[3], (uint32_t)ctx->gpr[4], (uint32_t)ctx->gpr[5],
+            (uint32_t)ctx->gpr[28], (uint32_t)ctx->gpr[29],
+            (uint32_t)ctx->gpr[31], (uint32_t)ctx->gpr[30],
+            (uint32_t)ctx->gpr[13], (unsigned)ctx->thread_id);
+    /* The whole GPR file, four rows of eight.
+     * The summary line above picks the registers that are usually interesting,
+     * and picking them one at a time is how this grew r13, then r4/r5, then
+     * r28/r29 across a single debugging session -- each time after a run was
+     * spent discovering the needed register was not printed. The file is 32
+     * words; print it and stop guessing. This only runs when a dump fires. */
+    { char gr[400]; 
+      for (int row = 0; row < 4; row++) {
+          int gp2 = snprintf(gr, sizeof gr, "      r%-2d:", row * 8);
+          for (int c = 0; c < 8; c++)
+              gp2 += snprintf(gr + gp2, sizeof(gr) - gp2, " %08X",
+                              (uint32_t)ctx->gpr[row * 8 + c]);
+          fprintf(stderr, "%s\n", gr);
+      } }
     if (!vm_oob(sp,4)) { char rw[600]; int rp=snprintf(rw,sizeof rw,"      rawstk:");
         for (int i=0;i<24 && !vm_oob(sp+i*4,4);i++){ uint32_t t; memcpy(&t,vm_base+sp+i*4,4); rp+=snprintf(rw+rp,sizeof(rw)-rp," %08X", PORT_BSWAP32(t)); }
         fprintf(stderr,"%s\n",rw); }
@@ -1647,12 +2125,43 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
           memcpy(&t,vm_base+vt+4,4); toc= PORT_BSWAP32(t);
           fprintf(stderr,"      ARG[0x%08X] vtbl=0x%08X -> method code=0x%08X toc=0x%08X (worker body?)\n", o, vt, code, toc); }
       } }
+    /* The real frame chain FIRST, then the scan.
+     *
+     * The scan below reports any stack word that looks like a return address,
+     * so it reports dead slots from frames that already returned -- it named
+     * the wrong caller twice in one Guitar Hero III session, and both times
+     * the wrong answer looked entirely plausible and cost a run to disprove.
+     *
+     * PS3 is 64-bit ELFv1: a prologue stores the caller's sp at the new sp
+     * (the back chain) and the caller saves lr at back_chain + 0x10. Walking
+     * that gives the ACTUAL callers in order. Keep the scan afterwards -- a
+     * thread parked in a hand-written or HLE frame may have no back chain, and
+     * the scan still finds something there. */
+    { char bc[900]; int bp = snprintf(bc, sizeof bc, "[GSTACK:%s] chain:", tag ? tag : "?");
+      uint32_t f = sp;
+      for (int d = 0; d < 24 && bp < 820; d++) {
+          if (vm_oob(f, 8)) break;
+          uint32_t t; memcpy(&t, vm_base + f + 4, 4);   /* low half of the 64-bit back chain */
+          uint32_t prev = __builtin_bswap32(t);
+          if (prev <= f || vm_oob(prev + 0x14, 4)) break;   /* stacks grow down */
+          memcpy(&t, vm_base + prev + 0x14, 4);         /* low half of the saved lr */
+          uint32_t ra = __builtin_bswap32(t);
+          if (ra >= 0x10000 && ra < ppu_code_hi()) {
+              uint32_t bg = 0;
+              for (uint64_t k = 0; k < function_table_count; k++) {
+                  uint32_t aa = function_table[k].addr; if (aa <= ra && aa > bg) bg = aa; }
+              if (bg) bp += snprintf(bc+bp, sizeof(bc)-bp, " func_%08X+0x%X", bg, ra - bg);
+              else    bp += snprintf(bc+bp, sizeof(bc)-bp, " 0x%08X", ra);
+          }
+          f = prev;
+      }
+      fprintf(stderr, "%s\n", bc); }
     char gs[1200]; int gp = snprintf(gs, sizeof gs, "[GSTACK:%s] sp=0x%08X:", tag ? tag : "?", sp);
     uint32_t last = 0;
     for (int i = 0; i < 700 && gp < 1100; i++) {
         uint32_t a = sp + i*4; if (vm_oob(a,4)) break;
         uint32_t t; memcpy(&t, vm_base + a, 4); uint32_t w = PORT_BSWAP32(t);
-        if (w < 0x10000 || w >= 0x600000) continue;
+        if (w < 0x10000 || w >= ppu_code_hi()) continue;
         uint32_t bg = 0;
         for (uint64_t k = 0; k < function_table_count; k++) { uint32_t aa = function_table[k].addr; if (aa <= w && aa > bg) bg = aa; }
         if (bg && (w - bg) > 0 && (w - bg) < 0x4000 && w != last) {
@@ -1771,7 +2280,92 @@ extern "C" void ppu_dump_bctrl_ring(uint32_t thread_id, const char* tag)
     fflush(f);
 }
 
+/* PPU_CSCHECK=1: every indirect call must hand back r1, r2 and r14..r31 as it
+ * found them (the ABI's non-volatile set; r2 is restored by the caller's TOC
+ * reload, so it is left out). A lifted function that does not -- a switch
+ * whose dispatcher was lifted as a tail call, a split function whose second
+ * half restores from the wrong frame -- hands its caller garbage in a register
+ * the caller trusts, and the damage surfaces far away as a "vtable used as an
+ * object" or a double-allocated heap block. Reports the target once each. */
+static void ps3_indirect_call_impl(ppu_context* ctx);
+/* The impl declares these at block scope; outside an extern "C" function that
+ * would give them C++ linkage, so pin it here. */
+extern "C" uint32_t ps3_hle_count(void);
+/* PS3_ICALL_GATE=<file>: while <file> exists, histogram indirect-call targets
+ * (per guest thread) and how often each returned r3 == 0; the table prints
+ * when the file goes away. A script CFunc polled every frame and always
+ * answering false is how a stalled script sequence shows up. */
+static void icall_hist(ppu_context* ctx, uint32_t tgt, int phase)
+{
+    static const char* gate = (const char*)-1;
+    if (gate == (const char*)-1) gate = getenv("PS3_ICALL_GATE");
+    if (!gate) return;
+    enum { N = 4096 };
+    static uint32_t key[N], tid[N], cnt[N], zero[N]; static SRWLOCK lk = SRWLOCK_INIT;
+    static volatile LONG open_ = 0; static DWORD last = 0;
+    if (phase == 0) {
+        DWORD now = GetTickCount();
+        if (now - last > 100) {
+            last = now;
+            const int o = GetFileAttributesA(gate) != INVALID_FILE_ATTRIBUTES;
+            if (!o && open_) {
+                AcquireSRWLockExclusive(&lk);
+                open_ = 0;
+                for (int r = 0; r < 1500; r++) {
+                    uint32_t b = 0; int bi = -1;
+                    for (int i = 0; i < N; i++) if (cnt[i] > b) { b = cnt[i]; bi = i; }
+                    if (bi < 0) break;
+                    fprintf(stderr, "[icall] tid=%u target=0x%08X calls=%u ret0=%u\n",
+                            tid[bi], key[bi], cnt[bi], zero[bi]);
+                    cnt[bi] = 0;
+                }
+                memset(key, 0, sizeof key); memset(cnt, 0, sizeof cnt); memset(zero, 0, sizeof zero);
+                ReleaseSRWLockExclusive(&lk);
+            } else if (o) open_ = 1;
+        }
+        return;
+    }
+    if (!open_) return;
+    const uint32_t t = (uint32_t)ctx->thread_id, z = (uint32_t)ctx->gpr[3] == 0;
+    /* PS3_ICALL_TRACE=<tid>: also log every call on that guest thread, in order. */
+    { static int tt = -2; if (tt == -2) { const char* e = getenv("PS3_ICALL_TRACE"); tt = e ? atoi(e) : -1; }
+      if (tt >= 0 && (uint32_t)tt == t) fprintf(stderr, "[ict] %08X %u\n", tgt, (uint32_t)ctx->gpr[3]); }
+    AcquireSRWLockExclusive(&lk);
+    for (uint32_t i = (tgt * 2654435761u + t) % N, n = 0; n < N; n++, i = (i + 1) % N) {
+        if (key[i] == tgt && tid[i] == t) { cnt[i]++; zero[i] += z; break; }
+        if (!cnt[i]) { key[i] = tgt; tid[i] = t; cnt[i] = 1; zero[i] = z; break; }
+    }
+    ReleaseSRWLockExclusive(&lk);
+}
+
 extern "C" void ps3_indirect_call(ppu_context* ctx)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("PPU_CSCHECK") ? 1 : 0;
+    { static int hg = -1; if (hg < 0) hg = getenv("PS3_ICALL_GATE") ? 1 : 0;
+      if (hg) { const uint32_t tgt = (uint32_t)ctx->ctr; icall_hist(ctx, tgt, 0);
+                ps3_indirect_call_impl(ctx); icall_hist(ctx, tgt, 1); return; } }
+    if (!on) { ps3_indirect_call_impl(ctx); return; }
+    uint64_t save[19]; uint32_t tgt = (uint32_t)ctx->ctr;
+    save[0] = ctx->gpr[1];
+    for (int r = 14; r < 32; r++) save[r - 13] = ctx->gpr[r];
+    ps3_indirect_call_impl(ctx);
+    if (ctx->gpr[1] != save[0] || memcmp(&ctx->gpr[14], &save[1], 18 * sizeof(uint64_t))) {
+        static uint32_t seen[256]; static unsigned n;
+        for (unsigned i = 0; i < n; i++) if (seen[i] == tgt) return;
+        if (n < 256) seen[n++] = tgt;
+        char buf[400]; int p = snprintf(buf, sizeof buf, "[cscheck] target 0x%08X changed:", tgt);
+        if (ctx->gpr[1] != save[0]) p += snprintf(buf + p, sizeof buf - p, " r1 %08X->%08X",
+                                                  (uint32_t)save[0], (uint32_t)ctx->gpr[1]);
+        for (int r = 14; r < 32 && p < (int)sizeof buf - 40; r++)
+            if (ctx->gpr[r] != save[r - 13])
+                p += snprintf(buf + p, sizeof buf - p, " r%d %08X->%08X", r,
+                              (uint32_t)save[r - 13], (uint32_t)ctx->gpr[r]);
+        fprintf(stderr, "%s\n", buf);
+    }
+}
+
+static void ps3_indirect_call_impl(ppu_context* ctx)
 {
     g_active_ctx = ctx;
     /* BCTRL_RING=1: keep the last N indirect-call targets per thread, and let
@@ -1903,6 +2497,53 @@ extern "C" void ps3_indirect_call(ppu_context* ctx)
      * unwound to the initial frame (or a not-yet-populated function pointer).
      * Don't treat it as an unresolved call -- just return to the caller. */
     if (addr == 0) {
+        /* Say so. A bctrl to 0 is nearly always a function-pointer table slot
+         * that was never populated, and returning quietly turns it into an
+         * infinite loop when the caller retries -- which is what it does. This
+         * had no report of any kind, so the failure presented as "a thread is
+         * busy in guest code" with nothing to grep for; Guitar Hero III spends
+         * its whole boot doing it. Same standing as [null-read]: on by default
+         * because a null call is always a bug, capped so it cannot flood, and
+         * PS3_NULL_CALL=0 turns it off.
+         *
+         * lr is the last DIRECT call site, not this one (bctrl does not write
+         * lr), so it names the neighbourhood rather than the instruction --
+         * still the fastest way to the right function. */
+        { static int s_nc = -1;
+          if (s_nc < 0) { const char* e = getenv("PS3_NULL_CALL");
+                          s_nc = (e && *e == '0') ? 0 : 1; }
+          /* Cap PER THREAD. A global cap lets one noisy thread exhaust it and
+           * silently hide every other thread's null calls -- the same trap the
+           * BRANCH-TO-0 log already fixed per image. Guitar Hero III's FMOD
+           * stream thread burned all 8 slots and hid the MAIN thread's, which
+           * is the one that matters. */
+          if (s_nc) { enum { NC_T = 64, NC_PER = 4 };
+              static long s_nt[NC_T];
+              unsigned ti = (unsigned)ctx->thread_id < NC_T
+                            ? (unsigned)ctx->thread_id : 0;
+              long s_n = s_nt[ti];
+              s_nt[ti] = s_n + 1;
+              if (s_n < NC_PER)
+                  /* r12 is NOT reliable here: a vtable bctrl loads ctr from
+                   * the OPD directly and never writes r12, so it prints stale
+                   * garbage. Dump the scratch registers the call sequence
+                   * actually used -- for a C++ virtual call r11/r9/r10 still
+                   * hold object/vtable/OPD, which is enough to see WHICH link
+                   * of the chain read as zero. */
+                  fprintf(stderr, "[null-call] guest called a NULL function pointer"
+                                  " (near lr=0x%08X, tid=%u)"
+                                  " r3=%08X r9=%08X r10=%08X r11=%08X r12=%08X\n",
+                          (uint32_t)ctx->lr, (unsigned)ctx->thread_id,
+                          (uint32_t)ctx->gpr[3],  (uint32_t)ctx->gpr[9],
+                          (uint32_t)ctx->gpr[10], (uint32_t)ctx->gpr[11],
+                          (uint32_t)ctx->gpr[12]);
+              /* ...and who made it, once per thread: lr only names the last
+               * direct call, which is usually the lwmutex around the real one. */
+              if (s_n == 0) ppu_dump_guest_stack(ctx, "nc");
+              else if (s_n == NC_PER)
+                  fprintf(stderr, "[null-call] tid=%u: further null calls not shown\n",
+                          (unsigned)ctx->thread_id);
+              if (s_n <= NC_PER) fflush(stderr); } }
         /* PPU_OPD_RECOVER=1: ctr==0 while r12 still points at a VALID OPD means
          * the lifted thunk failed to load the code word -- not that the function
          * pointer is genuinely null. We already read opd[0] for the diagnostic
@@ -2223,7 +2864,7 @@ extern "C" void ps3_indirect_call(ppu_context* ctx)
                 uint32_t last = 0;
                 for (int i = 0; i < 700 && gp < 1300; i++) {
                     uint32_t w = g32(sp + i*4);
-                    if (w < 0x10000 || w >= 0x600000) continue;
+                    if (w < 0x10000 || w >= ppu_code_hi()) continue;
                     uint32_t bg = 0;
                     for (uint64_t k = 0; k < function_table_count; k++) {
                         uint32_t a = function_table[k].addr;
@@ -2561,7 +3202,8 @@ extern "C" void lv2_syscall(ppu_context* ctx)
                     (unsigned long long)ctx->gpr[3], (unsigned long long)ctx->gpr[4],
                     (unsigned)ctx->lr);
             fflush(stderr); } }
-        if (getenv("PS3_SCBLOCK_PROF")) {
+        static int s_sbp = -1; if (s_sbp < 0) s_sbp = getenv("PS3_SCBLOCK_PROF") ? 1 : 0;
+        if (s_sbp) {
             static ULONGLONG s_acc[1024]={0}; static uint32_t s_cnt[1024]={0}; static ULONGLONG s_win=0;
             uint32_t _a3=(uint32_t)ctx->gpr[3], _a4=(uint32_t)ctx->gpr[4], _a5=(uint32_t)ctx->gpr[5];
             ULONGLONG _t0 = GetTickCount64();
@@ -2810,12 +3452,53 @@ extern "C" int ppu_opd_resolve(uint32_t opd, uint32_t* code, uint32_t* toc)
  * way the main entry does and dispatch into the recompiled function, draining
  * the tail-call trampoline chain so the thread body fully runs. */
 extern "C" void (*g_ppu_thread_entry_trampoline)(ppu_context*);
+/* Carve a fresh TLS block for one guest thread, or 0 when there is no room
+ * (then the caller shares the main block, which is what every thread used to
+ * do).
+ *
+ * Every sys_ppu_thread_create'd thread used to get r13 = PPU_TLS_TP -- the
+ * MAIN thread's block -- so nothing the guest keeps in __thread storage was
+ * actually per-thread. It reads as "TLS works" because the accesses resolve
+ * and the memory is there; what breaks is any thread-local that means
+ * something, and the worst case is a thread-local LOCK.
+ *
+ * Guitar Hero III keeps its allocator context in one: a flag at TLS+8 and a
+ * pointer at TLS+0xC, set on entry to an allocation and cleared on exit. With
+ * one shared block, thread 2 clears the flag and writes -1 to the pointer
+ * while thread 1 is inside the allocator. Thread 1 then reads its own context
+ * as null, every allocation on it returns 0, and the caller memsets the null
+ * buffer -- see [null-write]. One shared word, and the title cannot allocate.
+ *
+ * The PRX path (sys_initialize_tls in ppu_sysprx.cpp) has always done this per
+ * block; this is the same thing for the static path.
+ *
+ * ponytail: bump allocator, never freed. A thread's block is dead once it
+ * exits, but the window holds dozens and titles create their threads at boot
+ * and keep them. Reuse a free list if a title ever churns threads. */
+static uint32_t ppu_tls_new_block(void)
+{
+    if (!g_tls_memsz) return 0;                 /* no PT_TLS: nothing to copy */
+    uint32_t total = (g_tls_memsz + 0x7000u + 0xFFFu) & ~0xFFFu;
+    uint32_t lim   = 0x11000000u;               /* same bound the main block uses */
+    if (ppu_vm_size && ppu_vm_size < lim) lim = ppu_vm_size;
+    /* Threads are created concurrently, so hand out offsets atomically. */
+    static uint32_t s_bump = 0;
+    uint32_t off  = __atomic_fetch_add(&s_bump, total, __ATOMIC_RELAXED);
+    uint32_t base = PPU_TLS_IMG + total + off;  /* main block occupies the first */
+    if (base + total > lim) return 0;           /* out of room: share, as before */
+    if (g_tls_filesz) memcpy(vm_base + base, vm_base + g_tls_vaddr, g_tls_filesz);
+    if (g_tls_memsz > g_tls_filesz)
+        memset(vm_base + base + g_tls_filesz, 0, g_tls_memsz - g_tls_filesz);
+    return base + 0x7000u;                      /* TLS data at r13 - 0x7000 */
+}
+
 static void ppu_thread_entry_trampoline(ppu_context* ctx)
 {
     uint32_t code = 0, toc = 0;
     ppu_opd_resolve((uint32_t)ctx->cia, &code, &toc);
     if (toc) ctx->gpr[2] = toc;
-    if (!ctx->gpr[13]) ctx->gpr[13] = PPU_TLS_TP;   /* share main TLS for now */
+    if (!ctx->gpr[13]) { uint32_t tp = ppu_tls_new_block();
+                         ctx->gpr[13] = tp ? tp : PPU_TLS_TP; }
     ppu_fn fn = ppu_lookup(code);
     if (!fn) {
         fprintf(stderr, "[ppu] thread entry 0x%08X (cia=0x%08X) not registered\n",

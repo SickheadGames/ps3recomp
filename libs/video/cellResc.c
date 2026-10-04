@@ -141,7 +141,16 @@ s32 cellRescSetSrc(s32 index, const CellRescSrc* src)
     if (!src || index < 0 || index >= 8)
         return (s32)CELL_RESC_ERROR_BAD_ARGUMENT;
 
-    s_src[index] = *GUEST_PTR(src, const CellRescSrc*);
+    /* Decoded to host order: the guest struct is big-endian. */
+    const u32 ea = (u32)(uintptr_t)src;
+    s_src[index].format = vm_read32(ea + 0);
+    s_src[index].pitch  = vm_read32(ea + 4);
+    s_src[index].width  = vm_read16(ea + 8);
+    s_src[index].height = vm_read16(ea + 10);
+    s_src[index].offset = vm_read32(ea + 12);
+    printf("[cellResc] SetSrc(%d): offset=0x%X pitch=%u %ux%u fmt=%u\n", index,
+           s_src[index].offset, s_src[index].pitch, s_src[index].width,
+           s_src[index].height, s_src[index].format);
     return CELL_OK;
 }
 

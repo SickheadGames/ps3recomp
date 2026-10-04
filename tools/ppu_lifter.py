@@ -466,6 +466,12 @@ def _last_line_is_terminator(body_lines: list[str]) -> bool:
         if s.endswith(":"):
             continue
         t = s.rstrip(";")
+        # A conditional branch (`if (...) goto ...`, bdnz, a conditional
+        # trampoline) falls through when not taken. Treating it as a terminator
+        # dropped the fall-through tail: zlib's build_tree chunk ending in bdnz
+        # returned mid-function with r31 unrestored.
+        if t.startswith("if ("):
+            return False
         return (t.startswith("return") or "goto " in t or
                 t.startswith("func_") or t.startswith("lv2_syscall") or
                 "{ func_" in t or t.startswith("{ g_trampoline_fn"))
@@ -805,11 +811,16 @@ class PPULifter:
                 if (_off, _m.group(1)) in _saved_slots:
                     _reg_snap.add(_reg)
                     func.body_lines[_i] = f"    ctx->gpr[{_reg}] = _cs_{_reg};"
-                elif not _has_stdu and _write_counts[_off] == 0 and not _off_escapes(_off):
+                elif (not _has_stdu and _write_counts[_off] == 0 and not _off_escapes(_off)
+                        and _reg not in _reg_snap and _mem_snap.setdefault(_reg, _off) == _off):
                     # pure tail-entry: the save lives in the original function, so
                     # this body never writes the slot; snapshot from memory at entry.
                     # (Skip slots whose address escaped to a callee -- see above.)
-                    _mem_snap.setdefault(_reg, _off)
+                    # One snapshot per register: a load of the same register from a
+                    # DIFFERENT slot is a spill reload and stays a real load. Bink's
+                    # plane decoder (GH3 func_00610450) restores r23 from 0x888 and
+                    # reloads its row bound into r23 from 0x918; both became the
+                    # 0x888 value, the row loop never hit zero and the movie froze.
                     func.body_lines[_i] = f"    ctx->gpr[{_reg}] = _cs_{_reg};"
         if _reg_snap or _mem_snap:
             _decls = [f"    uint64_t _cs_{_n} = ctx->gpr[{_n}];"
@@ -2366,23 +2377,29 @@ class PPULifter:
                     f"d[0]=(a[0]&~c[0])|(b[0]&c[0]); d[1]=(a[1]&~c[1])|(b[1]&c[1]); }}")
 
         # VMX compare (vcmpequw, vcmpeqfp, vcmpgefp, vcmpgtfp)
-        if mn.startswith("vcmpeqfp"):
+        # Float compares and vcmpequw. The dot forms set CR6 (8 = all lanes
+        # true, 2 = all lanes false), which these ignored: 567 dot-form
+        # compares in Guitar Hero III branched on whatever CR6 last held.
+        # Result masks are all-ones / all-zero, so no swap on the way out.
+        vcmp_f = {"vcmpeqfp": "a[i]==b[i]", "vcmpgefp": "a[i]>=b[i]",
+                  "vcmpgtfp": "a[i]>b[i]"}
+        if mn.rstrip(".") in vcmp_f or mn.rstrip(".") == "vcmpequw":
             vd, va, vb = int(ops[0][1:]), int(ops[1][1:]), int(ops[2][1:])
-            return (f"{{ float a[4],b[4]; ppu_vldf4(&ctx->vr[{va}],a); ppu_vldf4(&ctx->vr[{vb}],b); "
-                    f"uint32_t* d=(uint32_t*)&ctx->vr[{vd}]; "
-                    f"for(int i=0;i<4;i++) d[i]=a[i]==b[i]?~0u:0; }}")
-
-        if mn.startswith("vcmpgefp"):
-            vd, va, vb = int(ops[0][1:]), int(ops[1][1:]), int(ops[2][1:])
-            return (f"{{ float a[4],b[4]; ppu_vldf4(&ctx->vr[{va}],a); ppu_vldf4(&ctx->vr[{vb}],b); "
-                    f"uint32_t* d=(uint32_t*)&ctx->vr[{vd}]; "
-                    f"for(int i=0;i<4;i++) d[i]=a[i]>=b[i]?~0u:0; }}")
-
-        if mn.startswith("vcmpgtfp"):
-            vd, va, vb = int(ops[0][1:]), int(ops[1][1:]), int(ops[2][1:])
-            return (f"{{ float a[4],b[4]; ppu_vldf4(&ctx->vr[{va}],a); ppu_vldf4(&ctx->vr[{vb}],b); "
-                    f"uint32_t* d=(uint32_t*)&ctx->vr[{vd}]; "
-                    f"for(int i=0;i<4;i++) d[i]=a[i]>b[i]?~0u:0; }}")
+            if mn.rstrip(".") == "vcmpequw":
+                load = (f"uint32_t a[4],b[4]; ppu_vldu4(&ctx->vr[{va}],a); "
+                        f"ppu_vldu4(&ctx->vr[{vb}],b); ")
+                pred = "a[i]==b[i]"
+            else:
+                load = (f"float a[4],b[4]; ppu_vldf4(&ctx->vr[{va}],a); "
+                        f"ppu_vldf4(&ctx->vr[{vb}],b); ")
+                pred = vcmp_f[mn.rstrip(".")]
+            body = (f"{{ {load}uint32_t d[4]; int t=0; "
+                    f"for(int i=0;i<4;i++){{ int r=({pred}); d[i]=r?~0u:0u; t+=r; }} "
+                    f"memcpy(&ctx->vr[{vd}], d, 16);")
+            if mn.endswith("."):
+                body += (" uint32_t c6=(t==4?8u:0u)|(t==0?2u:0u); "
+                         "ctx->cr=(ctx->cr & ~(0xFu<<4))|(c6<<4);")
+            return body + " }"
 
         # VMX shift (vsldoi) — shift left double by octet immediate
         if mn == "vsldoi":
@@ -2546,11 +2563,23 @@ class PPULifter:
 
         # Float min/max
         if mn == "vmaxfp" or mn == "vminfp":
+            # Lanes are big-endian in ctx->vr, so load through ppu_vldf4 like
+            # every other float op. This read them as host floats -- comparing
+            # byte-reversed bit patterns -- and it dropped a NaN in vA, which
+            # VMX propagates. Guitar Hero III reduces every Havok AABB with
+            # these (292 sites): the boxes came out wrong, some inverted
+            # (min=+FLT_MAX, max=-FLT_MAX), and the broadphase built pair
+            # lists it then could not undo -- freeing stack memory into the
+            # heap. VMX: a NaN operand gives that NaN, quieted (vA first); for
+            # equal operands max prefers +0 and min prefers -0.
             vd, va, vb = int(ops[0][1:]), int(ops[1][1:]), int(ops[2][1:])
-            cmp = ">" if mn == "vmaxfp" else "<"
-            return (f"{{ float* d=(float*)&ctx->vr[{vd}]; float* a=(float*)&ctx->vr[{va}]; "
-                    f"float* b=(float*)&ctx->vr[{vb}]; "
-                    f"for(int i=0;i<4;i++) d[i]=a[i]{cmp}b[i]?a[i]:b[i]; }}")
+            if mn == "vmaxfp":
+                pick = "(a[i]>b[i]) ? a[i] : (b[i]>a[i]) ? b[i] : (signbit(a[i]) ? b[i] : a[i])"
+            else:
+                pick = "(a[i]<b[i]) ? a[i] : (b[i]<a[i]) ? b[i] : (signbit(a[i]) ? a[i] : b[i])"
+            return (f"{{ float a[4],b[4],d[4]; ppu_vldf4(&ctx->vr[{va}],a); ppu_vldf4(&ctx->vr[{vb}],b); "
+                    f"for(int i=0;i<4;i++) d[i] = (a[i]!=a[i]) ? a[i]+a[i] : (b[i]!=b[i]) ? b[i]+b[i] : ({pick}); "
+                    f"ppu_vstf4(&ctx->vr[{vd}],d); }}")
 
         # Splat immediate (vspltisb/h/w) — splat a 5-bit signed immediate
         if mn in ("vspltisb", "vspltish", "vspltisw"):
@@ -2600,6 +2629,26 @@ class PPULifter:
             return (f"{{ float b[4],d[4]; ppu_vldf4(&ctx->vr[{vb}],b); "
                     f"for(int i=0;i<4;i++) d[i]=floorf(b[i]); ppu_vstf4(&ctx->vr[{vd}],d); }}")
 
+        # vrfin / vrfiz had no lowering at all: they lifted to a TODO comment,
+        # so vD kept whatever it held before. Guitar Hero III uses vrfin (9
+        # sites, Havok's AABB quantization among them); a stale register there
+        # gives endpoints that disagree with the overlap bits computed from the
+        # same boxes, and the broadphase then removes pairs it never added.
+        if mn == "vrfin":  # round to FP integer, nearest (ties to even)
+            vd, vb = int(ops[0][1:]), int(ops[-1][1:])
+            return (f"{{ float b[4],d[4]; ppu_vldf4(&ctx->vr[{vb}],b); "
+                    f"for(int i=0;i<4;i++) d[i]=nearbyintf(b[i]); ppu_vstf4(&ctx->vr[{vd}],d); }}")
+
+        if mn == "vrfiz":  # round to FP integer toward zero
+            vd, vb = int(ops[0][1:]), int(ops[-1][1:])
+            return (f"{{ float b[4],d[4]; ppu_vldf4(&ctx->vr[{vb}],b); "
+                    f"for(int i=0;i<4;i++) d[i]=truncf(b[i]); ppu_vstf4(&ctx->vr[{vd}],d); }}")
+
+        if mn == "vrfip":  # round to FP integer toward +inf (ceil); vrfip is vD,vB
+            vd, vb = int(ops[0][1:]), int(ops[-1][1:])
+            return (f"{{ float b[4],d[4]; ppu_vldf4(&ctx->vr[{vb}],b); "
+                    f"for(int i=0;i<4;i++) d[i]=ceilf(b[i]); ppu_vstf4(&ctx->vr[{vd}],d); }}")
+
         # Float/int convert (operand form "vD, vB, UIMM" — UIMM is a bare int)
         if mn == "vcfsx" or mn == "vcfux":
             vd, vb = int(ops[0][1:]), int(ops[1][1:])
@@ -2629,10 +2678,13 @@ class PPULifter:
         # Compare with Rc (vcmpeqfp., vcmpgefp., etc.)
         if mn.startswith("vcmpbfp"):
             vd, va, vb = int(ops[0][1:]), int(ops[1][1:]), int(ops[2][1:])
-            return (f"{{ float* a=(float*)&ctx->vr[{va}]; float* b=(float*)&ctx->vr[{vb}]; "
-                    f"uint32_t* d=(uint32_t*)&ctx->vr[{vd}]; "
+            # Big-endian lanes both ways (it read host floats and stored host
+            # words). vcmpbfp: bit 0 = !(a <= b), bit 1 = !(a >= -b); a NaN
+            # fails both compares and so sets both bits.
+            return (f"{{ float a[4],b[4]; uint32_t d[4]; ppu_vldf4(&ctx->vr[{va}],a); ppu_vldf4(&ctx->vr[{vb}],b); "
                     f"for(int i=0;i<4;i++) {{ uint32_t r=0; "
-                    f"if(a[i]>b[i]) r|=0x80000000u; if(a[i]<-b[i]) r|=0x40000000u; d[i]=r; }} }}")
+                    f"if(!(a[i]<=b[i])) r|=0x80000000u; if(!(a[i]>=-b[i])) r|=0x40000000u; d[i]=r; }} "
+                    f"ppu_vstu4(&ctx->vr[{vd}],d); " + (f"ctx->cr=(ctx->cr & ~(0xFu<<4))|(((d[0]|d[1]|d[2]|d[3])==0?2u:0u)<<4); " if mn.endswith(".") else "") + "}")
 
         # ------- Additional VMX integer instructions -------
         # Byte compare equal
@@ -2891,6 +2943,37 @@ class PPULifter:
                     f"int16_t* b=(int16_t*)&ctx->vr[{vb}]; "
                     f"for(int i=0;i<8;i++){{int32_t v=a[i]; d[i]=(int8_t)(v>127?127:v<-128?-128:v);}} "
                     f"for(int i=0;i<8;i++){{int32_t v=b[i]; d[8+i]=(int8_t)(v>127?127:v<-128?-128:v);}} }}")
+
+        # Pack unsigned halfword -> unsigned byte, saturating (vpkuhus).
+        # The saturating packs are the back half of a colour-conversion kernel:
+        # widen, do arithmetic at higher precision, then narrow with clamping so
+        # an overflow shows as white rather than wrapping to black. Emitting
+        # them as a TODO comment left the narrow step out entirely, so the
+        # destination register kept whatever it held.
+        if mn == "vpkuhus":
+            vd, va, vb = int(ops[0][1:]), int(ops[1][1:]), int(ops[2][1:])
+            return (f"{{ uint8_t* d=(uint8_t*)&ctx->vr[{vd}]; uint16_t* a=(uint16_t*)&ctx->vr[{va}]; "
+                    f"uint16_t* b=(uint16_t*)&ctx->vr[{vb}]; "
+                    f"for(int i=0;i<8;i++){{uint32_t v=a[i]; d[i]=(uint8_t)(v>255u?255u:v);}} "
+                    f"for(int i=0;i<8;i++){{uint32_t v=b[i]; d[8+i]=(uint8_t)(v>255u?255u:v);}} }}")
+
+        # Pack unsigned word -> unsigned halfword, saturating (vpkuwus)
+        if mn == "vpkuwus":
+            vd, va, vb = int(ops[0][1:]), int(ops[1][1:]), int(ops[2][1:])
+            return (f"{{ uint16_t* d=(uint16_t*)&ctx->vr[{vd}]; uint32_t* a=(uint32_t*)&ctx->vr[{va}]; "
+                    f"uint32_t* b=(uint32_t*)&ctx->vr[{vb}]; "
+                    f"for(int i=0;i<4;i++){{uint32_t v=a[i]; d[i]=(uint16_t)(v>65535u?65535u:v);}} "
+                    f"for(int i=0;i<4;i++){{uint32_t v=b[i]; d[4+i]=(uint16_t)(v>65535u?65535u:v);}} }}")
+
+        # Pack unsigned word -> unsigned halfword, modulo (vpkuwum): keep the
+        # low half of each word, no clamping. Same narrowing step as vpkuwus
+        # where the caller already knows the values fit.
+        if mn == "vpkuwum":
+            vd, va, vb = int(ops[0][1:]), int(ops[1][1:]), int(ops[2][1:])
+            return (f"{{ uint16_t* d=(uint16_t*)&ctx->vr[{vd}]; uint32_t* a=(uint32_t*)&ctx->vr[{va}]; "
+                    f"uint32_t* b=(uint32_t*)&ctx->vr[{vb}]; "
+                    f"for(int i=0;i<4;i++) d[i]=(uint16_t)(a[i]&0xFFFFu); "
+                    f"for(int i=0;i<4;i++) d[4+i]=(uint16_t)(b[i]&0xFFFFu); }}")
 
         # vmsummbm (VA-form, 4 operands)
         if mn == "vmsummbm":
@@ -3375,7 +3458,52 @@ class PPULifter:
 # CLI
 # ---------------------------------------------------------------------------
 
-def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_bounds):
+def _const_base_targets(win, rC, read_u32, text_lo, text_hi, bctr_addr):
+    """Landing sites of a table-less computed jump (see discover_jump_tables).
+
+    Walks `win` backward from the bctr: the newest definition of rC must be
+    `add rC,rC,rOff`, and every earlier one must fold to a constant
+    (`addis`/`addi` onto rC, ending at `li`/`lis`). Anything else defining rC
+    means this is not the idiom. Returns every address from the base through
+    the first unconditional terminator (at most 64), or None.
+    """
+    const, have_add = 0, False
+    for w in reversed(win):
+        ops = [x.strip() for x in w.operands.split(',')]
+        if w.mnemonic == 'mtctr' or not ops or ops[0] != rC:
+            continue
+        m = w.mnemonic
+        try:
+            if m == 'add' and not have_add and rC in ops[1:3]:
+                have_add = True
+            elif m in ('addis', 'addi') and have_add and len(ops) == 3 and ops[1] == rC:
+                const += int(ops[2], 0) << (16 if m == 'addis' else 0)
+            elif m in ('li', 'lis') and have_add and len(ops) == 2:
+                const += int(ops[1], 0) << (16 if m == 'lis' else 0)
+                break
+            else:
+                return None
+        except ValueError:
+            return None
+    else:
+        return None
+    base = const & 0xFFFFFFFF
+    # A real landing run sits right next to its dispatcher.
+    if not (text_lo <= base < text_hi) or base & 3 or abs(base - bctr_addr) > 0x1000:
+        return None
+    targets = []
+    for k in range(64):
+        a = base + 4 * k
+        v = read_u32(a)
+        if v is None:
+            return None
+        targets.append(a)
+        # blr, bctr, or `b` without link ends the run
+        if v in (0x4E800020, 0x4E800420) or (v >> 26 == 18 and not v & 1):
+            return targets
+    return None
+
+def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts):
     """Find `mtctr rX; bctr` switch dispatchers and read their jump tables.
 
     Handles both absolute tables (entry = case address) and base-relative
@@ -3384,6 +3512,16 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_bounds
     mtctr r0; bctr`). These computed `bctr` targets are invisible to static
     branch-target discovery, so without this the switch cases never get lifted
     and the runtime indirect-call lands on an unlifted address.
+
+    func_starts: optional sorted function entry addresses. When given, the
+    backward scans for the table base stop at the enclosing function's entry
+    instead of the nearest preceding `blr` -- an early-return `blr` between the
+    prologue and the dispatch otherwise hides a base register the prologue
+    loaded. (GH3 func_0074715C: `lwz r30,0x3B80(r2)` in the prologue, an early
+    `blr`, then `lwz r11,-0x7FA8(r30)` at the switch. Dropped, the switch lifted
+    to an indirect tail call; the case bodies then restored r25 from their OWN
+    entry snapshot, handing the caller a vtable pointer in r25 -- the "vtable
+    used as an object" that sent startup into an 82 MB memset.)
 
     Returns {dispatcher_addr: sorted [case target addrs]}.
     """
@@ -3400,23 +3538,64 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_bounds
             print(f"  [JT_DEBUG 0x{addr:X}] {msg}")
     tables = {}
     n = len(all_insns)
-
-    # cache the start of the functions.
-    import bisect
-    _fn_starts = sorted(s for s, _ in func_bounds) if func_bounds else []
-    _insn_addrs = [w.addr for w in all_insns]
-
+    import bisect as _bisect
+    _addrs = [x.addr for x in all_insns] if func_starts else None
+    def _scan_lo(i):
+        """Index of the first instruction the base scans may look at."""
+        if func_starts:
+            k = _bisect.bisect_right(func_starts, all_insns[i].addr) - 1
+            # A "start" the previous instruction falls into is a split point,
+            # not an entry (GH3 0x0076571C: find_functions cut a 0x440-frame
+            # function in two, and the switch base register is loaded in the
+            # first half). Keep walking back to a start that follows a
+            # terminator.
+            while k > 0:
+                j = _bisect.bisect_left(_addrs, func_starts[k])
+                if j == 0 or all_insns[j - 1].mnemonic in ('b', 'blr', 'bctr', 'ba'):
+                    break
+                k -= 1
+            if k >= 0:
+                return _bisect.bisect_left(_addrs, func_starts[k])
+        for _k in range(i - 1, -1, -1):
+            if all_insns[_k].mnemonic == 'blr':
+                return _k + 1
+        return 0
+    def _live(lo, i):
+        """all_insns[lo:i] minus blocks that end in `blr` -- they return, so
+        they cannot flow into the dispatch at i. Scanning backward straight
+        through them latches an epilogue's `ld r30,0xA0(r1)` restore as the
+        "nearest definition" of the base register. A dead block starts at the
+        nearest branch target at or before its blr, or just after a branch."""
+        seg = all_insns[lo:i]
+        targets = set()
+        for x in seg:
+            if x.mnemonic.startswith('b') and x.mnemonic not in ('blr', 'bctr', 'bctrl', 'blrl'):
+                last = x.operands.split(',')[-1].strip()
+                if last.startswith('0x'):
+                    try:
+                        targets.add(int(last, 16))
+                    except ValueError:
+                        pass
+        def _ends_block(x):     # a branch that does not return to the next insn
+            return x.mnemonic.startswith('b') and x.mnemonic not in ('bl', 'bctrl', 'blrl')
+        out, k = [], len(seg) - 1
+        while k >= 0:
+            if seg[k].mnemonic == 'blr':
+                # back to the block's first insn: a branch target, or the insn
+                # right after another branch (fallthrough entry)
+                while k > 0 and seg[k].addr not in targets and not _ends_block(seg[k - 1]):
+                    k -= 1
+                k -= 1
+                continue
+            out.append(seg[k]); k -= 1
+        out.reverse()
+        return out
     for i in range(n):
         if all_insns[i].mnemonic != 'bctr':
             continue
         _dbg(all_insns[i].addr, "bctr found")
         win = all_insns[max(0, i - 30):i]
-        _clo = 0
-        for _k in range(i - 1, -1, -1):
-            if all_insns[_k].mnemonic == 'blr':
-                _clo = _k + 1
-                break
-        win_cand = all_insns[_clo:i]
+        win_cand = _live(_scan_lo(i), i)
         # the ctr source register (last mtctr before the bctr)
         rC = None
         for w in reversed(win):
@@ -3426,6 +3605,17 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_bounds
                 break
         _dbg(all_insns[i].addr, f"rC={rC}")
         if rC is None:
+            continue
+        # Constant-base computed jump, no table: `li rC,lo; addis rC,rC,hi;
+        # add rC,rC,rOff; mtctr rC; bctr` enters a straight-line run at
+        # base + rOff. The SDK memset does this to land in its unrolled
+        # `stdu` tail (Resistance func_000E6B80: base 0xE6BE4, 8 entries);
+        # unhandled, every short memset became an unresolved indirect call
+        # that stored nothing. The landing sites are every instruction from
+        # the base up to and including the run's terminator.
+        cb = _const_base_targets(win, rC, read_u32, text_lo, text_hi, all_insns[i].addr)
+        if cb:
+            tables[all_insns[i].addr] = cb
             continue
         # the indexed table load
         lwzx = next((w for w in reversed(win) if w.mnemonic == 'lwzx'), None)
@@ -3532,8 +3722,8 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_bounds
             # window the result is unchanged.
             for w in reversed(win_cand):
                 a = [x.strip() for x in w.operands.split(',')]
-                if not a or a[0] != cand:
-                    continue                    # not a definition of cand
+                if not a or a[0] != cand or w.mnemonic.startswith(('st', 'lf')):
+                    continue                    # not a GPR def: a store READS it; ppu_disasm names lfs/lfd's FPR target rN
                 if w.mnemonic in ('lwz', 'ld') and len(a) == 2 and '(r2)' in a[1]:
                     disp = mem_disp(a[1]); r_base = cand
                     base_is_ld = (w.mnemonic == 'ld')
@@ -3556,14 +3746,12 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_bounds
                     # widen to the enclosing function -- bounded by the nearest
                     # preceding blr, so the scan cannot drift into the previous
                     # function and latch a stale base.
-                    _scan, _resolved = win, False
+                    _scan, _resolved = _live(max(0, i - 30), i), False
                     for _pass in (0, 1):
                         for w2 in reversed(_scan):
                             b = [x.strip() for x in w2.operands.split(',')]
-                            if not b or b[0] != _mid:
-                                continue
-                            if w2.mnemonic in ('lwz', 'ld') and len(b) == 2 and '(r1)' in b[1]:
-                                continue          # callee-saved restore from own frame, not a redefinition
+                            if not b or b[0] != _mid or w2.mnemonic.startswith(('st', 'lf')):
+                                continue        # stores (std r30,..(r1)) read, not define
                             if w2.mnemonic in ('lwz', 'ld') and len(b) == 2 and '(r2)' in b[1]:
                                 disp = mem_disp(b[1]); r_base = cand
                                 base_is_ld = (w2.mnemonic == 'ld')
@@ -3572,12 +3760,7 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_bounds
                             break
                         if _resolved or _pass:
                             break
-                        _lo = 0
-                        if _fn_starts:
-                            _k = bisect.bisect_right(_fn_starts, all_insns[i].addr) - 1
-                            if _k >= 0:
-                                _lo = bisect.bisect_left(_insn_addrs, _fn_starts[_k])
-                        _scan = all_insns[_lo:i]
+                        _scan = _live(_scan_lo(i), i)
                 break                           # first definition of cand wins/loses
             if disp is not None:
                 _bases.append((r_base, disp, base_is_ld, disp2, disp2_is_ld))
@@ -3586,6 +3769,7 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_bounds
             continue
         toc_candidates = toc if isinstance(toc, (list, tuple)) else [toc]
         best = []
+        best_key = (0, 0)
         for r_base, disp, base_is_ld, disp2, disp2_is_ld in _bases:
             # offset table iff an `add rC, *, r_base` combines the loaded value + base
             is_offset = any(
@@ -3706,8 +3890,15 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_bounds
                         # into unrelated data.
                         break
                 _dbg(all_insns[i].addr, f"decoded {len(targets)} targets")
-                if len(targets) > len(best):
-                    best = targets
+                # Rank by targets NEAR the bctr first: case blocks belong to the
+                # dispatcher's own function. A wrong TOC can decode a bogus
+                # table with more "valid" in-text targets megabytes away (MAG
+                # func 0xBB32A0: the main TOC read 7 garbage cases at 0x31398
+                # and beat the real 5-entry inline table right after the bctr).
+                _here = all_insns[i].addr
+                _key = (sum(1 for t in targets if abs(t - _here) < 0x40000), len(targets))
+                if _key > best_key:
+                    best, best_key = targets, _key
         if best:
             tables[all_insns[i].addr] = sorted(set(best))
     return tables
@@ -4189,7 +4380,8 @@ def main() -> None:
                     toc_candidates.append(t)
             if len(toc_candidates) > 1:
                 print(f"  TOC candidates: {', '.join(hex(t) for t in toc_candidates)}")
-            tables = discover_jump_tables(all_insns, _read_u32, toc_candidates, text_lo, text_hi, func_bounds)
+            tables = discover_jump_tables(all_insns, _read_u32, toc_candidates, text_lo, text_hi,
+                                          func_starts=sorted(s for s, _ in func_bounds))
             jt_dispatchers = tables
             for ts in tables.values():
                 jt_targets.update(ts)

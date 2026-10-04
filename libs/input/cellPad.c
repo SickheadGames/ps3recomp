@@ -455,11 +455,15 @@ s32 cellPadInit(u32 max_connect)
     if (s_pad_initialized)
         return CELL_PAD_ERROR_ALREADY_OPENED;
 
-    if (max_connect == 0 || max_connect > CELL_PAD_MAX_PORT_NUM)
+    /* The bound is the 127-slot pad table, not the 7 ports: larger requests
+     * are accepted and clamped. Resistance: Fall of Man asks for 8; rejected,
+     * the library stayed closed, every GetInfo failed and the title never
+     * polled the pad -- stuck on "Press the START button". */
+    if (max_connect == 0 || max_connect > 127)
         return CELL_PAD_ERROR_INVALID_PARAMETER;
 
     s_pad_initialized = 1;
-    s_max_connect = max_connect;
+    s_max_connect = max_connect > CELL_PAD_MAX_PORT_NUM ? CELL_PAD_MAX_PORT_NUM : max_connect;
     memset(s_port_setting, 0, sizeof(s_port_setting));
     memset(s_host_state, 0, sizeof(s_host_state));
 
@@ -577,8 +581,12 @@ skip_inject: ;
         len = CELL_PAD_LEN_CHANGE_PRESS_ON;
 
     data->len = len;
-    data->button[0] = (u16)len;
-    data->button[1] = 0; /* reserved */
+    /* button[0] is reserved and 0 on hardware; button[1] carries the pad mode
+     * in its high nibble (0x7) and len/2 in its low one. GH3 drops any packet
+     * whose button[0] is non-zero -- with len (8) there, every press was
+     * received and thrown away, and "Press any button" never advanced. */
+    data->button[0] = 0;
+    data->button[1] = (u16)(0x70 | ((len / 2) & 0xF));
 
     /* Digital buttons. hs->buttons packs both halves into one 16-bit mask
      * (SELECT=bit0..LEFT=bit7 = DIGITAL1; L2=bit8..SQUARE=bit15 = DIGITAL2).
@@ -659,6 +667,8 @@ skip_inject: ;
      *
      *   echo 0x0008 > pad.txt    # START
      *   echo 0x4000 > pad.txt    # CROSS
+     *   echo 0x0040 4 > pad.txt  # DOWN for 4 polls (menus auto-repeat a
+     *                            # long hold; the default is 40)
      */
     { static int s_pf = -1; static char pf_path[512];
       static unsigned held_mask = 0; static int held_n = 0;
@@ -671,8 +681,10 @@ skip_inject: ;
               if (f) {
                   char buf[64]; buf[0] = 0;
                   if (fgets(buf, sizeof buf, f)) {
-                      unsigned m = (unsigned)strtoul(buf, 0, 0);
-                      if (m) { held_mask = m; held_n = 40;
+                      char* rest;
+                      unsigned m = (unsigned)strtoul(buf, &rest, 0);
+                      int n = (int)strtol(rest, 0, 0);
+                      if (m) { held_mask = m; held_n = n > 0 ? n : 40;
                                printf("[cellPad] PAD_FILE press 0x%04X\n", m); fflush(stdout); }
                   }
                   fclose(f);
@@ -692,13 +704,17 @@ skip_inject: ;
      * away to make out. Legit input simulation, same footing as YDKJ_INJECT_PAD. */
     { static int s_st = -1;
       static unsigned char s_v[4] = {128,128,128,128};
+      /* Optional 5th/6th fields: the seconds the hold starts and ends, so the menus
+       * before gameplay are not driven by it (PAD_STICK="128,0,128,128,300,320"). */
+      static double s_from = 0, s_until = 1e30; static unsigned long long s_t0 = 0;
+      if (!s_t0) s_t0 = GetTickCount64();
       if (s_st < 0) { const char* e = getenv("PAD_STICK");
         s_st = e ? 1 : 0;
         if (e) { int a=128,b=128,c=128,d=128;
-                 sscanf(e, "%d,%d,%d,%d", &a,&b,&c,&d);
+                 sscanf(e, "%d,%d,%d,%d,%lf,%lf", &a,&b,&c,&d,&s_from,&s_until);
                  s_v[0]=(unsigned char)a; s_v[1]=(unsigned char)b;
                  s_v[2]=(unsigned char)c; s_v[3]=(unsigned char)d; } }
-      if (s_st) { hs->analog_lx = s_v[0]; hs->analog_ly = s_v[1];
+      if (s_st && (double)(GetTickCount64() - s_t0) / 1000.0 >= s_from && (double)(GetTickCount64() - s_t0) / 1000.0 < s_until) { hs->analog_lx = s_v[0]; hs->analog_ly = s_v[1];
                   hs->analog_rx = s_v[2]; hs->analog_ry = s_v[3];
                   hs->connected = 1; }
       /* PAD_SWEEP=<seconds per step>: walk the sticks through a fixed set of
@@ -747,6 +763,27 @@ skip_inject: ;
         data->button[CELL_PAD_BTN_OFFSET_PRESS_R1]       = hs->press_r1;
         data->button[CELL_PAD_BTN_OFFSET_PRESS_L2]       = hs->trigger_l2;
         data->button[CELL_PAD_BTN_OFFSET_PRESS_R2]       = hs->trigger_r2;
+        /* A button whose digital bit is set reads full pressure. Injected
+         * input (PAD_FILE/PAD_SCRIPT/PAD_AUTOPRESS, keyboard) only sets the
+         * digital bits, and the host values above zeroed any pressure it had
+         * written -- so a title keying its menus off the pressure words (GH3,
+         * Tornado Outbreak's title screen) never saw the press. */
+        static const struct { u8 word; u8 bit; u8 off; } pm[] = {
+            { CELL_PAD_BTN_OFFSET_DIGITAL1, 0x20, CELL_PAD_BTN_OFFSET_PRESS_RIGHT },
+            { CELL_PAD_BTN_OFFSET_DIGITAL1, 0x80, CELL_PAD_BTN_OFFSET_PRESS_LEFT },
+            { CELL_PAD_BTN_OFFSET_DIGITAL1, 0x10, CELL_PAD_BTN_OFFSET_PRESS_UP },
+            { CELL_PAD_BTN_OFFSET_DIGITAL1, 0x40, CELL_PAD_BTN_OFFSET_PRESS_DOWN },
+            { CELL_PAD_BTN_OFFSET_DIGITAL2, 0x10, CELL_PAD_BTN_OFFSET_PRESS_TRIANGLE },
+            { CELL_PAD_BTN_OFFSET_DIGITAL2, 0x20, CELL_PAD_BTN_OFFSET_PRESS_CIRCLE },
+            { CELL_PAD_BTN_OFFSET_DIGITAL2, 0x40, CELL_PAD_BTN_OFFSET_PRESS_CROSS },
+            { CELL_PAD_BTN_OFFSET_DIGITAL2, 0x80, CELL_PAD_BTN_OFFSET_PRESS_SQUARE },
+            { CELL_PAD_BTN_OFFSET_DIGITAL2, 0x04, CELL_PAD_BTN_OFFSET_PRESS_L1 },
+            { CELL_PAD_BTN_OFFSET_DIGITAL2, 0x08, CELL_PAD_BTN_OFFSET_PRESS_R1 },
+            { CELL_PAD_BTN_OFFSET_DIGITAL2, 0x01, CELL_PAD_BTN_OFFSET_PRESS_L2 },
+            { CELL_PAD_BTN_OFFSET_DIGITAL2, 0x02, CELL_PAD_BTN_OFFSET_PRESS_R2 } };
+        for (unsigned k = 0; k < sizeof pm / sizeof pm[0]; k++)
+            if ((data->button[pm[k].word] & pm[k].bit) && data->button[pm[k].off] < 255)
+                data->button[pm[k].off] = 255;
     }
 
     /* Sensor data (only meaningful if SENSOR_ON) */
@@ -804,7 +841,8 @@ emit:
 /* cellPadGetInfo (v1 API, NID 0x3AAAD464) — used by PSL1GHT's ioPadGetInfo.
  * Layout (RPCS3 cellPad.h CellPadInfo, all big-endian):
  *   +0x00 u32 max_connect        +0x04 u32 now_connect   +0x08 u32 system_info
- *   +0x0C u16 vendor_id[7]       +0x1A u16 product_id[7] +0x28 u8 status[7]
+ *   +0x0C u16 vendor_id[127]     +0x10A u16 product_id[127] +0x208 u8 status[127]
+ *   (CELL_MAX_PADS / PSL1GHT MAX_PADS = 127 -- NOT 7; see below)
  * Leaving this unimplemented let the guest read stack garbage as pad state and
  * run off into the weeds before ever reaching gcm init. */
 s32 cellPadGetInfo(CellPadInfo2* info)
@@ -817,19 +855,33 @@ s32 cellPadGetInfo(CellPadInfo2* info)
 
     pad_poll_backend();
 
+    /* Present a virtual pad on port 0 when nothing physical is attached, the
+     * same as cellPadGetInfo2 does.
+     *
+     * The two entry points disagreed: GetInfo2 carried the fallback and GetInfo
+     * did not, so which one a title imports decided whether it believed a
+     * controller existed. The Orange Box's chooser imports GetInfo (v1) and
+     * never GetInfo2, so it saw zero pads, opened "SIXAXIS wireless controller
+     * not detected", took the auto-OK, and opened it again -- forever, before
+     * it ever finished booting. Both entry points describe the same hardware
+     * and have to answer the same way. */
     u32 connected = 0;
     for (u32 i = 0; i < s_max_connect && i < PAD_MAX_HOST_PORTS; i++)
-        if (s_host_state[i].connected) connected++;
+        if (s_host_state[i].connected || i == 0) connected++;
 
     vm_write32(gaddr + 0x00, s_max_connect);
     vm_write32(gaddr + 0x04, connected);
     vm_write32(gaddr + 0x08, 0);                       /* system_info */
+    /* CellPadInfo (v1) sizes its arrays by CELL_MAX_PADS = 127, not by the 7
+     * ports: vendor_id[127] @0x0C, product_id[127] @0x10A, status[127] @0x208.
+     * Packed for 7 ports, status landed at 0x28 and GH3 -- which reads
+     * info+0x208+port -- saw port 0 disconnected and never polled the pad. */
     for (u32 i = 0; i < CELL_PAD_MAX_PORT_NUM; i++) {
         int on = (i < s_max_connect && i < PAD_MAX_HOST_PORTS &&
-                  s_host_state[i].connected);
-        vm_write16(gaddr + 0x0C + i * 2, on ? 0x054C : 0);   /* vendor: Sony  */
-        vm_write16(gaddr + 0x1A + i * 2, on ? 0x0268 : 0);   /* product: DS3  */
-        vm_write8(gaddr + 0x28 + i, on ? CELL_PAD_STATUS_CONNECTED : 0);
+                  (s_host_state[i].connected || i == 0));
+        vm_write16(gaddr + 0x00C + i * 2, on ? 0x054C : 0);   /* vendor: Sony  */
+        vm_write16(gaddr + 0x10A + i * 2, on ? 0x0268 : 0);   /* product: DS3  */
+        vm_write8(gaddr + 0x208 + i, on ? CELL_PAD_STATUS_CONNECTED : 0);
     }
     return CELL_OK;
 }
@@ -951,6 +1003,39 @@ s32 cellPadSetPortSetting(u32 port_no, u32 port_setting)
         return CELL_PAD_ERROR_INVALID_PARAMETER;
 
     s_port_setting[port_no] = port_setting;
+    return CELL_OK;
+}
+
+/* cellPadInfoPressMode (NID 0x0E2DFAAD) / cellPadSetPressMode (NID 0xF83F8182)
+ *
+ * Press mode makes the digital buttons report an analog 0..255 pressure in the
+ * extended part of CellPadData. A DS3 supports it, and the virtual pad reported
+ * by cellPadGetInfo/GetInfo2 already advertises CELL_PAD_CAPABILITY_PRESS_MODE,
+ * so these have to agree with that claim rather than fall through to the
+ * unresolved-NID path.
+ *
+ * Info returns 1 when the port supports press mode; Set toggles it, recorded in
+ * the same s_port_setting word cellPadSetPortSetting uses so a title that reads
+ * the setting back sees what it asked for. */
+s32 cellPadInfoPressMode(u32 port_no)
+{
+    if (!s_pad_initialized)
+        return CELL_PAD_ERROR_NOT_OPENED;
+    if (port_no >= CELL_PAD_MAX_PORT_NUM)
+        return CELL_PAD_ERROR_INVALID_PARAMETER;
+    return 1;                                  /* supported */
+}
+
+s32 cellPadSetPressMode(u32 port_no, u32 mode)
+{
+    if (!s_pad_initialized)
+        return CELL_PAD_ERROR_NOT_OPENED;
+    if (port_no >= CELL_PAD_MAX_PORT_NUM)
+        return CELL_PAD_ERROR_INVALID_PARAMETER;
+    if (mode)
+        s_port_setting[port_no] |= CELL_PAD_SETTING_PRESS_ON;
+    else
+        s_port_setting[port_no] &= ~(u32)CELL_PAD_SETTING_PRESS_ON;
     return CELL_OK;
 }
 

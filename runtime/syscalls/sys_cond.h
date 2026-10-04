@@ -25,7 +25,10 @@
 extern "C" {
 #endif
 
-#define SYS_COND_MAX  256
+/* Sized with SYS_MUTEX_MAX: every cond is created against a mutex, and a
+ * title that outgrew 256 mutexes (Resistance: Fall of Man) had cond IDs past
+ * 130 by then. ~100 bytes a slot. */
+#define SYS_COND_MAX  8192
 
 typedef struct sys_cond_info {
     int      active;

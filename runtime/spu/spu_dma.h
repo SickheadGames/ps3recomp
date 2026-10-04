@@ -185,6 +185,26 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
                               " size=%u covers 0x%08X\n",
                       (uint32_t)spu->pc & SPU_LS_MASK, cmd, lsa, (uint32_t)ea, size,
                       (uint32_t)s_w); } }
+    /* SPU_DMA_RANGE=<lo>-<hi> (hex EAs): log transfers touching [lo,hi), first
+     * 64 -- who reads or writes a buffer the RSX shares with the SPUs. */
+    { static uint32_t s_lo = 1, s_hi;
+      if (s_lo == 1) { const char* e = getenv("SPU_DMA_RANGE"); s_lo = 0;
+          if (e) { char* d; s_lo = (uint32_t)strtoul(e, &d, 16); if (*d == '-') s_hi = (uint32_t)strtoul(d + 1, 0, 16); } }
+      if (s_hi && (uint32_t)ea < s_hi && (uint32_t)ea + size > s_lo) {
+          static int _n = 0;
+          if (_n++ < 64)
+              fprintf(stderr, "[dma-range] pc=0x%05X cmd=0x%X lsa=0x%05X ea=0x%08X size=%u\n",
+                      (uint32_t)spu->pc & SPU_LS_MASK, cmd, lsa, (uint32_t)ea, size);
+          /* ...and every 5 s, the bytes PUT into / GOT from the range. */
+          { static volatile long long s_put, s_get; static unsigned long long s_t0;
+            extern unsigned long long ps3_ms_now(void);
+            if ((cmd & 0xF0) == 0x20) s_put += size; else if ((cmd & 0xF0) == 0x40) s_get += size;
+            unsigned long long now = ps3_ms_now();
+            if (!s_t0) s_t0 = now;
+            if (now - s_t0 >= 5000) {
+                fprintf(stderr, "[dma-range] %.0f B/s put, %.0f B/s get\n",
+                        s_put * 1000.0 / (now - s_t0), s_get * 1000.0 / (now - s_t0));
+                s_put = s_get = 0; s_t0 = now; } } } }
     /* Malformed transfers are REJECTED, as the hardware MFC does. The rules
      * are the ones the SDK's own dma.h asserts: a non-zero size, at most
      * 16 KB, a multiple of 16 once >= 16 bytes, and LSA/EA sharing 16-byte
@@ -612,8 +632,11 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
         {
             extern int  spu_coh_is_reserved(uint32_t);
             extern void spu_coh_notify_write(uint32_t);
+            extern void spu_coh_notify_write_except(uint32_t, const void*);
             extern void spu_lockline_lock(void);
             extern void spu_lockline_unlock(void);
+            extern void spu_lockguard_check(spu_context*, uint32_t, const uint8_t*, uint32_t, const char*);
+            spu_lockguard_check(spu, (uint32_t)ea, (const uint8_t*)ls_ptr, size, "PUT");
             uint32_t a0 = (uint32_t)ea & ~127u;
             uint32_t a1 = ((uint32_t)ea + size - 1u) & ~127u;
             int span_reserved = 0;
@@ -625,7 +648,7 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
                 spu_lockline_lock();
                 memcpy(ea_ptr, ls_ptr, size);
                 for (uint32_t a = a0; ; a += 128u) {
-                    if (spu_coh_is_reserved(a)) spu_coh_notify_write(a);
+                    if (spu_coh_is_reserved(a)) spu_coh_notify_write_except(a, spu);
                     if (a == a1) break;
                 }
                 spu_lockline_unlock();
@@ -634,13 +657,22 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
                 for (uint32_t a = a0; ; a += 128u) {
                     if (spu_coh_is_reserved(a)) {
                         spu_lockline_lock();
-                        spu_coh_notify_write(a);
+                        spu_coh_notify_write_except(a, spu);
                         spu_lockline_unlock();
                     }
                     if (a == a1) break;
                 }
             }
         }
+        /* Tell whoever is listening where this PUT landed.
+         *
+         * A title whose SPUs build the RSX command stream never tells libgcm
+         * where that stream is -- it hands the RSX a `put` offset and nothing
+         * else -- so the DMA that writes it is the only evidence of which
+         * buffer the RSX is actually bound to. The GCM layer installs this to
+         * find the pushbuffer; NULL for every title that does not. */
+        { extern void (*g_spu_put_hook)(uint32_t ea, uint32_t size);
+          if (g_spu_put_hook) g_spu_put_hook((uint32_t)ea, size); }
         /* Bink sync-area watch (armed by the PPU barrier probe): log SPU PUTs
          * that touch the per-SPU lane counters. */
         { extern uint32_t g_barrier_sync_watch;
@@ -1180,10 +1212,22 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
         /* SPU_DMATRACE=<img> traces one image; SPU_DMATRACE_ALL keeps the old
          * hardcoded pair. Seeing a job's FIRST transfers is how you tell a bad
          * parameter block from a bad address computed later. */
+        /* SPU_DMATRACE takes an IMAGE ID, and that is a trap worth defusing:
+         * "=1" reads like "on" and actually selects image 1, so tracing a
+         * title whose work runs on image 4 prints NOTHING and reads as "this
+         * SPU issues no DMA at all". That produced a confidently wrong writeup
+         * for Guitar Hero III, whose task is in fact busy. Accept "all", and
+         * announce once what was armed so silence is never ambiguous. */
         static int64_t only=-2;
-        if (only==-2){ const char* e=getenv("SPU_DMATRACE"); only = e ? strtol(e,0,0) : -1; }
+        if (only==-2){ const char* e=getenv("SPU_DMATRACE");
+            only = !e ? -1 : ((strcmp(e,"all")==0 || strcmp(e,"ALL")==0) ? -3
+                                                                        : strtol(e,0,0));
+            if (e) fprintf(stderr, "[DMA] SPU_DMATRACE armed for %s\n",
+                           only==-3 ? "ALL images" : "one image id "
+                                                     "(a bare number is an IMAGE ID, not on/off)");
+        }
         if ((dt && (spu->image_id==22 || spu->image_id==23)) ||
-            (only >= 0 && spu->image_id == only)) {
+            only==-3 || (only >= 0 && spu->image_id == only)) {
             static int _n=0; if (_n++ < 160)
                 fprintf(stderr, "[DMA] img%d cmd=0x%02X lsa=0x%05X ea=0x%09llX size=0x%X tag=%u\n",
                         spu->image_id, cmd, lsa, (unsigned long long)ea, size, tag);

@@ -120,6 +120,7 @@ typedef struct CellAdecCb {
     u32 cbArg;    /* guest EA passed back to it  */
 } CellAdecCb;
 
+s32 cellAdecQueryAttr(const CellAdecType* type, void* attr);
 s32 cellAdecOpen(const CellAdecType* type, const CellAdecResource* res,
                  const CellAdecCb* cb, CellAdecHandle* handle);
 s32 cellAdecClose(CellAdecHandle handle);

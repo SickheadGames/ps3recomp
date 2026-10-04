@@ -132,6 +132,26 @@ static void sail_notify(int slot, u32 major, u32 minor, u64 arg0)
                        ((u64)major << 32) | minor, arg0, 0, 0, 0, 0, 0);
 }
 
+/* The player also reports every state it passes through: major=3
+ * (PLAYER_STATE_CHANGED), minor 0, arg0 = the new state in the SDK's
+ * numbering -- not the CELL_SAIL_PLAYER_STATE_* values in cellSail.h, which
+ * are this file's own bookkeeping. Midway Arcade Origins maps arg0 through a
+ * nine-entry table (CLOSED=2, OPENED=4, RUNNING=6, ...) and opens nothing until
+ * boot has reported CLOSED; without these events it boots the player and then
+ * waits on a black screen for good. */
+#define SAIL_EV_STATE_CHANGED 3
+enum { SAIL_ST_BOOT_TRANSITION = 1, SAIL_ST_CLOSED = 2, SAIL_ST_OPEN_TRANSITION = 3,
+       SAIL_ST_OPENED = 4, SAIL_ST_START_TRANSITION = 5, SAIL_ST_RUNNING = 6,
+       SAIL_ST_STOP_TRANSITION = 7, SAIL_ST_CLOSE_TRANSITION = 8 };
+
+/* One synchronous call: transition state, completion, settled state. */
+static void sail_call(int slot, u32 call, u32 via, u32 to)
+{
+    sail_notify(slot, SAIL_EV_STATE_CHANGED, 0, via);
+    sail_notify(slot, SAIL_EV_CALL_COMPLETED, call, 0);
+    sail_notify(slot, SAIL_EV_STATE_CHANGED, 0, to);
+}
+
 s32 cellSailPlayerBoot(CellSailPlayerHandle handle, u64 userParam)
 {
     (void)userParam;
@@ -140,7 +160,7 @@ s32 cellSailPlayerBoot(CellSailPlayerHandle handle, u64 userParam)
     if (_sp < 0)
         return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
     s_sail_players[_sp].state = CELL_SAIL_PLAYER_STATE_RUNNING;
-    sail_notify(_sp, SAIL_EV_CALL_COMPLETED, SAIL_CALL_BOOT, 0);
+    sail_call(_sp, SAIL_CALL_BOOT, SAIL_ST_BOOT_TRANSITION, SAIL_ST_CLOSED);
     return CELL_OK;
 }
 
@@ -166,7 +186,7 @@ s32 cellSailPlayerOpenStream(CellSailPlayerHandle handle, const char* path)
     if (_sp < 0)
         return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
     /* Stub: don't actually open anything */
-    sail_notify(_sp, SAIL_EV_CALL_COMPLETED, SAIL_CALL_OPEN_STREAM, 0);
+    sail_call(_sp, SAIL_CALL_OPEN_STREAM, SAIL_ST_OPEN_TRANSITION, SAIL_ST_OPENED);
     return CELL_OK;
 }
 
@@ -175,7 +195,7 @@ s32 cellSailPlayerCloseStream(CellSailPlayerHandle handle)
     const int _sp = sail_player_slot((u32)handle);
     if (_sp < 0)
         return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
-    sail_notify(_sp, SAIL_EV_CALL_COMPLETED, SAIL_CALL_CLOSE_STREAM, 0);
+    sail_call(_sp, SAIL_CALL_CLOSE_STREAM, SAIL_ST_CLOSE_TRANSITION, SAIL_ST_CLOSED);
     return CELL_OK;
 }
 
@@ -188,7 +208,12 @@ s32 cellSailPlayerStart(CellSailPlayerHandle handle)
     s_sail_players[_sp].state = CELL_SAIL_PLAYER_STATE_RUNNING;
     /* Immediately signal finished since we don't play anything */
     s_sail_players[_sp].state = CELL_SAIL_PLAYER_STATE_FINISHED;
-    sail_notify(_sp, SAIL_EV_CALL_COMPLETED, SAIL_CALL_START, 0);
+    sail_call(_sp, SAIL_CALL_START, SAIL_ST_START_TRANSITION, SAIL_ST_RUNNING);
+    /* Nothing decodes the stream, so it has already ended: a finished stream
+     * drops the player back to OPENED, which is what a title waiting out a
+     * movie (Midway's logo AVIs) watches for. */
+    sail_notify(_sp, SAIL_EV_STATE_CHANGED, 0, SAIL_ST_STOP_TRANSITION);
+    sail_notify(_sp, SAIL_EV_STATE_CHANGED, 0, SAIL_ST_OPENED);
     return CELL_OK;
 }
 
@@ -199,7 +224,7 @@ s32 cellSailPlayerStop(CellSailPlayerHandle handle)
     if (_sp < 0)
         return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
     s_sail_players[_sp].state = CELL_SAIL_PLAYER_STATE_FINISHED;
-    sail_notify(_sp, SAIL_EV_CALL_COMPLETED, SAIL_CALL_STOP, 0);
+    sail_call(_sp, SAIL_CALL_STOP, SAIL_ST_STOP_TRANSITION, SAIL_ST_OPENED);
     return CELL_OK;
 }
 

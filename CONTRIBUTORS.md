@@ -383,9 +383,35 @@ Gave the project its first CI and its second platform, in **v0.9.0**.
   documented command against its tool's real argument parser turned up four more
   in the guide and two in the README. Fixed.
 
+### tomspilman — [@tomspilman](https://github.com/tomspilman)
+- **Found `spu_lifter.py --header-name` silently ignored** (#181) — the flag set
+  the output filename but the emitted `#include` stayed hardcoded to
+  `spu_recomp.h`, so any image lifted under a custom header name produced a
+  source file that could not compile. Every in-tree caller happens to pass the
+  default, which is exactly why it survived: a flag that only breaks for the
+  second person to use it.
+
 ### Filedownloader-tech — [@Filedownloader-tech](https://github.com/Filedownloader-tech)
 - **Build failure report with a full log** (#89) — the kind of report that can
   actually be acted on.
+
+### gabryboy12-ai — [@gabryboy12-ai](https://github.com/gabryboy12-ai)
+- **Put Linux and macOS back on the build** (#191) — three recent commits had
+  reached for Win32 API that GCC/Clang builds do not have (a bare
+  `__declspec(thread)`, `LONG`/`InterlockedExchange`/`Sleep` outside `_WIN32`,
+  and `GetFileAttributesA` in two diagnostic gates), so master stopped building
+  off Windows. Fixed each the way the file already did it, and gave the compat
+  layer a POSIX `GetFileAttributesA` with a test.
+
+---
+
+## Third-party code
+
+- **ATRAC3 / ATRAC3plus decoders** (`third_party/at3_standalone`, used by
+  `cellAtrac`) — from [FFmpeg](https://ffmpeg.org/), as extracted to a
+  standalone library by the [PPSSPP](https://github.com/hrydgard/ppsspp) project
+  (`ext/at3_standalone`). LGPL-2.1-or-later, kept as a separable component; see
+  its `README.txt` and `COPYING.LGPLv2.1`.
 
 ---
 

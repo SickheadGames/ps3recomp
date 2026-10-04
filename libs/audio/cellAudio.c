@@ -142,6 +142,7 @@ static AudioNotifySlot s_notify_queues[CELL_AUDIO_MAX_NOTIFY_EVENT_QUEUES];
 static u64            s_audio_start_us = 0;
 
 /* Mixing thread */
+static unsigned long long g_audio_dropped;   /* frames the device had no room for */
 static volatile int  s_mix_thread_running = 0;
 static thread_t      s_mix_thread;
 #ifndef _WIN32
@@ -205,6 +206,16 @@ static void audio_backend_submit(const float* stereo_samples, u32 num_samples)
                        num_samples * 2 * sizeof(float));
     }
 }
+
+/* SDL queues without bound: keep about four blocks ahead of the device. */
+static int audio_backend_room(void)
+{
+    if (!s_sdl_audio_dev) return -1;
+    return SDL_GetQueuedAudioSize(s_sdl_audio_dev) / (2 * sizeof(float)) <
+           CELL_AUDIO_BLOCK_SAMPLES * 4 ? CELL_AUDIO_BLOCK_SAMPLES : 0;
+}
+
+static void audio_backend_wait(void) { SDL_Delay(1); }
 
 static u32 audio_backend_queued_samples(void)
 {
@@ -339,9 +350,10 @@ static void audio_backend_submit(const float* stereo_samples, u32 num_samples)
     s_wasapi_client->lpVtbl->GetCurrentPadding(s_wasapi_client, &padding);
 
     UINT32 available = s_wasapi_buf_frames - padding;
-    if (num_samples > available)
+    if (num_samples > available) {
+        g_audio_dropped += num_samples - available;
         num_samples = available;
-
+    }
     if (num_samples == 0) return;
 
     BYTE* buf = NULL;
@@ -352,13 +364,29 @@ static void audio_backend_submit(const float* stereo_samples, u32 num_samples)
     }
 }
 
-static u32 audio_backend_queued_samples(void)
+/* Frames the device can take right now; -1 with no device open. */
+static int audio_backend_room(void)
 {
-    if (!s_wasapi_client) return 0;
+    if (!s_wasapi_client) return -1;
     UINT32 padding = 0;
-    s_wasapi_client->lpVtbl->GetCurrentPadding(s_wasapi_client, &padding);
-    return padding;
+    const HRESULT hr = s_wasapi_client->lpVtbl->GetCurrentPadding(s_wasapi_client, &padding);
+    if (FAILED(hr)) {
+        /* Device gone (AUDCLNT_E_DEVICE_INVALIDATED on a default-device
+         * change, sleep, ...): pace on the clock rather than spin. */
+        static int _n = 0; if (_n++ < 4)
+            fprintf(stderr, "[cellAudio] GetCurrentPadding failed 0x%08lX -- clock pacing%c", (unsigned long)hr, 10);
+        return -1;
+    }
+    return (int)(s_wasapi_buf_frames - padding);
 }
+
+/* Block until the device has consumed some of its buffer. */
+static void audio_backend_wait(void)
+{
+    if (s_wasapi_event) WaitForSingleObject(s_wasapi_event, 10);
+    else Sleep(1);
+}
+
 
 #endif /* AUDIO_BACKEND_WASAPI */
 
@@ -512,7 +540,29 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
     (void)arg;
     printf("[cellAudio] Mixing thread started\n");
 
+    /* Pace to the device clock. The PS3 consumes one block every 5.33 ms;
+     * the old Sleep(2)/Sleep(5) loop keyed on a queue depth the 1056-frame
+     * WASAPI buffer can never reach, so it mixed ~225 blocks/s and the device
+     * dropped the surplus: 20% of the audio thrown away, and a guest mixer
+     * (GH3's FMOD) that could not keep ahead of the read index played gaps.
+     * With no device, pace on the performance counter instead. */
+    LARGE_INTEGER qf, q0; QueryPerformanceFrequency(&qf); QueryPerformanceCounter(&q0);
+    unsigned long long blocks = 0;
     while (s_mix_thread_running) {
+        const int room = audio_backend_room();
+        if (room >= 0 && room < CELL_AUDIO_BLOCK_SAMPLES) { audio_backend_wait(); continue; }
+        if (room < 0) {
+            LARGE_INTEGER now; QueryPerformanceCounter(&now);
+            const long long due = q0.QuadPart +
+                (long long)(blocks * CELL_AUDIO_BLOCK_SAMPLES * qf.QuadPart / CELL_AUDIO_SAMPLE_RATE);
+            if (now.QuadPart < due) { Sleep(1); continue; }
+            /* More than 50 ms behind (device just went away, a debugger
+             * stop): drop the backlog instead of mixing it in a burst. */
+            if (now.QuadPart - due > qf.QuadPart / 20)
+                q0.QuadPart = now.QuadPart -
+                    (long long)(blocks * CELL_AUDIO_BLOCK_SAMPLES * qf.QuadPart / CELL_AUDIO_SAMPLE_RATE);
+        }
+        blocks++;
         /* Mix and submit one block */
         audio_mix_one_block();
         /* AUDIO_PEAK=1: report the mixed block's peak amplitude periodically so
@@ -523,19 +573,30 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
                 float a = s_mix_buffer[i]; if (a < 0) a = -a; if (a > pk) pk = a; }
             if ((++_n % 200) == 0 || (pk > 0.001f && _n < 40))
                 fprintf(stderr, "[audio-peak] block#%u peak=%.4f\n", _n, pk); } }
+        /* AUDIO_WAV=<file>: append the final mix as raw f32le stereo 48 kHz
+         * (ffmpeg -f f32le -ar 48000 -ac 2 -i <file>). */
+        { static FILE* _wf = (FILE*)-1;
+          if (_wf == (FILE*)-1) { const char* e = getenv("AUDIO_WAV"); _wf = e ? fopen(e, "wb") : NULL; }
+          if (_wf) fwrite(s_mix_buffer, sizeof(float), CELL_AUDIO_BLOCK_SAMPLES * 2, _wf); }
         audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
+        /* AUDIO_RATE=1: blocks mixed vs real time, and frames dropped. */
+        { static int on = -1; if (on < 0) on = getenv("AUDIO_RATE") ? 1 : 0;
+          if (on) { static ULONGLONG t0; static unsigned n, z; static unsigned long long d0;
+            ULONGLONG now = GetTickCount64(); if (!t0) t0 = now; n++;
+            { int nz = 0; for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) if (s_mix_buffer[i] != 0.0f) { nz = 1; break; }
+              if (!nz) z++; }
+            if (now - t0 >= 5000) {
+                fprintf(stderr, "[audio-rate] %.1f blocks/s (real time 187.5), silent %.1f%%, dropped %.0f frames/s, device buf %u%c",
+                        n * 1000.0 / (now - t0), n ? 100.0 * z / n : 0.0, (g_audio_dropped - d0) * 1000.0 / (now - t0),
+                #if AUDIO_BACKEND_WASAPI
+                        (unsigned)s_wasapi_buf_frames, 10);
+#else
+                        0u, 10);
+#endif
+                n = z = 0; d0 = g_audio_dropped; t0 = now; } } }
 
         /* Notify event queues */
         audio_notify_event_queues();
-
-        /* Wait approximately one audio period (~5.333ms).
-         * Adjust based on how much is queued to avoid buffer overrun. */
-        u32 queued = audio_backend_queued_samples();
-        if (queued > CELL_AUDIO_BLOCK_SAMPLES * 4) {
-            Sleep(5);
-        } else {
-            Sleep(2);
-        }
     }
 
     printf("[cellAudio] Mixing thread stopped\n");
