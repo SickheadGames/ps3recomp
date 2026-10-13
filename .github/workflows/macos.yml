@@ -86,6 +86,27 @@ jobs:
           clang -std=gnu17 -I include -o /tmp/test_sys_net libs/network/tests/test_sys_net.c
           /tmp/test_sys_net
 
+      # Matching2 over psnr without a server: response relocation, attribute
+      # packing, and the room structs a title reads.
+      - name: Run the Matching2 test
+        run: |
+          clang -std=gnu17 -I include -o /tmp/test_np_matching2 libs/network/tests/test_np_matching2.c
+          /tmp/test_np_matching2
+
+      # The player name: --username, PS3_NP_ONLINE_ID, the OS login online,
+      # and PSN's online ID rules.
+      - name: Run the player-name test
+        run: |
+          clang -std=gnu17 -I include -o /tmp/test_np_identity libs/network/tests/test_np_identity.c
+          /tmp/test_np_identity
+
+      # NAT traversal: probing psnr from the P2P socket, dropping psnr's
+      # packets before the title sees them, punching toward peers.
+      - name: Run the NAT traversal test
+        run: |
+          clang -std=gnu17 -I include -o /tmp/test_np_nat libs/network/tests/test_np_nat.c
+          /tmp/test_np_nat
+
       # Drives a real NV4097 command buffer through cellGcm -> RSX -> the Metal
       # backend and asserts the presented pixel matches the guest clear colour.
       # Headless, so it needs no display: exit 0 means the whole graphics bridge
@@ -287,6 +308,10 @@ jobs:
           # restart cuts bounding topology expansion. Runs on Linux too.
           clang -std=gnu17 -Wall -Wextra -Wno-unused-parameter -I include -I libs/video -o /tmp/test_rsx_draw_engine libs/video/tests/test_rsx_draw_engine.c libs/video/rsx_draw_engine.c libs/video/rsx_dispatch.c libs/video/rsx_vertex_compact.c libs/video/rsx_texture_layout.c libs/video/rsx_vp_decompiler.c libs/video/rsx_fp_decompiler.c
           /tmp/test_rsx_draw_engine
+          # The NV4097 method decoder on its own: the vertex-constant window is
+          # 32 dwords and the registers after it are not constants.
+          clang -std=gnu17 -Wall -Wextra -I include -I libs/video -o /tmp/test_rsx_transform_constants libs/video/tests/test_rsx_transform_constants.c libs/video/rsx_commands.c
+          /tmp/test_rsx_transform_constants
 
       # The Win32 shim the runtime runs through on macOS: interlocked widths
       # and return conventions, SRW/CS/condition variables, events, semaphores,
@@ -351,6 +376,23 @@ jobs:
             runtime/platform/win32_compat.c \
             -lpthread -lm
           /tmp/test_spu_lockline_peer
+
+      # A task parked in WAIT_SIGNAL, signalled by another SPU. libspurs does
+      # that with PUTLLC on the taskset line, which never woke the parked
+      # task's host thread: it saw the signal only when its 1 s wait timed out.
+      - name: Run the SPURS task wake test
+        run: |
+          clang -std=gnu17 -I include -I runtime/spu -I runtime/platform \
+            -o /tmp/test_spu_taskset_wake \
+            runtime/spu/tests/test_spu_taskset_wake.c \
+            runtime/spu/spu_drain.c runtime/spu/spu_lockstep.c \
+            runtime/spu/spu_coherency.c runtime/spu/spu_workload.c \
+            runtime/spu/spurs_policy.c runtime/spu/spurs_job.c \
+            runtime/spu/spu_tsp_weak.c runtime/spu/spu_vm_pagemap.c \
+            runtime/spu/spurs_policy_blob_weak.c runtime/spu/spu_interp.c \
+            runtime/platform/win32_compat.c \
+            -lpthread -lm
+          /tmp/test_spu_taskset_wake
 
       # A thread group starting its threads on their image's LIFTED code. This
       # is the path a real title needs and the one that used to be missing: the

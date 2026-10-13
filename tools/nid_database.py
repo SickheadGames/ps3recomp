@@ -239,6 +239,8 @@ _BUILTIN_FUNCTIONS: list[tuple[str, str]] = [
     ("cellSpurs", "cellSpursTaskAttribute2Initialize"),
     ("cellSpurs", "cellSpursTaskAttributeSetExitCode"),
     ("cellSpurs", "cellSpursTaskGetContextSaveAreaSize"),
+    ("cellSpurs", "cellSpursGetTasksetInfo"),
+    ("cellSpurs", "cellSpursBarrierInitialize"),
     ("cellSpurs", "cellSpursTaskExitCodeGet"),
     ("cellSpurs", "cellSpursTaskExitCodeRelease"),
     # SPURS workload

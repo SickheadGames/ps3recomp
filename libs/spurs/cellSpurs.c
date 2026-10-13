@@ -800,7 +800,6 @@ s32 cellSpursDestroyTaskset(CellSpursTaskset* taskset)
         return CELL_SPURS_TASK_ERROR_NULL_POINTER;
 
     printf("[cellSpurs] DestroyTaskset()\n");
-    taskset->initialized = 0;
     return CELL_OK;
 }
 
@@ -811,7 +810,6 @@ s32 cellSpursShutdownTaskset(CellSpursTaskset* taskset)
         return CELL_SPURS_TASK_ERROR_NULL_POINTER;
 
     printf("[cellSpurs] ShutdownTaskset()\n");
-    taskset->shutdownRequested = 1;
     return CELL_OK;
 }
 
@@ -927,7 +925,6 @@ s32 cellSpursCreateTask(CellSpursTaskset* taskset, CellSpursTaskId* taskId,
              * signals with has to be the same number. */
             if (taskId) vm_write32((u32)(uintptr_t)taskId, i);
             (void)taskId_h;
-            taskset->taskCount++;
 
             /* Register the task in the REAL BE taskset: writes task_info[slot]
              * (args/elf/context/ls_pattern) + sets enabled+ready bits so the PM's
@@ -2527,13 +2524,22 @@ static u64 spurs_event_data3_probe(void)
     return (u64)(unsigned)v;
 }
 
-static void jc_signal_done(u32 jc_ea)
+static void jc_signal_done(u32 jc_ea, int job_index)
 {
     /* Carry the job's mailbox answer in the completion event. On hardware the
      * SPU's outbound/interrupt mailbox is what the SPURS event delivers; a
      * synthetic payload means the caller reads back zero for whatever it
-     * asked. Keep the chain EA in data1 for anything that used it. */
-    u64 d2 = 0, d3 = 0;
+     * asked. Keep the chain EA in data1 for anything that used it.
+     *
+     * data2 is WHICH job finished: the PPU side of a job chain counts on it.
+     * GT5P's audio service does
+     *     do { JobGuardNotify; receive(q); i = data2; run_callback(i); }
+     *     while (i + 1 < queued);
+     * so a data2 pinned at 0 never ends that loop -- with the chain's lwmutex
+     * held, which blocks the main thread's teardown behind it. A chain-level
+     * signal (job_index < 0) sends 0. */
+    u64 d2 = (u64)(unsigned)(job_index < 0 ? 0 : job_index);
+    u64 mbox = 0, d3 = 0;
     (void)spurs_event_data3_probe();   /* prime d3_probe_valid */
     /* A PPU-side query submits a job and reads the reply out of the completion
      * event's data3 (the guest stores r7 at sp+0xB8 and reads the value back
@@ -2547,28 +2553,29 @@ static void jc_signal_done(u32 jc_ea)
      *
      * Only the two count queries are forwarded. Neighbouring commands
      * (0x102/0x103/0x104) reply with LS ADDRESSES rather than counts, and
-     * func_00201D38 stores each reply into module+0x1C/+0x20/+0x24. data2
-     * stays 0 because the audio consumer uses it as a JOB INDEX: it waits until
-     * data2 + 1 reaches the chain's job count, so a mailbox value there ends
-     * the wait early. */
+     * func_00201D38 stores each reply into module+0x1C/+0x20/+0x24. The
+     * mailbox never goes in data2, which is the job index above: a mailbox
+     * value there would end the consumer's wait early. */
     enum { SGX_Q_IN_BUSES = 0x105, SGX_Q_OUT_BUSES = 0x106 };
     const int answers_a_count = (g_spurs_job_cmd == SGX_Q_IN_BUSES ||
                                  g_spurs_job_cmd == SGX_Q_OUT_BUSES);
     if (g_spurs_job_mbox_valid) {
-        d2 = g_spurs_job_mbox;
+        mbox = g_spurs_job_mbox;
         d3 = g_spurs_job_mbox_intr; (void)d3;
         g_spurs_job_mbox_valid = 0;
     }
     for (int i = 0; i < s_spurs_event_queue_n; i++) {
         int rc = sys_event_queue_push_by_id(s_spurs_event_queue[i],
-                                            SPURS_EVENT_PORT, jc_ea, 0,
+                                            SPURS_EVENT_PORT, jc_ea, d2,
                                             d3_probe_valid
                                                 ? spurs_event_data3_probe()
-                                                : (answers_a_count ? d2 : 0));
+                                                : (answers_a_count ? mbox : 0));
         static int n = 0;
         if (n++ < 8)
-            printf("[cellSpurs] chain 0x%08X work done -> event queue %u (rc=%d)\n",
-                   jc_ea, s_spurs_event_queue[i], rc);
+            printf("[cellSpurs] chain 0x%08X job %d done -> event queue %u "
+                   "(data2=%llu rc=%d)\n",
+                   jc_ea, job_index, s_spurs_event_queue[i],
+                   (unsigned long long)d2, rc);
     }
 }
 
@@ -2592,14 +2599,15 @@ static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
 
         if (cmd != 0 && op == 0) {                    /* JOB */
             { extern u32 g_spurs_job_ls_handle; g_spurs_job_ls_handle = jc_ea; }
-            jc_run_one_job((u32)(cmd & ~7ull), jobs++, size_desc);
+            int idx = jobs++;
+            jc_run_one_job((u32)(cmd & ~7ull), idx, size_desc);
             idle = 0;                    /* real work: the chain is healthy */
             /* Signal per JOB, not per lap. The application waits once for each
              * unit of work it queued -- this title notified the guard 7 times
              * and sat in event_queue_receive 30 times -- so batching the
              * completion into one event per pass leaves it waiting for
              * completions that, from its point of view, never arrive. */
-            jc_signal_done(jc_ea);
+            jc_signal_done(jc_ea, idx);
             pc += 8; continue;
         }
         if (op == 1) { pc = (u32)(cmd & ~7ull); continue; }   /* RESET_PC */
@@ -2608,7 +2616,7 @@ static void jc_execute(u32 entry_ea, u32 jc_ea, u32 size_desc)
         if (op == 7) {
             if (ext == (7 | (15 << 3))) {                     /* END */
                 printf("[cellSpurs] chain 0x%08X: END after %d job(s)\n", jc_ea, jobs);
-                if (jobs) jc_signal_done(jc_ea);
+                if (jobs) jc_signal_done(jc_ea, jobs - 1);
                 return;
             }
             if (ext == (7 | (14 << 3))) {                     /* RET */
@@ -2649,7 +2657,7 @@ static DWORD WINAPI jc_thread(LPVOID p)
     s_jobchains[slot].running = 0;
     /* Tell the application the chain is done. Without this the walk finishes
      * in silence and a thread waiting on the attached queue never runs again. */
-    jc_signal_done(s_jobchains[slot].jc_ea);
+    jc_signal_done(s_jobchains[slot].jc_ea, -1);
     return 0;
 }
 
@@ -3138,6 +3146,62 @@ s32 cellSpursTaskGetContextSaveAreaSize(u64 size_out_ea, u64 pattern_ea)
     if (_n++ < 8)
         printf("[cellSpurs] TaskGetContextSaveAreaSize(ls=%016llX %016llX, %u blocks) -> %u (0x%X)\n",
                (unsigned long long)hi, (unsigned long long)lo, blocks, size, size);
+    return CELL_OK;
+}
+
+/* cellSpursBarrierInitialize(CellSpursTaskset* taskset, CellSpursBarrier* barrier,
+ *                            u32 total)
+ *
+ * A barrier is 128 bytes, 128-aligned, opaque in the SDK: the PPU only
+ * initialises it, and the tasks of `taskset` meet at it from the SPU through
+ * the barrier code linked into their own images. That code reads the count
+ * of tasks still to arrive as a u32 at +0x04 and the owning taskset's EA at
+ * +0x34, the layout reverse engineering of the SPU side has found; the rest
+ * starts zeroed. Up to 128 tasks, one per taskset slot.
+ */
+s32 cellSpursBarrierInitialize(u64 taskset_ea, u64 barrier_ea, u32 total)
+{
+    if (!taskset_ea || !barrier_ea) return CELL_SPURS_TASK_ERROR_NULL_POINTER;
+    if ((taskset_ea & 127u) || (barrier_ea & 127u)) return CELL_SPURS_TASK_ERROR_ALIGN;
+    if (!total || total > 128u) return CELL_SPURS_TASK_ERROR_INVAL;
+
+    for (uint32_t o = 0; o < 128u; o += 8u) vm_write64((uint32_t)barrier_ea + o, 0);
+    vm_write32((uint32_t)barrier_ea + 0x04, total);
+    vm_write32((uint32_t)barrier_ea + 0x34, (uint32_t)taskset_ea);
+
+    printf("[cellSpurs] BarrierInitialize(taskset=0x%08X, barrier=0x%08X, total=%u)\n",
+           (u32)taskset_ea, (u32)barrier_ea, total);
+    return CELL_OK;
+}
+
+/* cellSpursGetTasksetInfo(const CellSpursTaskset* taskset, CellSpursTasksetInfo* info)
+ *
+ * CellSpursTasksetInfo is 128 per-task entries of 0x48 bytes, then the
+ * taskset's own fields: argument (u64, +0x2400), workload id (+0x2408), last
+ * scheduled task (+0x240C), name, exception handler and its argument
+ * (+0x2410..+0x241B), and the taskset's size (+0x241C). The taskset-level
+ * fields are filled from the taskset itself; the per-task entries are left
+ * zeroed, which reads as "no task", since nothing here tracks a task's state
+ * the way the SPU kernel does. Twisted Metal's post-FX init reads the
+ * workload id back from it.
+ */
+#define TSI_ARGUMENT     0x2400u
+#define TSI_WORKLOAD     0x2408u
+#define TSI_LAST_TASK    0x240Cu
+#define TSI_SIZE         0x241Cu
+#define TSI_BYTES        0x2420u
+
+s32 cellSpursGetTasksetInfo(u64 taskset_ea, u64 info_ea)
+{
+    if (!taskset_ea || !info_ea) return CELL_SPURS_TASK_ERROR_NULL_POINTER;
+    if (taskset_ea & 127u) return CELL_SPURS_TASK_ERROR_ALIGN;
+
+    const uint32_t ts = (uint32_t)taskset_ea, info = (uint32_t)info_ea;
+    for (uint32_t o = 0; o < TSI_BYTES; o += 4u) vm_write32(info + o, 0);
+    vm_write64(info + TSI_ARGUMENT, vm_read64(ts + CSTS_ARGS));
+    vm_write32(info + TSI_WORKLOAD, vm_read32(ts + CSTS_WID));
+    vm_write32(info + TSI_LAST_TASK, 0);
+    vm_write32(info + TSI_SIZE, vm_read32(ts + CSTS_SIZE_FIELD));
     return CELL_OK;
 }
 

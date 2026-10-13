@@ -39,6 +39,18 @@
 #  define host_backend_color    rsx_metal_backend_debug_color
 #  define host_backend_center   rsx_metal_backend_readback_center
 #  define host_backend_guest_draws rsx_metal_backend_guest_draws
+#elif defined(PS3RECOMP_RSX_VULKAN)
+/* Opt-in (-DPS3RECOMP_RSX_VULKAN=ON): same entry points and test hooks. */
+#  include "rsx_vulkan_backend.h"
+#  define HOST_BACKEND_NAME     "Vulkan"
+#  define HOST_BACKEND_GUEST_SHADERS rsx_vulkan_backend_guest_programs()
+#  define host_backend_init     rsx_vulkan_backend_init
+#  define host_backend_shutdown rsx_vulkan_backend_shutdown
+#  define host_backend_pump     rsx_vulkan_backend_pump_messages
+#  define host_backend_present  rsx_vulkan_backend_present
+#  define host_backend_color    rsx_vulkan_backend_debug_color
+#  define host_backend_center   rsx_vulkan_backend_readback_center
+#  define host_backend_guest_draws rsx_vulkan_backend_guest_draws
 #else
 #  include "rsx_null_backend.h"
 #  define HOST_BACKEND_NAME     "null (headless software)"
@@ -151,6 +163,19 @@ extern uint32_t ppu_vm_size;
  * tell from a backend with no headless readback at all -- so it would pass. */
 #define MRT_CLEAR    0xFF804020u
 
+/* --cube: a 4x4 A8R8G8B8 cube map, six faces of six colours, sampled along
+ * -Z. Faces sit one after another in the hardware order (+X, -X, +Y, -Y, +Z,
+ * -Z), each padded to 128 bytes as rsx_texture_cube_face_stride lays them
+ * out. The centre pixel must be face 5's colour: a backend that uploads only
+ * the first face, or samples the image as 2D, presents another face's. */
+#define CUBE_OFFSET      0x001C0000u
+#define CUBE_DIM         4u
+#define CUBE_FACE_STRIDE 128u
+static const u32 CUBE_FACE_ARGB[6] = {
+    0xFFC03020u, 0xFF20C030u, 0xFF3020C0u, 0xFFC0C020u, 0xFF20C0C0u, 0xFF8040E0u,
+};
+#define CUBE_ARGB        0xFF8040E0u      /* face 5, -Z: what --cube must read */
+
 /* Functions the RSX side exports but does not declare in a public header. */
 extern void cellGcm_rsx_process_fifo(void);
 extern int  cellGcm_take_flip_pending_synced(void);
@@ -162,6 +187,12 @@ static void guest_w32(uint32_t addr, uint32_t v)
     uint8_t* p = vm_base + addr;
     p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
     p[2] = (uint8_t)(v >>  8); p[3] = (uint8_t)v;
+}
+
+static uint32_t guest_r32(uint32_t addr)
+{
+    const uint8_t* p = vm_base + addr;
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
 }
 
 /* One guest VM, with its size published for the OOB guard above. */
@@ -296,6 +327,27 @@ static void upload_textured_quad(void)
     for (int i = 0; i < 6; i++)
         for (int k = 0; k < 12; k++)
             guest_f32(IO_ADDR + TVTX_OFFSET + (uint32_t)(i * 48 + k * 4), v[i][k]);
+}
+
+/* The --cube texture: each face a flat colour of its own. */
+static void upload_cube_texture(void)
+{
+    for (uint32_t f = 0; f < 6; f++)
+        for (uint32_t i = 0; i < CUBE_DIM * CUBE_DIM; i++)
+            guest_w32(IO_ADDR + CUBE_OFFSET + f * CUBE_FACE_STRIDE + i * 4u, CUBE_FACE_ARGB[f]);
+}
+
+/* The --cube quad: the full-screen quad's positions and green colour, with
+ * every texcoord0 the direction (0, 0, -1), so every fragment looks down -Z. */
+#define CVTX_OFFSET (VTX_OFFSET + 0x6000u)
+static void upload_cube_quad(void)
+{
+    static const float pos[6][2] = { {-1,-1}, {1,-1}, {1,1}, {-1,-1}, {1,1}, {-1,1} };
+    for (int i = 0; i < 6; i++) {
+        const float v[12] = { pos[i][0], pos[i][1], 0, 1,   0, 1, 0, 1,   0, 0, -1, 0 };
+        for (int k = 0; k < 12; k++)
+            guest_f32(IO_ADDR + CVTX_OFFSET + (uint32_t)(i * 48 + k * 4), v[k]);
+    }
 }
 
 /* A 64x64 A8R8G8B8 texture with TWO levels, each a flat colour: level 0 at the
@@ -522,7 +574,8 @@ static void emit_triangle_draw(void)
  *
  * Parameterised on where the texture is and how big it is, because --rtt
  * points the same draw at a render target instead of an uploaded image. */
-static void emit_textured_draw_fmt(u32 tex_offset, u32 w, u32 h, u32 fmt_byte)
+static void emit_textured_draw_full(u32 tex_offset, u32 w, u32 h, u32 fmt_byte,
+                                    int cube, u32 vtx_offset)
 {
     u8 vp[48];
     rsx_test_vp_mov_out(vp +  0, 0, RSX_TEST_VP_SWZ_IDENT, 0, 0);   /* MOV o0, v0      */
@@ -537,21 +590,34 @@ static void emit_textured_draw_fmt(u32 tex_offset, u32 w, u32 h, u32 fmt_byte)
      * byte in [15:8] -- A8R8G8B8 (0x85) with LN (0x20), linear rather than
      * swizzled, or DEPTH24_D8 (0x90) for --depthtex -- and one mip level in
      * [19:16]. */
-    emit(NV4097_SET_TEXTURE_FORMAT     + 0, 2u | (2u << 4) | (fmt_byte << 8) | (1u << 16));
+    emit(NV4097_SET_TEXTURE_FORMAT     + 0, 2u | (cube ? 4u : 0u) | (2u << 4) | (fmt_byte << 8) |
+                                            (1u << 16));
     emit(NV4097_SET_TEXTURE_CONTROL0   + 0, 0x80000000u);   /* unit enable */
     emit(NV4097_SET_TEXTURE_CONTROL1   + 0, 0xAAE4u);       /* identity crossbar */
     emit(NV4097_SET_TEXTURE_IMAGE_RECT + 0, (w << 16) | h);
 
-    emit(NV4097_SET_VERTEX_DATA_ARRAY_OFFSET + 0 * 4, VTX_MAIN(TVTX_OFFSET +  0));
+    emit(NV4097_SET_VERTEX_DATA_ARRAY_OFFSET + 0 * 4, VTX_MAIN(vtx_offset +  0));
     emit(NV4097_SET_VERTEX_DATA_ARRAY_FORMAT + 0 * 4, VFMT(4, 48));
-    emit(NV4097_SET_VERTEX_DATA_ARRAY_OFFSET + 3 * 4, VTX_MAIN(TVTX_OFFSET + 16));
+    emit(NV4097_SET_VERTEX_DATA_ARRAY_OFFSET + 3 * 4, VTX_MAIN(vtx_offset + 16));
     emit(NV4097_SET_VERTEX_DATA_ARRAY_FORMAT + 3 * 4, VFMT(4, 48));
-    emit(NV4097_SET_VERTEX_DATA_ARRAY_OFFSET + 8 * 4, VTX_MAIN(TVTX_OFFSET + 32));
+    emit(NV4097_SET_VERTEX_DATA_ARRAY_OFFSET + 8 * 4, VTX_MAIN(vtx_offset + 32));
     emit(NV4097_SET_VERTEX_DATA_ARRAY_FORMAT + 8 * 4, VFMT(4, 48));
 
     emit(NV4097_SET_BEGIN_END, 5u);                       /* TRIANGLES       */
     emit(NV4097_DRAW_ARRAYS,   0u | ((6u - 1u) << 24));   /* first=0 count=6 */
     emit(NV4097_SET_BEGIN_END, 0u);
+}
+
+static void emit_textured_draw_fmt(u32 tex_offset, u32 w, u32 h, u32 fmt_byte)
+{
+    emit_textured_draw_full(tex_offset, w, h, fmt_byte, 0, TVTX_OFFSET);
+}
+
+/* The same quad on a cube map: SET_TEXTURE_FORMAT's bit 2 says cube, and the
+ * vertices are the ones whose texcoord is a direction. */
+static void emit_cube_draw(void)
+{
+    emit_textured_draw_full(CUBE_OFFSET, CUBE_DIM, CUBE_DIM, 0x85u | 0x20u, 1, CVTX_OFFSET);
 }
 
 /* A8R8G8B8 with the LN bit, which is every mode but --depthtex. */
@@ -845,7 +911,8 @@ static void submit_frame(int with_draw)
             emit(NV4097_CLEAR_SURFACE,            0xF0u);
         }
     }
-    if (with_draw == 10)     emit_mrt_draws(0);
+    if (with_draw == 11)     emit_cube_draw();
+    else if (with_draw == 10) emit_mrt_draws(0);
     else if (with_draw == 9) emit_mrt_draws(1);
     else if (with_draw == 8) emit_depthtex_draws();
     else if (with_draw == 7) emit_quad_draws();
@@ -1055,7 +1122,7 @@ static int run_audio_pad_check(void)
 static int mode_needs_translator(int mode)
 {
     return mode == 3 || mode == 5 || mode == 6 || mode == 8 ||
-           mode == 9 || mode == 10;
+           mode == 9 || mode == 10 || mode == 11;
 }
 
 /* ...and which ones must, on a backend that has a translator, have run the
@@ -1074,6 +1141,7 @@ static const char* mode_flag_name(int mode)
     case 8:  return "--depthtex";
     case 9:  return "--mrt";
     case 10: return "--mrt-a";
+    case 11: return "--cube";
     default: return "(mode)";
     }
 }
@@ -1082,7 +1150,7 @@ int main(int argc, char** argv)
 {
     /* frames = 0 runs until the window is closed, which is what the .app
      * bundle uses; a fixed count keeps the CI runs bounded. */
-    int frames = 3, do_draw = 0;
+    int frames = 3, do_draw = 0, io_alias = 0;
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "--frames=", 9) == 0) frames = atoi(argv[i] + 9);
         else if (strcmp(argv[i], "--draw") == 0)   do_draw = 1;
@@ -1107,6 +1175,13 @@ int main(int argc, char** argv)
          * test. The vertex colour differs from the texture colour, so a
          * backend that ignored the texture fails the assertion below. */
         else if (strcmp(argv[i], "--tex") == 0)    do_draw = 2;
+        /* --tex-io: --tex, after the guest has also asked for the offset of
+         * a VRAM address in the same 1 MB page number as the texture's IO
+         * offset. RSX offsets are two overlapping spaces, and the texture
+         * says main memory: a resolver that guesses VRAM for every page a
+         * local offset was ever derived in reads the texture off the end of
+         * this harness's guest memory. */
+        else if (strcmp(argv[i], "--tex-io") == 0) { do_draw = 2; io_alias = 1; }
         /* --shader: load a guest vertex program and a guest fragment program
          * through the FIFO and draw with them, which exercises the whole
          * decompile -> translate -> compile -> bind path a real title's
@@ -1144,6 +1219,12 @@ int main(int argc, char** argv)
          * target A, since a centre-pixel readback can only speak for one. */
         else if (strcmp(argv[i], "--mrt") == 0)   do_draw = 9;
         else if (strcmp(argv[i], "--mrt-a") == 0) do_draw = 10;
+        /* --cube: a cube map sampled by direction through TEX r0, TC0, which
+         * the fragment decompiler turns into a TextureCube read. Every face is
+         * a different colour and the quad looks down -Z, so only a renderer
+         * that uploads all six faces and samples them as a cube presents
+         * face 5's colour. */
+        else if (strcmp(argv[i], "--cube") == 0)  do_draw = 11;
     }
     /* The guest-program modes, which a backend without a translator cannot
      * run. --depth and --quads are not among them: both are fixed-function. */
@@ -1171,6 +1252,12 @@ int main(int argc, char** argv)
     cellGcmSetDisplayBuffer(0, 0, 1280 * 4, 1280, 720);
 
     guest_w32(CTRL_ADDR + 4, 0);            /* get: start of ring */
+    if (io_alias) {
+        const u32 out = host_alloc(4, 4);
+        cellGcmAddressToOffset(0xC0000000u + TEX_OFFSET, (u32*)(uintptr_t)out);
+        printf("[host] --tex-io: local ea 0x%08X has offset 0x%08X, the texture's page\n",
+               0xC0000000u + TEX_OFFSET, guest_r32(out));
+    }
     if (do_draw == 1) upload_triangle();
     if (do_draw == 2) { upload_texture(); upload_textured_quad(); }
     if (do_draw == 3) upload_shader_triangle();
@@ -1193,6 +1280,7 @@ int main(int argc, char** argv)
         upload_textured_quad();
         upload_mrt_backing();
     }
+    if (do_draw == 11) { upload_cube_texture(); upload_cube_quad(); }
     if (mode_runs_guest_programs(do_draw)) upload_fragment_programs();
     submit_frame(do_draw);
 
@@ -1243,9 +1331,12 @@ int main(int argc, char** argv)
          * set: MRT_CLEAR means the target was attached and cleared but never
          * fed, which is what a dropped second colour export looks like from
          * here, and MRT_BACKING means the guest bytes behind the surface were
-         * sampled instead of the surface itself.
+         * sampled instead of the surface itself. With --cube it is the -Z
+         * face's colour: any other face's colour means a face went missing on
+         * the way up or the image was sampled as 2D.
          */
-        u32 want = (do_draw == 10) ? MRT_A_ARGB
+        u32 want = (do_draw == 11) ? CUBE_ARGB
+                 : (do_draw == 10) ? MRT_A_ARGB
                  : (do_draw == 9) ? MRT_B_ARGB
                  : (do_draw == 8) ? DTEX_ARGB     /* the sampled depth as a byte */
                  : (do_draw == 7) ? 0xFFFF0000u   /* the quad strip over the polygon */

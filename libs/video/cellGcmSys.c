@@ -108,6 +108,16 @@ int cellGcm_take_flip_pending(void)
     return v;
 }
 
+/* The flip now names this buffer. The shared draw engine presents on the
+ * host's call and only learns a buffer from 0xE944 by itself, so it would
+ * keep presenting display buffer 0 for a title that flips through 0xFEAD. */
+static void gcm_set_current_display_buffer(u32 bufferId)
+{
+    s_current_display_buffer_id = bufferId;
+    if (rsx_draw_engine_enabled())
+        rsx_draw_engine_note_flip(bufferId);
+}
+
 
 /* Configuration */
 static CellGcmConfig s_config;
@@ -756,12 +766,17 @@ static u32 gcm_io2ea(u32 io)
 
 /* RSX get pointer (IO offset) + one-deep CALL return slot. The FIFO-wrap
  * recycle path teleports these when it resets a ring without a JUMP command. */
+/* Milliseconds on a monotonic clock, for the runtime's own timeouts and rate
+ * logs. Off Windows this returned 0, so every interval measured with it was
+ * 0 there: rate logs never printed and timeouts never expired. */
 unsigned long long ps3_ms_now(void)
 {
 #ifdef _WIN32
     return (unsigned long long)GetTickCount64();
 #else
-    return 0;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (unsigned long long)ts.tv_sec * 1000ull + (unsigned long long)ts.tv_nsec / 1000000ull;
 #endif
 }
 
@@ -845,6 +860,32 @@ static u32 nv309e_swz(u32 x, u32 y, u32 l2w, u32 l2h)
     return off;
 }
 
+/* The draw engine renders on the host GPU, so the scene a title copies out
+ * with NV3089 is not in guest memory, and what it copies in never reaches the
+ * engine's surfaces. Around the guest-memory copy below: write the source
+ * rectangle back from any engine surface first, and push the written
+ * rectangle into any engine surface after. 32-bit pixels only. */
+static void nv3089_engine_read(u32 in_pitch, u32 out_w, u32 out_h)
+{
+    if (!rsx_draw_engine_enabled() || !out_w || !out_h) return;
+    const u32 u0 = s_nv3089.in_uv & 0xFFFF, v0 = s_nv3089.in_uv >> 16;   /* 12.4 */
+    const u32 sx0 = u0 >> 4, sy0 = v0 >> 4;
+    const u32 sx1 = (u32)((((u64)u0 << 8) + (u64)(out_w - 1) * s_nv3089.ds_dx) >> 20);
+    const u32 sy1 = (u32)((((u64)v0 << 8) + (u64)(out_h - 1) * s_nv3089.dt_dy) >> 20);
+    if (sx1 < sx0 || sy1 < sy0) return;
+    const u32 loc = (s_nv3089.src_dma != 0xFEED0001u) ? RSX_LOCATION_LOCAL : RSX_LOCATION_MAIN;
+    rsx_draw_engine_guest_read(loc, s_nv3089.in_off + sy0 * in_pitch + sx0 * 4u, in_pitch,
+                               sx1 - sx0 + 1u, sy1 - sy0 + 1u);
+}
+
+static void nv3089_engine_wrote(u32 dst_pitch, u32 x0, u32 y0, u32 x1, u32 y1)
+{
+    if (!rsx_draw_engine_enabled() || x1 <= x0 || y1 <= y0) return;
+    const u32 loc = (s_gcm2d.dst_dma != 0xFEED0001u) ? RSX_LOCATION_LOCAL : RSX_LOCATION_MAIN;
+    rsx_draw_engine_guest_wrote(loc, s_gcm2d.dst_offset + y0 * dst_pitch + x0 * 4u, dst_pitch,
+                                x1 - x0, y1 - y0);
+}
+
 static void nv3089_blit(void)
 {
     u32 out_w = s_nv3089.out_sz & 0xFFFF, out_h = s_nv3089.out_sz >> 16;
@@ -919,6 +960,7 @@ static void nv3089_blit(void)
         u32 src2 = cellGcmResolveLocated(sl, s_nv3089.in_off);
         u32 dst2 = cellGcmResolveLocated(1, s_nv309e.offset);
         u32 u0b = s_nv3089.in_uv & 0xFFFF, v0b = s_nv3089.in_uv >> 16;
+        nv3089_engine_read(in_pitch, out_w, out_h);
         /* Copy words verbatim through raw pointers rather than vm_read32/
          * vm_write32: this moves ~500k pixels per blit and several blits run per
          * frame, and the two byte swaps would cancel anyway. */
@@ -988,6 +1030,7 @@ static void nv3089_blit(void)
     u32 dbpp = (s_gcm2d.color_fmt == 4u /* R5G6B5 */) ? 2u
              : (s_gcm2d.color_fmt == 1u /* Y8 */)     ? 1u : 4u;
     u32 bpp = (sbpp == dbpp) ? sbpp : 4u;
+    if (bpp == 4) nv3089_engine_read(in_pitch, out_w, out_h);
     for (u32 y = 0; y < out_h; y++) {
         u32 dy = out_y + y;
         if (dy < cy0 || dy >= cy1) continue;
@@ -1004,6 +1047,12 @@ static void nv3089_blit(void)
             else if (bpp == 2) vm_write16(d, vm_read16(s));
             else               vm_write8(d, vm_read8(s));
         }
+    }
+    if (bpp == 4) {
+        const u32 x0 = out_x > cx0 ? out_x : cx0, y0 = out_y > cy0 ? out_y : cy0;
+        const u32 x1 = (out_x + out_w < cx1) ? out_x + out_w : cx1;
+        const u32 y1 = (out_y + out_h < cy1) ? out_y + out_h : cy1;
+        nv3089_engine_wrote(dst_pitch, x0, y0, x1, y1);
     }
     { static int _n = 0; static int cap = -1;
       if (cap < 0) { const char* e = getenv("NV3089_DBG"); cap = e ? atoi(e) : 0; }
@@ -1638,7 +1687,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
             if ((w & 0xFFFFFF00u) == GCM_FLIP_MARKER) {
                 /* Queued by _cellGcmSetFlipCommand, which already did the
                  * guest-visible half of the request. */
-                s_current_display_buffer_id = w & 7u;
+                gcm_set_current_display_buffer(w & 7u);
                 s_flip_pending = 1;
                 s_flip_request_count++;
             } else {
@@ -2137,6 +2186,22 @@ void cellGcm_fifo_recycle(u32 ctx_ea)
                 g_gcm_fifo_drained_ea, spins);
 }
 
+/* A host that brings its backend up on another thread -- a frame clock that
+ * opens the window while the title boots -- can register the draw engine after
+ * the title has already called cellGcmSetDisplayBuffer. The engine then knows
+ * no scanout, and every flip presents whatever surface happens to be bound:
+ * Twisted Metal on Linux showed an offscreen target instead of its composited
+ * display buffer. rsx_draw_engine_init calls this to catch up. */
+void cellGcm_replay_display_buffers_to_engine(void)
+{
+    for (u32 i = 0; i < CELL_GCM_MAX_DISPLAY_BUFFER_NUM; i++)
+        if (s_display_buffer_set[i])
+            rsx_draw_engine_set_display_buffer(i, 0, s_display_buffers[i].offset,
+                                               s_display_buffers[i].pitch,
+                                               s_display_buffers[i].width,
+                                               s_display_buffers[i].height);
+}
+
 /* NID: 0xDC09357E */
 s32 cellGcmSetDisplayBuffer(u32 bufferId, u32 offset, u32 pitch,
                             u32 width, u32 height)
@@ -2243,7 +2308,7 @@ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
     /* in_fifo: the flip sits in the command stream as a GCM_FLIP_MARKER, and
      * the drain does this half when it reaches it (see the 0xFEAD case). */
     if (!in_fifo) {
-        s_current_display_buffer_id = bufferId;
+        gcm_set_current_display_buffer(bufferId);
         s_flip_pending = 1;   /* ticker: present BEFORE the next drain */
         s_flip_request_count++;
     }
@@ -2340,7 +2405,7 @@ s32 cellGcmSetPrepareFlip(void* ctx, u32 bufferId)
 
     printf("[cellGcmSys] SetPrepareFlip(bufferId=%u)\n", bufferId);
 
-    s_current_display_buffer_id = bufferId;
+    gcm_set_current_display_buffer(bufferId);
     s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
     s_flip_request_count++;
     s_last_flip_time = get_timestamp_ns();
@@ -2764,12 +2829,22 @@ u32 cellGcmResolveIO(u32 offset)
  * local allocations (gcm/cube: ioSize 16MB, FP ucode at local 0xB90000 --
  * table hit returned the empty command-buffer EA instead of VRAM). Callers
  * that KNOW the location (texture format bits, SET_SHADER_PROGRAM bits) must
- * use this. `local` != 0 -> local memory. */
+ * use this. `local` != 0 -> local memory.
+ *
+ * A MAIN offset asks the IO table first. cellGcmResolveOffset would send it
+ * to VRAM whenever the guest once derived a local offset in the same 1 MB
+ * page number, and a title with both a large IO map and a full VRAM has
+ * many such pages: Twisted Metal's menu fragment programs at IO 0x08B96040
+ * and 0x0F75E800 and a G-buffer texture at IO 0x02A1F380 were read out of
+ * VRAM -- texture bytes that decode as a NOP program, so the menu's UI drew
+ * transparent black. An offset the IO table does not map keeps the old
+ * guess. */
 u32 cellGcmResolveLocated(int local, u32 offset)
 {
     if (local)
         return s_config.localAddress + offset;
-    return cellGcmResolveOffset(offset);
+    const u32 ea = cellGcmResolveIO(offset);
+    return ea ? ea : cellGcmResolveOffset(offset);
 }
 
 /* ---------------------------------------------------------------------------

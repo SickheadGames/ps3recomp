@@ -1511,9 +1511,21 @@ static inline void ppu_null_read_report(uint32_t a, int width, void* ra)
     if (!s_on) return;
     static long s_n = 0;
     if (s_n++ >= 16) return;
+    const uint32_t fn = ppu_prof_resolve_host(ra);
     fprintf(stderr, "[null-read] guest read%d from 0x%08X (NULL+0x%X) by guest-fn=0x%08X%s" "\n",
-            width * 8, a, a, ppu_prof_resolve_host(ra),
-            s_n == 16 ? "  [further NULL reads not reported]" : "");
+            width * 8, a, a, fn, s_n == 16 ? "  [further NULL reads not reported]" : "");
+    /* PS3_NULL_READ_STACK=1: guest-fn is the nearest host symbol, which can
+     * name a neighbour; the guest call chain names the reader. Once for each
+     * of the first four distinct guest-fn values. */
+    { static int s_stk = -1;
+      static uint32_t s_done[4]; static int s_nd = 0;
+      if (s_stk < 0) { const char* e = getenv("PS3_NULL_READ_STACK"); s_stk = (e && *e && *e != '0') ? 1 : 0; }
+      int seen = 0;
+      for (int i = 0; i < s_nd; i++) seen |= (s_done[i] == fn);
+      if (s_stk && !seen && s_nd < 4 && g_active_ctx) {
+          s_done[s_nd++] = fn;
+          ppu_dump_guest_stack(g_active_ctx, "null-read");
+      } }
     fflush(stderr);
 }
 
@@ -2078,6 +2090,36 @@ static uint32_t ppu_code_hi(void)
     return hi;
 }
 
+/* Whether a guest stack scan may read guest bytes [ea, ea+n).
+ *
+ * vm_oob() only bounds the arena. Inside it, vm_stack_allocate() leaves an
+ * inaccessible guard page below every guest thread's stack, so a scan that
+ * runs up past the top of a shallow stack lands on the guard of the stack
+ * allocated after it. On Windows the port's demand-commit handler turns that
+ * read into a commit; on POSIX it is a SIGSEGV, and the diagnostic takes the
+ * title down with it. Off Windows, ask the kernel first: write() from an
+ * unreadable page fails with EFAULT instead of faulting. */
+static bool ppu_dump_readable(uint32_t ea, uint32_t n)
+{
+    if (vm_oob(ea, n)) return false;
+#ifdef _WIN32
+    return true;
+#else
+    static int s_probe[2] = {-1, -1};
+    static const bool s_have_probe = pipe(s_probe) == 0;
+    if (!s_have_probe) return true;           /* cannot probe: read as before */
+    const uintptr_t pg    = (uintptr_t)vm_host_page_size();
+    const uintptr_t first = (uintptr_t)(vm_base + ea) & ~(pg - 1);
+    const uintptr_t last  = (uintptr_t)(vm_base + ea + n - 1) & ~(pg - 1);
+    for (uintptr_t a = first; a <= last; a += pg) {
+        char c;
+        if (write(s_probe[1], (const void*)a, 1) != 1) return false;
+        if (read(s_probe[0], &c, 1) != 1) return false;
+    }
+    return true;
+#endif
+}
+
 extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
 {
     if (!ctx || !vm_base) return;
@@ -2107,8 +2149,8 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
                               (uint32_t)ctx->gpr[row * 8 + c]);
           fprintf(stderr, "%s\n", gr);
       } }
-    if (!vm_oob(sp,4)) { char rw[600]; int rp=snprintf(rw,sizeof rw,"      rawstk:");
-        for (int i=0;i<24 && !vm_oob(sp+i*4,4);i++){ uint32_t t; memcpy(&t,vm_base+sp+i*4,4); rp+=snprintf(rw+rp,sizeof(rw)-rp," %08X", PORT_BSWAP32(t)); }
+    if (ppu_dump_readable(sp,4)) { char rw[600]; int rp=snprintf(rw,sizeof rw,"      rawstk:");
+        for (int i=0;i<24 && ppu_dump_readable(sp+i*4,4);i++){ uint32_t t; memcpy(&t,vm_base+sp+i*4,4); rp+=snprintf(rw+rp,sizeof(rw)-rp," %08X",PORT_BSWAP32(t)); }
         fprintf(stderr,"%s\n",rw); }
     /* Identify the worker's dispatched method: func_000750A8 vcalls
      * [[arg+0xC]+0] (code) with toc [[arg+0xC]+4]. Dump for the known thread
@@ -2116,13 +2158,13 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
      * receive-loop function even though the thread stack has no return addrs. */
     { const uint32_t args[2] = {0x40003450u, 0x40003E80u};
       for (int j=0;j<2;j++){ uint32_t o=args[j];
-        if (vm_oob(o+0x10,4)) continue;
+        if (!ppu_dump_readable(o+0xC,8)) continue;
         uint32_t vt, code, toc; { uint32_t t;
           memcpy(&t,vm_base+o+0xC,4); vt= PORT_BSWAP32(t);
           if (vt<0x600000 || vt>=0x50000000u) { /* vt could be a guest ptr */ }
         }
-        if (!vm_oob(vt,8)) { uint32_t t; memcpy(&t,vm_base+vt,4); code= PORT_BSWAP32(t);
-          memcpy(&t,vm_base+vt+4,4); toc= PORT_BSWAP32(t);
+        if (ppu_dump_readable(vt,8)) { uint32_t t; memcpy(&t,vm_base+vt,4); code=PORT_BSWAP32(t);
+          memcpy(&t,vm_base+vt+4,4); toc=PORT_BSWAP32(t);
           fprintf(stderr,"      ARG[0x%08X] vtbl=0x%08X -> method code=0x%08X toc=0x%08X (worker body?)\n", o, vt, code, toc); }
       } }
     /* The real frame chain FIRST, then the scan.
@@ -2140,10 +2182,10 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
     { char bc[900]; int bp = snprintf(bc, sizeof bc, "[GSTACK:%s] chain:", tag ? tag : "?");
       uint32_t f = sp;
       for (int d = 0; d < 24 && bp < 820; d++) {
-          if (vm_oob(f, 8)) break;
+          if (!ppu_dump_readable(f, 8)) break;
           uint32_t t; memcpy(&t, vm_base + f + 4, 4);   /* low half of the 64-bit back chain */
           uint32_t prev = __builtin_bswap32(t);
-          if (prev <= f || vm_oob(prev + 0x14, 4)) break;   /* stacks grow down */
+          if (prev <= f || !ppu_dump_readable(prev + 0x14, 4)) break;   /* stacks grow down */
           memcpy(&t, vm_base + prev + 0x14, 4);         /* low half of the saved lr */
           uint32_t ra = __builtin_bswap32(t);
           if (ra >= 0x10000 && ra < ppu_code_hi()) {
@@ -2159,7 +2201,7 @@ extern "C" void ppu_dump_guest_stack(ppu_context* ctx, const char* tag)
     char gs[1200]; int gp = snprintf(gs, sizeof gs, "[GSTACK:%s] sp=0x%08X:", tag ? tag : "?", sp);
     uint32_t last = 0;
     for (int i = 0; i < 700 && gp < 1100; i++) {
-        uint32_t a = sp + i*4; if (vm_oob(a,4)) break;
+        uint32_t a = sp + i*4; if (!ppu_dump_readable(a,4)) break;
         uint32_t t; memcpy(&t, vm_base + a, 4); uint32_t w = PORT_BSWAP32(t);
         if (w < 0x10000 || w >= ppu_code_hi()) continue;
         uint32_t bg = 0;
@@ -2193,7 +2235,7 @@ int ppu_alloc_probe(void* vctx, uint32_t size, uint32_t obj, uint32_t sp)
     char gs[1400]; int gp = snprintf(gs, sizeof gs, "      GSTACK-codeptrs:");
     uint32_t last = 0;
     for (int i = 0; i < 900 && gp < 1300; i++) {
-        uint32_t a = sp + i*4; if (vm_oob(a,4)) break;
+        uint32_t a = sp + i*4; if (!ppu_dump_readable(a,4)) break;
         uint32_t t; memcpy(&t, vm_base + a, 4); uint32_t w = PORT_BSWAP32(t);
         if (w < 0x10000 || w >= 0x900000) continue;
         uint32_t bg = 0;
@@ -3644,6 +3686,8 @@ extern "C" uint64_t ppu_guest_call_ct(uint32_t code, uint32_t toc,
     return ctx.gpr[3];
 }
 
+extern "C" ppu_context* volatile g_ppu_main_ctx = nullptr;
+
 extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
 {
     /* Line-buffer stdout: HLE logs mix printf (stdout) with probe fprintf
@@ -3670,6 +3714,9 @@ extern "C" int ppu_run(uint32_t entry_opd, uint32_t stack_top)
      * and concurrently-emitted fences vanished (the boot-loading stall). */
     { extern uint64_t ppu_thread_register_main(void);
       ctx.thread_id = ppu_thread_register_main(); }
+    /* For samplers on other threads (a port's periodic stack dump): the main
+     * thread's context lives on this frame, not in the thread table. */
+    g_ppu_main_ctx = &ctx;
 
     /* PS3 process-entry ABI: the loader hands _start register state the CRT
      * (_initialize) consumes directly:
