@@ -59,7 +59,7 @@ s32 cellDaisyCreatePipe(void* spurs, CellDaisyPipe* pipe,
     attr = GUEST_PTR(attr, const CellDaisyPipeAttribute*);
     pipe = GUEST_PTR(pipe, CellDaisyPipe*);
     (void)spurs; (void)buffer; (void)bufferSize;
-    printf("[cellDaisy] CreatePipe(entrySize=%u, depth=%u)\n",
+    ps3_log("[cellDaisy] CreatePipe(entrySize=%u, depth=%u)\n",
            attr ? attr->entrySize : 0, attr ? attr->depth : 0);
 
     if (!pipe || !attr) return (s32)CELL_DAISY_ERROR_INVALID_ARGUMENT;
@@ -97,7 +97,7 @@ s32 cellDaisyDestroyPipe(CellDaisyPipe* pipe)
     if (slot >= CELL_DAISY_MAX_PIPES || !s_pipes[slot].in_use)
         return (s32)CELL_DAISY_ERROR_INVALID_ARGUMENT;
 
-    printf("[cellDaisy] DestroyPipe(%u)\n", slot);
+    ps3_log("[cellDaisy] DestroyPipe(%u)\n", slot);
     free(s_pipes[slot].ring);
     memset(&s_pipes[slot], 0, sizeof(DaisyPipeSlot));
     return CELL_OK;

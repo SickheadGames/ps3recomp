@@ -54,7 +54,7 @@ s32 cellJpgEncQueryAttr(const CellJpgEncParam* param, u32* workMemSize)
 
 s32 cellJpgEncCreate(const CellJpgEncParam* param, CellJpgEncHandle* handle)
 {
-    printf("[cellJpgEnc] Create(%ux%u, quality=%u)\n",
+    ps3_log("[cellJpgEnc] Create(%ux%u, quality=%u)\n",
            param ? vm_read32(GUEST_EA(param) + (u32)offsetof(CellJpgEncParam, width)) : 0,
            param ? vm_read32(GUEST_EA(param) + (u32)offsetof(CellJpgEncParam, height)) : 0,
            param ? vm_read32(GUEST_EA(param) + (u32)offsetof(CellJpgEncParam, quality)) : 0);

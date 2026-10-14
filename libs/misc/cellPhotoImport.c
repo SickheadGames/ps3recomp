@@ -15,7 +15,7 @@ static int s_initialized = 0;
 
 s32 cellPhotoImportInit(void)
 {
-    printf("[cellPhotoImport] Init()\n");
+    ps3_log("[cellPhotoImport] Init()\n");
     if (s_initialized)
         return (s32)CELL_PHOTO_IMPORT_ERROR_ALREADY_INITIALIZED;
     s_initialized = 1;
@@ -24,14 +24,14 @@ s32 cellPhotoImportInit(void)
 
 s32 cellPhotoImportEnd(void)
 {
-    printf("[cellPhotoImport] End()\n");
+    ps3_log("[cellPhotoImport] End()\n");
     s_initialized = 0;
     return CELL_OK;
 }
 
 s32 cellPhotoImportStart(CellPhotoImportCallback callback, void* userdata)
 {
-    printf("[cellPhotoImport] Start() - not supported\n");
+    ps3_log("[cellPhotoImport] Start() - not supported\n");
     if (!s_initialized)
         return (s32)CELL_PHOTO_IMPORT_ERROR_NOT_INITIALIZED;
 

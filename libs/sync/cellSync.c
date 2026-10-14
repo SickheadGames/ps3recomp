@@ -9,6 +9,7 @@
 #include "cellSync.h"
 #include <stdint.h>
 #include "../../runtime/ppu/ppu_memory.h"   /* vm_base (guest mem) */
+#include "ps3emu/logging.h"
 /* HLE args arrive as guest effective addresses (ps3_hle_call passes raw
  * guest register values); translate to host before dereferencing. */
 #define GUEST_PTR(p, T) ((T)((p) ? (void*)(vm_base + (uint32_t)(uintptr_t)(p)) : (void*)0))
@@ -58,7 +59,7 @@ static int sync_trace(void){ static int v=-1; if(v<0){const char*e=getenv("SYNC_
  * before the op, so a PPU re-initialise under an SPU waiter is visible. */
 static uint32_t sync_watch(void){ static int64_t v=-2; if(v==-2){const char*e=getenv("SYNC_WATCH"); v=e?(int64_t)strtoul(e,0,16):-1;} return v<0?0u:(uint32_t)v; }
 #define SYNC_WATCH_LOG(op, ea, m) do { if ((ea) && (ea) == sync_watch()) { \
-        static int _c; if (_c++ < 400) fprintf(stderr, "[SYNCW] %s ea=0x%08X word=%08X tid=%lu\n", op, (ea), \
+        static int _c; if (_c++ < 400) ps3_log("[SYNCW] %s ea=0x%08X word=%08X tid=%lu\n", op, (ea), \
             sync_bswap32(atomic_load(&(m)->lock)), SYNC_TID()); } } while (0)
 
 /* The mutex word is shared with SPU code that takes it with GETLLAR/PUTLLC.
@@ -120,7 +121,7 @@ s32 cellSyncMutexLock(CellSyncMutex* mutex)
     for (;;) {
         g = sync_bswap32(atomic_load(&mutex->lock));
         if ((uint16_t)(g >> 16) == ticket) {
-            if (sync_trace()) fprintf(stderr, "[SYNC] LOCK    ea=0x%08X tid=%lu ticket=%u\n",
+            if (sync_trace()) ps3_log("[SYNC] LOCK    ea=0x%08X tid=%lu ticket=%u\n",
                                       _ea, SYNC_TID(), ticket);
             return CELL_OK;
         }
@@ -145,7 +146,7 @@ s32 cellSyncMutexTryLock(CellSyncMutex* mutex)
 
     uint32_t ng = ((uint32_t)freed << 16) | (uint16_t)(order + 1);
     if (sync_cas(mutex, _ea, &raw, sync_bswap32(ng))) {
-        if (sync_trace()) fprintf(stderr, "[SYNC] TRYLOCK ea=0x%08X tid=%lu OK\n", _ea, SYNC_TID());
+        if (sync_trace()) ps3_log("[SYNC] TRYLOCK ea=0x%08X tid=%lu OK\n", _ea, SYNC_TID());
         return CELL_OK;
     }
     return CELL_SYNC_ERROR_BUSY;                    /* lost the race */
@@ -159,7 +160,7 @@ s32 cellSyncMutexUnlock(CellSyncMutex* mutex)
         return CELL_SYNC_ERROR_NULL_POINTER;
     SYNC_WATCH_LOG("UNLOCK", _ea, mutex);
 
-    if (sync_trace()) fprintf(stderr, "[SYNC] UNLOCK  ea=0x%08X tid=%lu\n", _ea, SYNC_TID());
+    if (sync_trace()) ps3_log("[SYNC] UNLOCK  ea=0x%08X tid=%lu\n", _ea, SYNC_TID());
     for (;;) {                                      /* m_freed++ */
         uint32_t raw = atomic_load(&mutex->lock);
         uint32_t g   = sync_bswap32(raw);
@@ -497,7 +498,7 @@ s32 cellSyncQueueInitialize(CellSyncQueue* queue, void* buffer,
     vm_write64(q + 0x10, b);
     vm_write64(q + 0x18, 0);
     vm_write64(q, 0);
-    if (sq_trace()) fprintf(stderr, "[SYNCQ] init q=0x%08X buf=0x%08X size=%u depth=%u\n", q, b, size, depth);
+    if (sq_trace()) ps3_log("[SYNCQ] init q=0x%08X buf=0x%08X size=%u depth=%u\n", q, b, size, depth);
     return CELL_OK;
 }
 
@@ -510,7 +511,7 @@ s32 cellSyncQueueTryPush(CellSyncQueue* queue, const void* data)
     uint32_t n = vm_read32(q + 0x08);
     vm_memcpy_to(sq_elem(q, pos), vm_ptr8(d), n);
     sq_and(q, 0xFFFFFFFFu, 0x00FFFFFFu);            /* clear _push */
-    if (sq_trace()) fprintf(stderr, "[SYNCQ] push q=0x%08X pos=%u\n", q, pos);
+    if (sq_trace()) ps3_log("[SYNCQ] push q=0x%08X pos=%u\n", q, pos);
     return CELL_OK;
 }
 
@@ -532,7 +533,7 @@ static s32 sq_take(CellSyncQueue* queue, void* data, sq_op op)
     uint32_t n = vm_read32(q + 0x08);
     vm_memcpy_to(d, vm_ptr8(sq_elem(q, pos)), n);
     sq_and(q, 0x00FFFFFFu, 0xFFFFFFFFu);            /* clear _pop */
-    if (sq_trace()) fprintf(stderr, "[SYNCQ] %s q=0x%08X pos=%u\n",
+    if (sq_trace()) ps3_log("[SYNCQ] %s q=0x%08X pos=%u\n",
                             op == sq_pop_begin ? "pop " : "peek", q, pos);
     return CELL_OK;
 }
@@ -608,7 +609,7 @@ s32 cellSyncLFQueueInitialize(CellSyncLFQueue* queue, void* buffer,
 
     memset(buffer, 0, (size_t)size * depth);
 
-    printf("[cellSync] LFQueueInitialize(size=%u, depth=%u, dir=%u)\n",
+    ps3_log("[cellSync] LFQueueInitialize(size=%u, depth=%u, dir=%u)\n",
            size, depth, direction);
     return CELL_OK;
 }

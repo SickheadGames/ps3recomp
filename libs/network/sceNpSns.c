@@ -17,7 +17,7 @@ static int s_initialized = 0;
 s32 sceNpSnsInit(u32 poolSize)
 {
     (void)poolSize;
-    printf("[sceNpSns] Init()\n");
+    ps3_log("[sceNpSns] Init()\n");
     if (s_initialized)
         return (s32)SCE_NP_SNS_ERROR_ALREADY_INITIALIZED;
     s_initialized = 1;
@@ -26,7 +26,7 @@ s32 sceNpSnsInit(u32 poolSize)
 
 s32 sceNpSnsTerm(void)
 {
-    printf("[sceNpSns] Term()\n");
+    ps3_log("[sceNpSns] Term()\n");
     s_initialized = 0;
     return CELL_OK;
 }
@@ -34,7 +34,7 @@ s32 sceNpSnsTerm(void)
 s32 sceNpSnsFbCheckThisUserAccount(SceNpSnsAccountId* accountId)
 {
     (void)accountId;
-    printf("[sceNpSns] FbCheckThisUserAccount() - offline\n");
+    ps3_log("[sceNpSns] FbCheckThisUserAccount() - offline\n");
     return (s32)SCE_NP_SNS_ERROR_NOT_CONNECTED;
 }
 
@@ -47,7 +47,7 @@ s32 sceNpSnsFbGetLongAccessToken(char* token, u32 tokenSize)
 s32 sceNpSnsFbPostFeedMessage(const SceNpSnsFbFeedMessage* message)
 {
     (void)message;
-    printf("[sceNpSns] FbPostFeedMessage() - offline\n");
+    ps3_log("[sceNpSns] FbPostFeedMessage() - offline\n");
     return (s32)SCE_NP_SNS_ERROR_NOT_CONNECTED;
 }
 

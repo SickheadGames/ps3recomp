@@ -93,7 +93,7 @@ int spu_run_policy_module(spu_lifted_entry_fn entry, int image_id,
          * makes correct multi-SPU execution look like duplicated state. */
         { static int s_cl = -1;
           if (s_cl < 0) s_cl = getenv("SPU_CTX_LOG") ? 1 : 0;
-          if (s_cl) fprintf(stderr, "[spu-ctx] new POLICY context %p wid=%u spu_num=%u\n",
+          if (s_cl) ps3_log("[spu-ctx] new POLICY context %p wid=%u spu_num=%u\n",
                             (void*)ctx, wid, spu_num); }
         memset(ctx, 0, sizeof(*ctx));
         spu_context_init(ctx, 0);
@@ -101,7 +101,7 @@ int spu_run_policy_module(spu_lifted_entry_fn entry, int image_id,
         if (!s_fresh) {
             static int _n = 0;
             if (_n++ < 8)
-                fprintf(stderr, "[spurs-pm] wid=%u spu=%u workload data changed "
+                ps3_log("[spurs-pm] wid=%u spu=%u workload data changed "
                         "0x%llX -> 0x%llX: fresh PM context\n", wid, spu_num,
                         (unsigned long long)s_pm_data[wid][spu_num],
                         (unsigned long long)wkl_data);
@@ -180,7 +180,7 @@ int spu_run_policy_module(spu_lifted_entry_fn entry, int image_id,
     unsigned long runno = ++s_runs;
     int log_this = s_trace && (runno <= 64 || (runno & 0xFFF) == 0);
     if (log_this) {
-        fprintf(stderr, "[spurs-pm] RUN#%lu wid=%u data=0x%llX spurs=0x%08X image=%d entry=0xA00 size=%u\n",
+        ps3_log("[spurs-pm] RUN#%lu wid=%u data=0x%llX spurs=0x%08X image=%d entry=0xA00 size=%u\n",
                 runno, wid, (unsigned long long)wkl_data, spurs_ea, image_id, pm_size);
         fflush(stderr);
     }
@@ -222,7 +222,7 @@ int spu_run_policy_module(spu_lifted_entry_fn entry, int image_id,
         g_pm_flow_n = 0; g_pm_flow_ctx = ctx;
         s_flow_arm_ms = ps3_ms_now();
         { static int _a = 0; if (_a++ < 8) {
-            fprintf(stderr, "[pm-flow] ARM wid=%u spu=%u (watch=0x%08X)\n",
+            ps3_log("[pm-flow] ARM wid=%u spu=%u (watch=0x%08X)\n",
                     wid, spu_num, g_barrier_sync_watch); fflush(stderr); } }
         /* Watchdog: the traced run has been observed to HANG the jobmanager
          * kernel thread (the claim run never returns -> no later dispatch can
@@ -271,12 +271,12 @@ int spu_run_policy_module(spu_lifted_entry_fn entry, int image_id,
     if (((uint32_t)ctx->pc & SPU_LS_MASK) != SPURS_PM_EXIT_TO_KERNEL_LS) {
         extern unsigned spu_recent_pcs(uint32_t*, unsigned);
         uint32_t r[32]; unsigned n = spu_recent_pcs(r, 32);
-        static volatile long s_pe; if (__atomic_add_fetch(&s_pe, 1, __ATOMIC_RELAXED) <= 64) {
-            fprintf(stderr, "[pm-end] lane %u ctx=%p halted=%d status=0x%X pc=0x%05X lr=0x%05X r3=0x%08X depth=%u recent:",
+        static volatile long s_pe; if (port_atomic_fetch_add32(&s_pe, 1) <= 64) {
+            ps3_log("[pm-end] lane %u ctx=%p halted=%d status=0x%X pc=0x%05X lr=0x%05X r3=0x%08X depth=%u recent:",
                     spu_num, (void*)ctx, pm_halted, ctx->status, (uint32_t)ctx->pc & SPU_LS_MASK,
                     ctx->gpr[0]._u32[0] & SPU_LS_MASK, ctx->gpr[3]._u32[0], ctx->host_depth);
-            for (unsigned k = 0; k < n; k++) fprintf(stderr, " %05X", r[k]);
-            fprintf(stderr, "\n"); fflush(stderr); } }
+            for (unsigned k = 0; k < n; k++) ps3_log(" %05X", r[k]);
+            ps3_log("\n"); fflush(stderr); } }
 
     if (s_claimlog) {
         unsigned claims = g_spu_putllc_sync_hit - claim_before;
@@ -286,14 +286,13 @@ int spu_run_policy_module(spu_lifted_entry_fn entry, int image_id,
             if (s_cl++ < 64) {
                 const uint8_t* L = ctx->ls;
                 #define W(o)  ((L[(o)]<<24)|(L[(o)+1]<<16)|(L[(o)+2]<<8)|L[(o)+3])
-                fprintf(stderr, "[pm-claim] wid=%u spu=%u first=%d claims=%u stages=%u%s halt_pc=0x%05X "
+                ps3_log("[pm-claim] wid=%u spu=%u first=%d claims=%u stages=%u%s halt_pc=0x%05X "
                         "nextLoad=0x%X loadJob=0x%X runJob=0x%X storeJob=0x%X q13F0=%08X q14E0=%08X\n",
                         wid, spu_num, first, claims, stages,
                         (claims && !stages) ? " <-- CLAIM EATEN" : "",
                         ctx->pc & SPU_LS_MASK,
                         W(0x12C0), W(0x12D0), W(0x12E0), W(0x12F0),
                         W(0x13F0), W(0x14E0));
-                fflush(stderr);
                 #undef W
             }
         }
@@ -309,7 +308,7 @@ int spu_run_policy_module(spu_lifted_entry_fn entry, int image_id,
             const uint8_t* L = ctx->ls;
             #define HW(o) ((L[(o)+2]<<8)|L[(o)+3])
             #define W(o)  ((L[(o)]<<24)|(L[(o)+1]<<16)|(L[(o)+2]<<8)|L[(o)+3])
-            fprintf(stderr, "[pm-pipe] wid=%u run#%lu first=%d halt_pc=0x%05X "
+            ps3_log("[pm-pipe] wid=%u run#%lu first=%d halt_pc=0x%05X "
                     "loadState=%u->%u nextLoad=0x%X loadJob=0x%X runJob=0x%X storeJob=0x%X "
                     "lastStore=0x%X\n",
                     wid, s_pn, first, ctx->pc & SPU_LS_MASK,
@@ -325,7 +324,7 @@ int spu_run_policy_module(spu_lifted_entry_fn entry, int image_id,
             {
                 extern uint8_t* vm_base;
                 uint32_t eaWL = W(0x13F0);
-                fprintf(stderr, "         jobIndex=0x%X jobHeader=0x%08X(cmd=%u) eaWL=0x%08X\n",
+                ps3_log("         jobIndex=0x%X jobHeader=0x%08X(cmd=%u) eaWL=0x%08X\n",
                         W(0x1410), W(0x1420), HW(0x1420), eaWL);
                 /* Dump the joblist header region eaWL+0x00..0x9F so we can see the
                  * ticket/counter rows AND where the PPU actually wrote the job
@@ -336,7 +335,7 @@ int spu_run_policy_module(spu_lifted_entry_fn entry, int image_id,
                     for (uint32_t o = 0; o < 0xA0; o += 0x10) {
                         const uint8_t* r = vm_base + eaWL + o;
                         #define RW(i) ((r[i]<<24)|(r[i+1]<<16)|(r[i+2]<<8)|r[i+3])
-                        fprintf(stderr, "         jl+%02X: %08X %08X %08X %08X\n",
+                        ps3_log("         jl+%02X: %08X %08X %08X %08X\n",
                                 o, RW(0), RW(4), RW(8), RW(12));
                         #undef RW
                     }
@@ -366,18 +365,18 @@ int spu_run_policy_module(spu_lifted_entry_fn entry, int image_id,
         if (has_job && s_dumps < 6) {
             s_dumps++;
             unsigned n = g_pm_flow_n; if (n > 8192) n = 8192;
-            fprintf(stderr, "[pm-flow] dump#%d wid=%u %u transfers (sync-PUTLLC delta %u):",
+            ps3_log("[pm-flow] dump#%d wid=%u %u transfers (sync-PUTLLC delta %u):",
                     s_dumps, wid, n, g_spu_putllc_sync_hit - putllc_before);
             uint32_t last = 0xFFFFFFFFu; unsigned rep = 0;
             for (unsigned i = 0; i < n; i++) {
                 uint32_t pc = g_pm_flow_buf[i] & SPU_LS_MASK;
                 if (pc == last) { rep++; continue; }
-                if (rep) { fprintf(stderr, "*%u", rep + 1); rep = 0; }
-                fprintf(stderr, "%s%05X", (i % 16) ? " " : "\n  ", pc);
+                if (rep) { ps3_log("*%u", rep + 1); rep = 0; }
+                ps3_log("%s%05X", (i % 16) ? " " : "\n  ", pc);
                 last = pc;
             }
-            if (rep) fprintf(stderr, "*%u", rep + 1);
-            fprintf(stderr, "\n");
+            if (rep) ps3_log("*%u", rep + 1);
+            ps3_log("\n");
             /* Pipeline LS state right after this traced run: same regions the
              * hung-run watchdog dumps -- shows what the 5 type-1 passes built
              * (records/ring) and why the type-2 loads never dispatch. */
@@ -387,21 +386,21 @@ int spu_run_policy_module(spu_lifted_entry_fn entry, int image_id,
                   { 0x1270, 0x20, "busy" }, { 0x12A0, 0x10, "st12A0" },
                   { 0x12C0, 0x40, "state" } };
               for (unsigned r = 0; r < sizeof R / sizeof R[0]; r++) {
-                  fprintf(stderr, "[pm-ls] %-6s 0x%04X:", R[r].tag, R[r].a);
+                  ps3_log("[pm-ls] %-6s 0x%04X:", R[r].tag, R[r].a);
                   for (uint32_t o = 0; o < R[r].len; o += 4) {
-                      if (o && (o & 15) == 0) fprintf(stderr, " |");
-                      fprintf(stderr, " %02X%02X%02X%02X",
+                      if (o && (o & 15) == 0) ps3_log(" |");
+                      ps3_log(" %02X%02X%02X%02X",
                               ctx->ls[R[r].a+o], ctx->ls[R[r].a+o+1],
                               ctx->ls[R[r].a+o+2], ctx->ls[R[r].a+o+3]);
                   }
-                  fprintf(stderr, "\n");
+                  ps3_log("\n");
               } }
             fflush(stderr);
         }
     }
 
     if (log_this) {
-        fprintf(stderr, "[spurs-pm] END wid=%u status=0x%X pc=0x%05X polls=%u exited=%u\n",
+        ps3_log("[spurs-pm] END wid=%u status=0x%X pc=0x%05X polls=%u exited=%u\n",
                 wid, ctx->status, ctx->pc, g_spurs_pm_polls, g_spurs_pm_exited);
         fflush(stderr);
     }
@@ -441,9 +440,9 @@ static DWORD WINAPI spurs_pm_flow_watchdog(LPVOID p)
     extern void* volatile g_pm_flow_ctx;
     Sleep(5000);
     spu_context* ctx = (spu_context*)g_pm_flow_ctx;
-    if (!ctx) { fprintf(stderr, "[pm-flow] watchdog: run returned (no hang)\n"); return 0; }
+    if (!ctx) { ps3_log("[pm-flow] watchdog: run returned (no hang)\n"); return 0; }
     unsigned n = g_pm_flow_n; if (n > 8192) n = 8192;
-    fprintf(stderr, "[pm-flow] HUNG-RUN PARTIAL: %u transfers, live pc=0x%05X "
+    ps3_log("[pm-flow] HUNG-RUN PARTIAL: %u transfers, live pc=0x%05X "
             "LS12A0=%02X%02X LS12C0=%02X%02X LS12F0=%02X%02X%02X%02X LS1300=%02X%02X:",
             n, ctx->pc & SPU_LS_MASK,
             ctx->ls[0x12A0], ctx->ls[0x12A1],
@@ -459,25 +458,25 @@ static DWORD WINAPI spurs_pm_flow_watchdog(LPVOID p)
           { 0x11B0, 0x20, "mark" }, { 0x1270, 0x40, "sched" }, { 0x12C0, 0x50, "state" },
           { 0x13B0, 0x30, "qvar" }, { 0x14A0, 0x30, "qcache" }, { 0x1440, 0x40, "batchrec" } };
       for (unsigned r = 0; r < sizeof R / sizeof R[0]; r++) {
-          fprintf(stderr, "\n[pm-ls] %-8s 0x%04X:", R[r].tag, R[r].a);
+          ps3_log("\n[pm-ls] %-8s 0x%04X:", R[r].tag, R[r].a);
           for (uint32_t o = 0; o < R[r].len; o += 4) {
-              if (o && (o & 15) == 0) fprintf(stderr, " |");
-              fprintf(stderr, " %02X%02X%02X%02X",
+              if (o && (o & 15) == 0) ps3_log(" |");
+              ps3_log(" %02X%02X%02X%02X",
                       ctx->ls[R[r].a+o], ctx->ls[R[r].a+o+1],
                       ctx->ls[R[r].a+o+2], ctx->ls[R[r].a+o+3]);
           }
       }
-      fprintf(stderr, "\n"); }
+      ps3_log("\n"); }
     uint32_t last = 0xFFFFFFFFu; unsigned rep = 0; unsigned col = 0;
     for (unsigned i = 0; i < n; i++) {
         uint32_t pc = g_pm_flow_buf[i] & SPU_LS_MASK;
         if (pc == last) { rep++; continue; }
-        if (rep) { fprintf(stderr, "*%u", rep + 1); rep = 0; }
-        fprintf(stderr, "%s%05X", (col++ % 16) ? " " : "\n  ", pc);
+        if (rep) { ps3_log("*%u", rep + 1); rep = 0; }
+        ps3_log("%s%05X", (col++ % 16) ? " " : "\n  ", pc);
         last = pc;
     }
-    if (rep) fprintf(stderr, "*%u", rep + 1);
-    fprintf(stderr, "\n"); fflush(stderr);
+    if (rep) ps3_log("*%u", rep + 1);
+    ps3_log("\n"); fflush(stderr);
     return 0;
 }
 void spurs_pm_flow_watchdog_start(void)
@@ -530,13 +529,13 @@ int spurs_run_taskset_policy_probe(uint32_t taskset_ea, uint32_t taskid,
 
     g_spurs_pm_polls = 0; g_spurs_pm_exited = 0;
 
-    fprintf(stderr, "[real-pm] RUN taskset=0x%08X task=%u spurs=0x%08X wkl=0x%llX wid=%u\n",
+    ps3_log("[real-pm] RUN taskset=0x%08X task=%u spurs=0x%08X wkl=0x%llX wid=%u\n",
             taskset_ea, taskid, spurs_ea, (unsigned long long)wkl_data, wid);
     fflush(stderr);
 
     spu_run_with_halt(tsp_spu_func_00000A00, ctx);
 
-    fprintf(stderr, "[real-pm] END status=0x%X pc=0x%05X polls=%u exited=%u\n",
+    ps3_log("[real-pm] END status=0x%X pc=0x%05X polls=%u exited=%u\n",
             ctx->status, ctx->pc, g_spurs_pm_polls, g_spurs_pm_exited);
     fflush(stderr);
 

@@ -2,6 +2,8 @@
  * ps3recomp - PPU thread management syscalls (implementation)
  */
 
+#include "ps3emu/logging.h"
+
 #include <setjmp.h>
 
 /* sys_ppu_thread_exit never returns on hardware. Returning CELL_OK to the
@@ -127,7 +129,7 @@ static void* ppu_host_thread_proc(void* param)
      * reservation and prevents ABA corruption of the guest's lock-free lists. */
     { extern void ppu_resv_register(ppu_context*); ppu_resv_register(&info->ctx); }
 
-    fprintf(stderr, "[THREAD %llu] host thread started, entry=0x%08llX hosttid=%lu\n",
+    ps3_log("[THREAD %llu] host thread started, entry=0x%08llX hosttid=%lu\n",
             (unsigned long long)info->ctx.thread_id,
             (unsigned long long)info->entry_addr, (unsigned long)GetCurrentThreadId());
 
@@ -137,10 +139,10 @@ static void* ppu_host_thread_proc(void* param)
         if (setjmp(s_exit_jmp) == 0)
             g_ppu_thread_entry_trampoline(&info->ctx);
         else
-            fprintf(stderr, "[THREAD %llu] unwound out of sys_ppu_thread_exit\n",
+            ps3_log("[THREAD %llu] unwound out of sys_ppu_thread_exit\n",
                     (unsigned long long)info->ctx.thread_id);
         s_exit_armed = 0;
-        fprintf(stderr, "[THREAD %llu] entry RETURNED (r3=0x%llX) -- thread finished\n",
+        ps3_log("[THREAD %llu] entry RETURNED (r3=0x%llX) -- thread finished\n",
                 (unsigned long long)info->ctx.thread_id,
                 (unsigned long long)info->ctx.gpr[3]);
 
@@ -154,7 +156,7 @@ static void* ppu_host_thread_proc(void* param)
         { extern int ps3_intr_is_handler(unsigned long long);
           extern int ps3_intr_wait(unsigned long long);
           if (ps3_intr_is_handler(info->ctx.thread_id)) {
-              fprintf(stderr, "[intr] thread %llu is an interrupt handler -- \n",
+              ps3_log("[intr] thread %llu is an interrupt handler -- \n",
                       (unsigned long long)info->ctx.thread_id);
               while (ps3_intr_wait(info->ctx.thread_id)) {
                   s_exit_armed = 1;
@@ -164,7 +166,7 @@ static void* ppu_host_thread_proc(void* param)
               }
           } }
     } else {
-        fprintf(stderr, "[THREAD %llu] g_ppu_thread_entry_trampoline is NULL — thread is a no-op!\n",
+        ps3_log("[THREAD %llu] g_ppu_thread_entry_trampoline is NULL — thread is a no-op!\n",
                 (unsigned long long)info->ctx.thread_id);
     }
 
@@ -211,7 +213,7 @@ void ydkj_release_pending_threads(void)
     int n = g_gate_n; g_gate_n = 0;
     for (int i = 0; i < n; i++) if (g_gate_pending[i]) ResumeThread(g_gate_pending[i]);
     table_unlock();
-    if (n) fprintf(stderr, "[THREADGATE] released %d pending worker thread(s) on first block\n", n);
+    if (n) ps3_log("[THREADGATE] released %d pending worker thread(s) on first block\n", n);
 }
 #else
 void ydkj_release_pending_threads(void) {}
@@ -322,7 +324,7 @@ void ppu_prof_stamp(void* vctx, unsigned lr)
     int in_range = (t >= g_ppu_threads && t < g_ppu_threads + PPU_THREAD_MAX);
     if (!in_range) { s_prof_main_pc = lr; return; }
     { static int _n = 0; if (_n++ < 0)
-        fprintf(stderr, "[prof-stamp] ctx=%p base=%p in_range=%d lr=0x%X\n",
+        ps3_log("[prof-stamp] ctx=%p base=%p in_range=%d lr=0x%X\n",
                 vctx, (void*)g_ppu_threads, in_range, lr); }
     if (in_range)
         t->prof_pc = lr;
@@ -367,6 +369,9 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
     t->ctx.cia = entry;
     t->ctx.gpr[3] = arg;
     ppu_set_stack(&t->ctx, (uint64_t)stack_addr, (uint64_t)stack_size);
+    
+    /* terminate the back chain */
+    vm_write64((uint32_t)ppu_get_sp(&t->ctx), 0);
 
     /* Copy TOC from creating thread */
     t->ctx.gpr[2] = ctx->gpr[2];
@@ -418,7 +423,7 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
         *out = be_id;
     }
 
-    fprintf(stderr, "[SYS] sys_ppu_thread_create tid=%llu name=\"%s\" entry=0x%08llX arg=0x%llX stack=0x%X prio=%d tls block=0x%08X r13=0x%08X\n",
+    ps3_log("[SYS] sys_ppu_thread_create tid=%llu name=\"%s\" entry=0x%08llX arg=0x%llX stack=0x%X prio=%d tls block=0x%08X r13=0x%08X\n",
             (unsigned long long)thread_id, t->name, (unsigned long long)entry, (unsigned long long)arg,
             stack_size, priority,
             t->tls_addr, (uint32_t)t->ctx.gpr[13]);
@@ -430,7 +435,7 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
       if(a && a<0x50000000u && getenv("PPU_THREADARG")){
         #define RB(o) (((uint32_t)vm_base[(a+(o))&0x0FFFFFFFu]<<24)|((uint32_t)vm_base[(a+(o)+1)&0x0FFFFFFFu]<<16)|((uint32_t)vm_base[(a+(o)+2)&0x0FFFFFFFu]<<8)|vm_base[(a+(o)+3)&0x0FFFFFFFu])
         uint32_t self=RB(0x0), thisp=RB(0x8), vtbl=RB(0xC);
-        fprintf(stderr,"[THREADARG] arg=0x%08X [+0]=0x%08X this[+8]=0x%08X vtbl[+C]=0x%08X\n", a, self, thisp, vtbl);
+        ps3_log("[THREADARG] arg=0x%08X [+0]=0x%08X this[+8]=0x%08X vtbl[+C]=0x%08X\n", a, self, thisp, vtbl);
         #undef RB
       } }
 
@@ -440,7 +445,7 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
      * cellSpursInitialize) keep running, to see how far it gets. The thread is
      * "created" (tid returned) but never spawned. */
     if (getenv("YDKJ_NOHDLR") && entry >= 0x30000000 && entry < 0x30040000) {
-        fprintf(stderr, "[SYS]   (suppressed libsre handler thread entry=0x%08llX)\n",
+        ps3_log("[SYS]   (suppressed libsre handler thread entry=0x%08llX)\n",
                 (unsigned long long)entry);
         t->state = PPU_THREAD_STATE_RUNNING; /* leave it parked */
         table_unlock();
@@ -498,7 +503,7 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
          * default stack. A shallow guest thread runs fine there, and a deep
          * one crashing beats not starting at all. */
         if (rc != 0) {
-            fprintf(stderr, "[SYS] tid=%llu: no %zu MB host stack (%d), "
+            ps3_log("[SYS] tid=%llu: no %zu MB host stack (%d), "
                             "falling back to the default\n",
                     (unsigned long long)thread_id,
                     (size_t)(PPU_HOST_STACK_BYTES / (1024 * 1024)), rc);
@@ -527,7 +532,7 @@ int64_t sys_ppu_thread_exit(ppu_context* ctx)
 {
     uint64_t status = LV2_ARG_U64(ctx, 0);
     uint64_t tid = ctx->thread_id;
-    fprintf(stderr, "[SYS] sys_ppu_thread_exit(tid=%llu status=%llu)\n",
+    ps3_log("[SYS] sys_ppu_thread_exit(tid=%llu status=%llu)\n",
             (unsigned long long)tid, (unsigned long long)status);
 
     table_lock();
@@ -571,7 +576,7 @@ int64_t sys_ppu_thread_join(ppu_context* ctx)
 {
     uint64_t tid          = LV2_ARG_U64(ctx, 0);
     uint32_t status_addr  = LV2_ARG_PTR(ctx, 1);
-    { static int n=0; if(n++<30) fprintf(stderr,"[WAIT] ppu_thread_join(tid=%llu)\n", (unsigned long long)tid); }
+    { static int n=0; if(n++<30) ps3_log("[WAIT] ppu_thread_join(tid=%llu)\n", (unsigned long long)tid); }
 
     table_lock();
     ppu_thread_info* t = find_thread(tid);
@@ -727,7 +732,7 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
           extern uint32_t vm_read32(uint64_t);
           const uint32_t r30 = (uint32_t)ctx->gpr[30];
           if (++n <= 6 || (n % 500000ul) == 0)
-              fprintf(stderr, "[spinwait] n=%lu lr=%08X ctr=%08X r2=%08X"
+              ps3_log("[spinwait] n=%lu lr=%08X ctr=%08X r2=%08X"
                               " r30=%08X w0=%08X w88=%08X r31=%08X\n",
                       n, (uint32_t)ctx->lr, (uint32_t)ctx->ctr,
                       (uint32_t)ctx->gpr[2], r30,
@@ -828,14 +833,14 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                   if (op == 0) sp_n[insn & 63]++;
                   g_yield_ctr = (uint32_t)ctx->ctr;
                   if ((++tot % 200000ul) == 0) {
-                      fprintf(stderr, "[yieldop] %lu yields; ctr=0x%08X;"
+                      ps3_log("[yieldop] %lu yields; ctr=0x%08X;"
                                       " top R3000 opcodes:", tot, g_yield_ctr);
                       for (int q = 0; q < 6; q++) {
                           int best = -1; unsigned long bv = 0;
                           for (int k = 0; k < 64; k++)
                               if (op_n[k] > bv) { bv = op_n[k]; best = k; }
                           if (best < 0 || !bv) break;
-                          fprintf(stderr, " op%02X=%lu", best, bv);
+                          ps3_log(" op%02X=%lu", best, bv);
                           op_n[best] = 0;
                       }
                       for (int q = 0; q < 3; q++) {
@@ -843,10 +848,10 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                           for (int k = 0; k < 64; k++)
                               if (sp_n[k] > bv) { bv = sp_n[k]; best = k; }
                           if (best < 0 || !bv) break;
-                          fprintf(stderr, " special:funct%02X=%lu", best, bv);
+                          ps3_log(" special:funct%02X=%lu", best, bv);
                           sp_n[best] = 0;
                       }
-                      fprintf(stderr, "\n");
+                      ps3_log("\n");
                       /* Bug 1: func_00105FA8 fires every event whose due time
                        * has passed and RE-APPENDS the node to the same ring
                        * with its due time UNCHANGED (0x106020..0x10603C), so a
@@ -865,20 +870,20 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                        * zeroed once the node fires. */
                       { const uint32_t st = 0x0076C080u, sent = st + 0x540u;
                         uint32_t n = vm_read32(sent);
-                        fprintf(stderr, "[evring] total=%u sent{due=%u next=%08X"
+                        ps3_log("[evring] total=%u sent{due=%u next=%08X"
                                         " prev=%08X}",
                                 vm_read32(st + 0x124u), vm_read32(sent + 8u),
                                 n, vm_read32(sent + 4u));
                         for (int q = 0; q < 8 && n && n != sent; q++) {
                             const uint32_t opd = vm_read32(n + 0xCu);
-                            fprintf(stderr, "  [%08X due=%u opd=%08X fn=%08X"
+                            ps3_log("  [%08X due=%u opd=%08X fn=%08X"
                                             " arg=%08X]",
                                     n, vm_read32(n + 8u), opd,
                                     opd ? vm_read32(opd) : 0u,
                                     vm_read32(n + 0x10u));
                             n = vm_read32(n);
                         }
-                        fprintf(stderr, "\n"); }
+                        ps3_log("\n"); }
                   } }
                 /* PS1_LOOPWATCH=<hex pc>: sample the R3000 register file only
                  * when the pc is inside a 256-byte window, and report which of
@@ -908,7 +913,7 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                       if (!f0 && n0 < 8) seen_a0[n0++] = a0;
                       if (!f1 && n1 < 8) seen_a1[n1++] = a1;
                       if (++ln <= 8 || (ln % 20000) == 0) {
-                          fprintf(stderr, "[loopwatch] n=%lu pc=0x%08X"
+                          ps3_log("[loopwatch] n=%lu pc=0x%08X"
                                           " a0=%08X a1=%08X a3=%08X"
                                           " distinct[a0=%d a1=%d]\n",
                                   ln, pc, a0, a1, a3, n0, n1);
@@ -952,10 +957,10 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                             0xBFC04680u, 0xBFC046A0u };
                         unsigned tot = 0;
                         for (unsigned q = 0; q < 8192; q++) tot += seen[q];
-                        fprintf(stderr, "[census] %lu samples, %u/8192 BIOS buckets"
+                        ps3_log("[census] %lu samples, %u/8192 BIOS buckets"
                                         " ever executed; CdInit:", cn, tot);
                         for (int q = 0; q < 6; q++)
-                            fprintf(stderr, " %08X=%d", probe[q],
+                            ps3_log(" %08X=%d", probe[q],
                                     seen[(probe[q] - 0xBFC00000u) >> 6]);
                         /* The PS1 kernel's A/B/C call gates live at RAM 0xA0,
                          * 0xB0 and 0xC0 -- every BIOS service call jumps there
@@ -972,7 +977,7 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                               else if (phys >= 0xC0u && phys < 0xD0u) gate[2] = 1;
                               else gate[3] = 1;
                           }
-                          fprintf(stderr, "  A-gate=%d B-gate=%d C-gate=%d other-low=%d",
+                          ps3_log("  A-gate=%d B-gate=%d C-gate=%d other-low=%d",
                                   gate[0], gate[1], gate[2], gate[3]); }
                         /* Read the five CD event handles HERE, in the same
                          * report as the census. They used to be read from the
@@ -986,9 +991,9 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                           const uint32_t ram = vm_read32(0x001BC35Cu);
                           static const uint32_t sl[5] = { 0xB218u, 0xB21Cu, 0xB220u,
                                                           0xB224u, 0xB228u };
-                          fprintf(stderr, "  handles:");
+                          ps3_log("  handles:");
                           for (int q = 0; q < 5; q++)
-                              fprintf(stderr, " %08X",
+                              ps3_log(" %08X",
                                     PORT_BSWAP32(vm_read32(ram + sl[q])));
                           /* And each CD event's STATUS, from its EvCB. This is
                            * the delivery question: EvStACTIVE (0x2000) means
@@ -998,7 +1003,7 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                            * in the same report, deliberately. */
                           { const uint32_t tot = PORT_BSWAP32(vm_read32(ram + 0x0120u));
                             const uint32_t tb = tot & 0x1FFFFFu;
-                            fprintf(stderr, "  I_STAT_or=%08X I_MASK_or=%08X"
+                            ps3_log("  I_STAT_or=%08X I_MASK_or=%08X"
                                           " SR_or=%08X CAUSE_or=%08X line_or=%X",
                                   g_ps1_istat_or, g_ps1_imask_or,
                                   g_ps1_sr_or, g_ps1_cause_or, g_ps1_line_or);
@@ -1017,24 +1022,24 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                            *
                            * $s6 is the retry counter tested against 10
                            * (slti $v0,$s6,0xa); $v0 is TestEvent's last result. */
-                          fprintf(stderr, "  in_cdloop=%lu", g_cdl_hits);
+                          ps3_log("  in_cdloop=%lu", g_cdl_hits);
                           if (g_cdl_hits)
-                              fprintf(stderr, " r3000[v0=%u s0=%d s1=%u s6=%u]%s",
+                              ps3_log(" r3000[v0=%u s0=%d s1=%u s6=%u]%s",
                                       g_cdl_v0, (int32_t)g_cdl_s0, g_cdl_s1,
                                       g_cdl_s6,
                                       g_cdl_s1 == 1u ? "" : "  <== s1!=1, PROBE INVALID");
-                          fprintf(stderr, "  ev[cls/status]:");
+                          ps3_log("  ev[cls/status]:");
                             for (int q = 0; q < 5; q++) {
                                 const uint32_t h =
                                     PORT_BSWAP32(vm_read32(ram + sl[q]));
-                                if ((h >> 24) != 0xF1u) { fprintf(stderr, " -"); continue; }
+                                if ((h >> 24) != 0xF1u) { ps3_log(" -"); continue; }
                                 const uint32_t cb = tb + (h & 0xFFFFu) * 0x1Cu;
-                                fprintf(stderr, " %X/%04X",
+                                ps3_log(" %X/%04X",
                                     PORT_BSWAP32(vm_read32(ram + cb)) & 0xFu,
                                     PORT_BSWAP32(vm_read32(ram + cb + 4)) & 0xFFFFu);
                             } }
                         }
-                        fprintf(stderr, "\n");
+                        ps3_log("\n");
                     }
                 } }
               const uint32_t b = pc & ~0x3Fu;
@@ -1044,14 +1049,14 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
               if (i < NB) cnt[i]++;
               ++total;
               if (total == 20000ul || (total % 200000ul) == 0) {
-                  fprintf(stderr, "[r3000pc] %lu yields from the interpreter;"
+                  ps3_log("[r3000pc] %lu yields from the interpreter;"
                                   " hottest PS1 PC buckets:\n", total);
                   for (int k = 0; k < NB; k++) {
                       int best = -1; unsigned long bv = 0;
                       for (int q = 0; q < NB; q++)
                           if (cnt[q] > bv) { bv = cnt[q]; best = q; }
                       if (best < 0 || k >= 6) break;
-                      fprintf(stderr, "   pc~0x%08X  %lu (%.1f%%)\n",
+                      ps3_log("   pc~0x%08X  %lu (%.1f%%)\n",
                               key[best], cnt[best],
                               100.0 * (double)cnt[best] / (double)total);
                       cnt[best] = 0;   /* consume for this report */
@@ -1073,21 +1078,21 @@ int64_t sys_ppu_thread_yield(ppu_context* ctx)
                     { extern uint32_t vm_read32(uint64_t);
                       const uint32_t ram = vm_read32(0x001BC35Cu);
                       const uint32_t base = (top & 0x001FFFC0u);
-                      fprintf(stderr, "[r3000mem] %08X:", 0x80000000u | base);
+                      ps3_log("[r3000mem] %08X:", 0x80000000u | base);
                       for (int q = 0; q < 16; q++)
-                          fprintf(stderr, " %08X",
+                          ps3_log(" %08X",
                               PORT_BSWAP32(vm_read32(ram + base + q * 4u)));
-                      fprintf(stderr, "\n");
+                      ps3_log("\n");
                       { static const char* rn[32] = {
                             "zr","at","v0","v1","a0","a1","a2","a3",
                             "t0","t1","t2","t3","t4","t5","t6","t7",
                             "s0","s1","s2","s3","s4","s5","s6","s7",
                             "t8","t9","k0","k1","gp","sp","fp","ra" };
-                        fprintf(stderr, "[r3000reg]");
+                        ps3_log("[r3000reg]");
                         for (int q = 1; q < 32; q++)
-                            fprintf(stderr, " %s=%08X", rn[q],
+                            ps3_log(" %s=%08X", rn[q],
                                     vm_read32(0x0076C080u + (uint32_t)q * 4u));
-                        fprintf(stderr, "\n"); } } }
+                        ps3_log("\n"); } } }
                   for (int q = 0; q < NB; q++) { cnt[q] = 0; key[q] = 0; }
               }
           }

@@ -110,7 +110,7 @@ static void fiber_trampoline(int idx_lo, int idx_hi)
 
 s32 cellFiberPpuInitialize(void)
 {
-    printf("[cellFiber] Initialize()\n");
+    ps3_log("[cellFiber] Initialize()\n");
 
     if (s_initialized)
         return (s32)CELL_FIBER_ERROR_STAT;
@@ -135,7 +135,7 @@ s32 cellFiberPpuInitialize(void)
 
 s32 cellFiberPpuFinalize(void)
 {
-    printf("[cellFiber] Finalize()\n");
+    ps3_log("[cellFiber] Finalize()\n");
 
     if (!s_initialized)
         return (s32)CELL_FIBER_ERROR_STAT;
@@ -205,7 +205,7 @@ s32 cellFiberPpuCreateFiber(CellFiber* fiber, CellFiberEntry entry,
         f->priority = priority;
     }
 
-    printf("[cellFiber] CreateFiber(id=%d, name=%s, stack=%u)\n",
+    ps3_log("[cellFiber] CreateFiber(id=%d, name=%s, stack=%u)\n",
            idx, f->name[0] ? f->name : "(unnamed)", f->stack_size);
 
 #ifdef _WIN32
@@ -245,7 +245,7 @@ s32 cellFiberPpuDeleteFiber(CellFiber fiber)
     if (s_fibers[idx].state == CELL_FIBER_STATE_RUNNING)
         return (s32)CELL_FIBER_ERROR_BUSY;
 
-    printf("[cellFiber] DeleteFiber(id=%u)\n", idx);
+    ps3_log("[cellFiber] DeleteFiber(id=%u)\n", idx);
 
 #ifdef _WIN32
     if (s_fibers[idx].native_fiber)
@@ -384,7 +384,7 @@ s32 cellFiberPpuSleep(void)
     if (!s_initialized || s_current_fiber < 0)
         return (s32)CELL_FIBER_ERROR_PERM;
 
-    printf("[cellFiber] Sleep(fiber=%d)\n", s_current_fiber);
+    ps3_log("[cellFiber] Sleep(fiber=%d)\n", s_current_fiber);
     s_fibers[s_current_fiber].state = CELL_FIBER_STATE_SUSPENDED;
     s32 prev = s_current_fiber;
     s_current_fiber = -1;
@@ -406,12 +406,12 @@ s32 cellFiberPpuWakeup(CellFiber fiber)
         return (s32)CELL_FIBER_ERROR_INVAL;
 
     if (s_fibers[idx].state != CELL_FIBER_STATE_SUSPENDED) {
-        printf("[cellFiber] Wakeup(fiber=%u): not suspended (state=%u)\n",
+        ps3_log("[cellFiber] Wakeup(fiber=%u): not suspended (state=%u)\n",
                idx, s_fibers[idx].state);
         return (s32)CELL_FIBER_ERROR_STAT;
     }
 
-    printf("[cellFiber] Wakeup(fiber=%u)\n", idx);
+    ps3_log("[cellFiber] Wakeup(fiber=%u)\n", idx);
     s_fibers[idx].state = CELL_FIBER_STATE_INITIALIZED; /* ready to run */
     return CELL_OK;
 }

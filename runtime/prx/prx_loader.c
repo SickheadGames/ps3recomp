@@ -5,6 +5,7 @@
  * base, then register every lifted function in the host dispatch table.
  */
 #include "prx_loader.h"
+#include "ps3emu/logging.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,7 +38,7 @@ static void prx_export_register(uint32_t nid, uint32_t guest_addr)
     if (s_export_reg_n < PRX_EXPORT_REG_CAP)
         s_export_reg[s_export_reg_n++] = (prx_export_reg_entry){ nid, guest_addr };
     else
-        fprintf(stderr, "[prx] export registry full, dropping NID 0x%08X\n", nid);
+        ps3_log("[prx] export registry full, dropping NID 0x%08X\n", nid);
 }
 
 uint32_t prx_resolve_export(uint32_t nid)
@@ -56,11 +57,11 @@ prx_load_result prx_load_module(const prx_module* m, prx_register_fn reg)
     memset(&r, 0, sizeof(r));
 
     if (!m || !m->image || m->image_size == 0) {
-        fprintf(stderr, "[prx] load failed: null/empty module\n");
+        ps3_log("[prx] load failed: null/empty module\n");
         return r;
     }
     if (!vm_base) {
-        fprintf(stderr, "[prx] load failed: vm_base not initialized "
+        ps3_log("[prx] load failed: vm_base not initialized "
                         "(call vm_init before loading PRX modules)\n");
         return r;
     }
@@ -103,7 +104,7 @@ prx_load_result prx_load_module(const prx_module* m, prx_register_fn reg)
     }
 
     r.ok = 1;
-    fprintf(stderr,
+    ps3_log(
             "[prx] loaded %-12s base=0x%08X size=%u (0x%X) funcs=%u/%llu exports=%u\n",
             m->name ? m->name : "?", m->base, m->image_size, m->image_size,
             r.funcs_registered, (unsigned long long)m->func_count,
@@ -115,7 +116,7 @@ uint8_t* prx_image_load_file(const char* path, uint32_t* out_size)
 {
     FILE* f = fopen(path, "rb");
     if (!f) {
-        fprintf(stderr, "[prx] cannot open image '%s'\n", path);
+        ps3_log("[prx] cannot open image '%s'\n", path);
         return NULL;
     }
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
@@ -126,7 +127,7 @@ uint8_t* prx_image_load_file(const char* path, uint32_t* out_size)
     uint8_t* buf = (uint8_t*)malloc((size_t)n);
     if (!buf) { fclose(f); return NULL; }
     if (fread(buf, 1, (size_t)n, f) != (size_t)n) {
-        fprintf(stderr, "[prx] short read on '%s'\n", path);
+        ps3_log("[prx] short read on '%s'\n", path);
         free(buf);
         fclose(f);
         return NULL;

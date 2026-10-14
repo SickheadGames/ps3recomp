@@ -17,6 +17,7 @@
 #include "rsx_restart_cuts.h"
 #include "rsx_vertex_formats.h"
 #include "rsx_vp_decompiler.h"
+#include "ps3emu/logging.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -549,7 +550,7 @@ static u32 eng_surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
     if (want_w > ENG_MAX_SURFACE_DIM || want_h > ENG_MAX_SURFACE_DIM) {
         static u32 logs = 0;
         if (logs++ < 8)
-            fprintf(stderr, "[rsx engine] rejected implausible surface 0x%X %ux%u;"
+            ps3_log("[rsx engine] rejected implausible surface 0x%X %ux%u;"
                             " keeping the %s target\n", offset, want_w, want_h,
                     slot < ENG_MAX_SURFACES ? "existing" : "absent");
         return slot < ENG_MAX_SURFACES ? slot : ENG_INVALID;
@@ -576,7 +577,7 @@ static u32 eng_surface_get(u32 location, u32 offset, u32 want_w, u32 want_h,
     s->guest_dirty = 0;
     if (slot == g.n_surfaces) g.n_surfaces++;
     { static u32 logs = 0; if (logs++ < 16)
-        fprintf(stderr, "[rsx engine] surface %u:0x%08X %ux%u fmt %d%s\n",
+        ps3_log("[rsx engine] surface %u:0x%08X %ux%u fmt %d%s\n",
                 location, offset, want_w, want_h, (int)want_fmt,
                 seed ? " (seeded from guest memory)" : ""); }
     return slot;
@@ -1432,7 +1433,7 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
         }
     }
     { static u32 logs = 0; if (logs++ < 32)
-        fprintf(stderr, "[rsx engine] pipeline %016llx: %s vp %d, fp %d,"
+        ps3_log("[rsx engine] pipeline %016llx: %s vp %d, fp %d,"
                         " %u constants -> %s\n",
                 (unsigned long long)key, fixed ? "built-in" : "guest",
                 vi, fi, nconst, handle ? "ok" : "FAILED (draw dropped)"); }
@@ -2330,10 +2331,10 @@ static void eng_present(u32 buffer_id)
     if (target == ENG_INVALID) return;
     if (getenv("PS3RECOMP_METAL_FRAME_DUMP") && g.frames % 120 == 0) {
         u32 current = eng_current_surface();
-        fprintf(stderr, "[rsx capture] frame=%u buffer=%u selected=%u current=%u draws=%u surfaces=%u\n",
+        ps3_log("[rsx capture] frame=%u buffer=%u selected=%u current=%u draws=%u surfaces=%u\n",
                 g.frames, buffer_id, target, current, g.guest_draws, g.n_surfaces);
         for (u32 i = 0; i < g.n_surfaces; ++i)
-            fprintf(stderr, "[rsx capture] surface %u loc=%u offset=%08X size=%ux%u handle=%u\n",
+            ps3_log("[rsx capture] surface %u loc=%u offset=%08X size=%ux%u handle=%u\n",
                     i, g.surfaces[i].location, g.surfaces[i].offset,
                     g.surfaces[i].w, g.surfaces[i].h, g.surfaces[i].handle);
     }
@@ -2407,7 +2408,7 @@ int rsx_draw_engine_init(u32 width, u32 height)
     g.ready = 1;
     /* Display buffers the title registered before the backend came up. */
     cellGcm_replay_display_buffers_to_engine();
-    fprintf(stderr, "[rsx engine] register-file draw engine up (%ux%u)\n",
+    ps3_log("[rsx engine] register-file draw engine up (%ux%u)\n",
             g.width, g.height);
     return 0;
 }

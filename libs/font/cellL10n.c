@@ -463,7 +463,7 @@ s32 l10n_get_converter(u32 src_encoding, u32 dst_encoding)
     if (src_encoding <= L10N_UCS2 && dst_encoding == L10N_ISO_8859_1)
         return CELL_OK;
 
-    printf("[cellL10n] get_converter: unsupported %u -> %u\n",
+    ps3_log("[cellL10n] get_converter: unsupported %u -> %u\n",
            src_encoding, dst_encoding);
     return (s32)CELL_L10N_ERROR_NOT_SUPPORTED;
 }
@@ -535,7 +535,7 @@ s32 l10n_convert(u32 src_encoding, const void* src, u32 src_len,
         return CELL_OK;
     }
 
-    printf("[cellL10n] convert: unsupported %u -> %u\n",
+    ps3_log("[cellL10n] convert: unsupported %u -> %u\n",
            src_encoding, dst_encoding);
     return (s32)CELL_L10N_ERROR_NOT_SUPPORTED;
 }

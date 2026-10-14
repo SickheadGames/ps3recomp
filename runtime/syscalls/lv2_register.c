@@ -90,7 +90,7 @@ static int64_t sys_tty_write(ppu_context* ctx)
                   static int _n = 0;
                   if (_n++ < 4) {
                       uint32_t sp = (uint32_t)ctx->gpr[1];
-                      fprintf(stderr, "[TTY_BT] \"%.70s\" tid=%llu cia=0x%08X lr=0x%08X chain:",
+                      ps3_log("[TTY_BT] \"%.70s\" tid=%llu cia=0x%08X lr=0x%08X chain:",
                               tmp, (unsigned long long)ctx->thread_id,
                               (uint32_t)ctx->cia, (uint32_t)ctx->lr);
                       for (int i = 0; i < 24 && sp && sp < 0x10000000u; i++) {
@@ -99,9 +99,9 @@ static int64_t sys_tty_write(ppu_context* ctx)
                           if (nsp <= sp || nsp >= 0x10000000u) break;
                           uint32_t lr; memcpy(&lr, vm_base + nsp + 0x10, 4);
                           lr = ((lr>>24)&0xFF)|((lr>>8)&0xFF00)|((lr<<8)&0xFF0000)|((lr<<24)&0xFF000000);
-                          fprintf(stderr, " %08X", lr); sp = nsp;
+                          ps3_log(" %08X", lr); sp = nsp;
                       }
-                      fprintf(stderr, "\n"); fflush(stderr);
+                      ps3_log("\n"); fflush(stderr);
                   }
               }
           } }
@@ -114,7 +114,7 @@ static int64_t sys_tty_write(ppu_context* ctx)
             if (strstr(tmp, "NULL pointer") || strstr(tmp, "E2004090") || strstr(tmp, "CRICRS")) {
                 static int _cb = 0; if (_cb++ < 4) {
                     uint32_t sp = (uint32_t)ctx->gpr[1];
-                    fprintf(stderr, "[CRIBT] \"%.60s\" cia=0x%08X lr=0x%08X chain:", tmp,
+                    ps3_log("[CRIBT] \"%.60s\" cia=0x%08X lr=0x%08X chain:", tmp,
                             (uint32_t)ctx->cia, (uint32_t)ctx->lr);
                     for (int i = 0; i < 24 && sp && sp < 0x10000000u; i++) {
                         uint32_t nsp; memcpy(&nsp, vm_base + sp, 4);
@@ -122,9 +122,9 @@ static int64_t sys_tty_write(ppu_context* ctx)
                         if (nsp <= sp || nsp >= 0x10000000u) break;
                         uint32_t lr; memcpy(&lr, vm_base + nsp + 0x10, 4);
                         lr = ((lr>>24)&0xFF)|((lr>>8)&0xFF00)|((lr<<8)&0xFF0000)|((lr<<24)&0xFF000000);
-                        fprintf(stderr, " %08X", lr); sp = nsp;
+                        ps3_log(" %08X", lr); sp = nsp;
                     }
-                    fprintf(stderr, "\n"); fflush(stderr);
+                    ps3_log("\n"); fflush(stderr);
                 }
             }
         }
@@ -138,7 +138,7 @@ static int64_t sys_tty_write(ppu_context* ctx)
                 strstr(tmp, "libspurs")) {
                 static int _ab = 0; if (_ab++ < 4) {
                     uint32_t sp = (uint32_t)ctx->gpr[1];
-                    fprintf(stderr, "\n[ASSERTBT] \"%.70s\" cia=0x%08X lr=0x%08X chain:", tmp,
+                    ps3_log("\n[ASSERTBT] \"%.70s\" cia=0x%08X lr=0x%08X chain:", tmp,
                             (uint32_t)ctx->cia, (uint32_t)ctx->lr);
                     for (int i = 0; i < 28 && sp && sp < 0x10000000u; i++) {
                         uint32_t nsp; memcpy(&nsp, vm_base + sp, 4);
@@ -146,9 +146,9 @@ static int64_t sys_tty_write(ppu_context* ctx)
                         if (nsp <= sp || nsp >= 0x10000000u) break;
                         uint32_t lr; memcpy(&lr, vm_base + nsp + 0x10, 4);
                         lr = ((lr>>24)&0xFF)|((lr>>8)&0xFF00)|((lr<<8)&0xFF0000)|((lr<<24)&0xFF000000);
-                        fprintf(stderr, " %08X", lr); sp = nsp;
+                        ps3_log(" %08X", lr); sp = nsp;
                     }
-                    fprintf(stderr, "\n"); fflush(stderr);
+                    ps3_log("\n"); fflush(stderr);
                 }
             }
         }
@@ -163,7 +163,7 @@ static int64_t sys_tty_write(ppu_context* ctx)
                 strstr(ptmp, "out of memory on request")) {
                 extern void ppu_log_host_chain(const char*);
                 static int _pn = 0;
-                if (_pn++ < 3) { fprintf(stderr, "[POOLTRACE] %.90s\n", ptmp); ppu_log_host_chain("pool-corrupt"); }
+                if (_pn++ < 3) { ps3_log("[POOLTRACE] %.90s\n", ptmp); ppu_log_host_chain("pool-corrupt"); }
             }
         }
         /* DIAGNOSTIC (FLOW_PSSGTRACE=1): when the title logs a PhyreEngine
@@ -179,7 +179,7 @@ static int64_t sys_tty_write(ppu_context* ctx)
                 strstr(tmp, "fail") || strstr(tmp, "Error") || strstr(tmp, "rror") ||
                 strstr(tmp, "PSpu") || strstr(tmp, "ation") || strstr(tmp, "Mystery")) {
                 uint32_t sp = (uint32_t)ctx->gpr[1];
-                fprintf(stderr, "[pssg-bt] tty_write \"%.50s\" lr=0x%08X\n", tmp, (uint32_t)ctx->lr);
+                ps3_log("[pssg-bt] tty_write \"%.50s\" lr=0x%08X\n", tmp, (uint32_t)ctx->lr);
                 /* The back-chain below is unreliable under the DRAIN/fragment
                  * model (LR slots read 0); the host-backtrace mapper is not. */
                 { extern void ppu_guest_callstack(const char*); ppu_guest_callstack("tty"); }
@@ -189,7 +189,7 @@ static int64_t sys_tty_write(ppu_context* ctx)
                     if (nsp <= sp || nsp >= 0x10000000u) break;
                     uint32_t lr; memcpy(&lr, vm_base + nsp + 0x10, 4);
                     lr = ((lr>>24)&0xFF)|((lr>>8)&0xFF00)|((lr<<8)&0xFF0000)|((lr<<24)&0xFF000000);
-                    fprintf(stderr, "[pssg-bt]   #%d lr=0x%08X\n", i, lr);
+                    ps3_log("[pssg-bt]   #%d lr=0x%08X\n", i, lr);
                     sp = nsp;
                 }
                 fflush(stderr);
@@ -484,7 +484,7 @@ static int64_t sys_spu_initialize_handler(ppu_context* ctx)
 {
     uint32_t nspu    = (uint32_t)ctx->gpr[3];
     uint32_t nrawspu = (uint32_t)ctx->gpr[4];
-    fprintf(stderr, "[SPU] initialize(nspu=%u, nrawspu=%u)\n", nspu, nrawspu);
+    ps3_log("[SPU] initialize(nspu=%u, nrawspu=%u)\n", nspu, nrawspu);
     fflush(stderr);
     s_spu_initialized = 1;
     ctx->gpr[3] = 0;
@@ -507,11 +507,11 @@ static int64_t sys_spu_thread_group_create_handler(ppu_context* ctx)
     uint32_t num      = (uint32_t)ctx->gpr[4];
     int32_t  prio     = (int32_t)ctx->gpr[5];
     uint32_t attr_ea  = (uint32_t)ctx->gpr[6];
-    fprintf(stderr, "[SPU] thread_group_create(num=%u prio=%d)\n", num, prio);
+    ps3_log("[SPU] thread_group_create(num=%u prio=%d)\n", num, prio);
 
     spu_group_t* g = spu_alloc_group();
     if (!g) {
-        fprintf(stderr, "[SPU] group_create: out of groups\n");
+        ps3_log("[SPU] group_create: out of groups\n");
         fflush(stderr);
         ctx->gpr[3] = (uint64_t)(int64_t)-1; /* EAGAIN-ish */
         return -1;
@@ -537,7 +537,7 @@ static int64_t sys_spu_thread_group_create_handler(ppu_context* ctx)
 
     vm_write_be32(out_ea, g->id);
 
-    fprintf(stderr, "[SPU] group_create -> id=0x%X num=%u prio=%d type=0x%X name=%.31s\n",
+    ps3_log("[SPU] group_create -> id=0x%X num=%u prio=%d type=0x%X name=%.31s\n",
             g->id, num, prio, gtype, g->name);
     fflush(stderr);
     ctx->gpr[3] = 0;
@@ -560,7 +560,7 @@ static int32_t ydkj_hle_spurs_kernel(uint32_t tid, uint32_t args_ea,
                                      uint32_t args_size, void* user)
 {
     (void)args_size; (void)user;
-    fprintf(stderr, "[HLE-SPURS] kernel SPU tid=0x%X ctx=0x%08X running\n", tid, args_ea);
+    ps3_log("[HLE-SPURS] kernel SPU tid=0x%X ctx=0x%08X running\n", tid, args_ea);
     fflush(stderr);
     if (g_ydkj_spurs_kernel_run)
         return g_ydkj_spurs_kernel_run(tid, args_ea);   /* run the lifted kernel */
@@ -587,7 +587,7 @@ static int64_t sys_spu_thread_initialize_handler(ppu_context* ctx)
 
     spu_group_t* g = spu_find_group(group_id);
     if (!g) {
-        fprintf(stderr, "[SPU] thread_init: group 0x%X not found\n", group_id);
+        ps3_log("[SPU] thread_init: group 0x%X not found\n", group_id);
         fflush(stderr);
         ctx->gpr[3] = (uint64_t)(int64_t)-1;
         return -1;
@@ -635,11 +635,11 @@ static int64_t sys_spu_thread_initialize_handler(ppu_context* ctx)
         uint32_t entry = vm_read_be32(img_ea + 4);
         uint32_t segs  = vm_read_be32(img_ea + 8);
         uint32_t nsegs = vm_read_be32(img_ea + 12);
-        fprintf(stderr, "[SPUIMG] img=0x%08X type=0x%X entry=0x%X segs=0x%08X nsegs=%u\n",
+        ps3_log("[SPUIMG] img=0x%08X type=0x%X entry=0x%X segs=0x%08X nsegs=%u\n",
                 img_ea, type, entry, segs, nsegs);
         for (uint32_t s = 0; s < nsegs && s < 8; s++) {
             uint32_t b = segs + s * 0x18;  /* sys_spu_segment: type,ls,size,src(pa64) */
-            fprintf(stderr, "[SPUIMG]  seg%u type=0x%X ls=0x%X size=0x%X src=0x%08X%08X\n",
+            ps3_log("[SPUIMG]  seg%u type=0x%X ls=0x%X size=0x%X src=0x%08X%08X\n",
                     s, vm_read_be32(b+0), vm_read_be32(b+4), vm_read_be32(b+8),
                     vm_read_be32(b+0x10), vm_read_be32(b+0x14));
         }
@@ -657,14 +657,14 @@ static int64_t sys_spu_thread_initialize_handler(ppu_context* ctx)
     if (img_ea && getenv("YDKJ_SPUREADY")) {
         uint32_t before = vm_read_be32(img_ea + 0x38);
         vm_write_be32(img_ea + 0x38, t->tid);
-        fprintf(stderr, "[SPUREADY] wrote tid=0x%X to img+0x38=0x%08X (was 0x%08X)\n",
+        ps3_log("[SPUREADY] wrote tid=0x%X to img+0x38=0x%08X (was 0x%08X)\n",
                 t->tid, img_ea + 0x38, before);
         fflush(stderr);
     }
 
     vm_write_be32(out_tid_ea, t->tid);
 
-    fprintf(stderr, "[SPU] thread_init group=0x%X index=%u img=0x%08X args=0x%08X -> tid=0x%X entry=0x%08X\n",
+    ps3_log("[SPU] thread_init group=0x%X index=%u img=0x%08X args=0x%08X -> tid=0x%X entry=0x%08X\n",
             group_id, thread_num, img_ea, args_ea, t->tid, t->entry_point);
     fflush(stderr);
     ctx->gpr[3] = 0;
@@ -765,7 +765,7 @@ static void* spu_fallback_thread_proc(void* arg)
         extern int sys_event_queue_push_by_id(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t);
         sys_event_queue_push_by_id(t->connected_queue,
             ((uint64_t)t->tid << 32) | 0x2u, (uint64_t)(uint32_t)rc, 0, 0);
-        fprintf(stderr, "[SPU-DONE-EVT] tid=0x%X rc=0x%X -> queue=%u\n",
+        ps3_log("[SPU-DONE-EVT] tid=0x%X rc=0x%X -> queue=%u\n",
                 t->tid, rc, t->connected_queue);
     }
     /* Mark complete and signal anyone waiting in group_join. */
@@ -827,16 +827,16 @@ static int32_t spu_interp_fallback(uint32_t tid, uint32_t args_ea,
     if (!ls) return -1;
     uint32_t entry = spu_load_image_to_ls(t->img_ea, ls);
     if (getenv("SPU_ARGS_DUMP") && vm_base && args_ea) {
-        fprintf(stderr, "[SPU-ARGS] tid=0x%X args@0x%08X:", tid, args_ea);
-        for (int i = 0; i < 8; i++) fprintf(stderr, " %08X", vm_read_be32(args_ea + i*4));
-        fprintf(stderr, "\n");
+        ps3_log("[SPU-ARGS] tid=0x%X args@0x%08X:", tid, args_ea);
+        for (int i = 0; i < 8; i++) ps3_log(" %08X", vm_read_be32(args_ea + i*4));
+        ps3_log("\n");
     }
-    fprintf(stderr, "[SPU-INTERP] tid=0x%X entry=0x%05X img=0x%08X args=0x%08X -> interpreting\n",
+    ps3_log("[SPU-INTERP] tid=0x%X entry=0x%05X img=0x%08X args=0x%08X -> interpreting\n",
             tid, entry, t->img_ea, args_ea);
     int32_t sc = spu_run_interp_job(ls, entry, args_ea, -1,  /* pure interp: no fast-path rejoin */
                                     t->tid, t->group_id, 0); /* identify for mbox->event delivery */
     { extern uint32_t g_spu_interp_last_pc; extern uint64_t g_spu_interp_steps;
-      fprintf(stderr, "[SPU-INTERP] tid=0x%X done (stop=0x%X, %llu insns, last pc=0x%05X)\n",
+      ps3_log("[SPU-INTERP] tid=0x%X done (stop=0x%X, %llu insns, last pc=0x%05X)\n",
               tid, sc, (unsigned long long)g_spu_interp_steps, g_spu_interp_last_pc); }
     return sc;
 }
@@ -868,7 +868,7 @@ int spu_dispatch_frame_by_queue(uint32_t comp_queue, uint32_t work_ea)
         uint8_t* ls = spu_thread_get_or_alloc_ls(t);
         if (!ls) return 0;
         uint32_t entry = spu_load_image_to_ls(t->img_ea, ls);
-        fprintf(stderr, "[SPU-FRAME] tid=0x%X q=%u work=0x%08X -> re-run\n",
+        ps3_log("[SPU-FRAME] tid=0x%X q=%u work=0x%08X -> re-run\n",
                 t->tid, comp_queue, work_ea);
         /* Seed the inbound mailbox with the work descriptor when we HAVE one.
          * spu_run_interp_job treats 0 as "do not seed", so the blocking-receive
@@ -888,22 +888,22 @@ int spu_dispatch_frame_by_queue(uint32_t comp_queue, uint32_t work_ea)
          * does not name the buffer we expect. */
         { static int _wd = -1; if (_wd < 0) _wd = getenv("SPU_WORKDESC_DUMP") ? 1 : 0;
           if (_wd && work_ea > 0x1000000u && vm_base) { static int _n = 0; if (_n++ < 3) {
-              fprintf(stderr, "[WORKDESC] tid=0x%X ea=0x%08X:%c", t->tid, work_ea, 10);
+              ps3_log("[WORKDESC] tid=0x%X ea=0x%08X:%c", t->tid, work_ea, 10);
               for (int r = 0; r < 16; r++) {
-                  fprintf(stderr, "  +0x%03X:", r * 16);
+                  ps3_log("  +0x%03X:", r * 16);
                   for (int c = 0; c < 4; c++)
-                      fprintf(stderr, " %08X", vm_read_be32(work_ea + r*16 + c*4));
-                  fprintf(stderr, "%c", 10);
+                      ps3_log(" %08X", vm_read_be32(work_ea + r*16 + c*4));
+                  ps3_log("%c", 10);
               } } } }
         { static int _wh = -1; if (_wh < 0) _wh = getenv("SPU_WORKDESC_HDR") ? 1 : 0;
           if (_wh && work_ea > 0x1000000u && vm_base) { static int _n = 0; if (_n++ < 40)
-              fprintf(stderr, "[WORKHDR] tid=0x%X ea=0x%08X w0=%u w1=%u f2=%g f3=%g%c",
+              ps3_log("[WORKHDR] tid=0x%X ea=0x%08X w0=%u w1=%u f2=%g f3=%g%c",
                       t->tid, work_ea, vm_read_be32(work_ea), vm_read_be32(work_ea+4),
                       (double)*(const float*)&(const uint32_t){0}, 0.0, 10); }
           if (_wh && work_ea > 0x1000000u && vm_base) { } }
         { static int _sd = -1; if (_sd < 0) _sd = getenv("SPU_SEED_DBG") ? 1 : 0;
           if (_sd) { static int _n = 0; if (_n++ < 12)
-              fprintf(stderr, "[SPU-SEED] tid=0x%X entry=0x%05X args=0x%08X seed=0x%08X%c",
+              ps3_log("[SPU-SEED] tid=0x%X entry=0x%05X args=0x%08X seed=0x%08X%c",
                       t->tid, entry, t->args_ea, work_ea, 10); } }
         /* Do NOT seed the inbound mailbox. It is the reply channel for the
          * SPU's own sys_spu_thread_receive_event (stop 0x110) service, and the
@@ -917,11 +917,11 @@ int spu_dispatch_frame_by_queue(uint32_t comp_queue, uint32_t work_ea)
               extern uint64_t g_spu_interp_steps;
               double sec = (double)(_t1.QuadPart - _t0.QuadPart) / (double)_fq.QuadPart;
               static int _n = 0; if (_n++ < 20)
-                  fprintf(stderr, "[spu-speed] tid=0x%X %llu insns in %.3f s = %.1f M/s%c",
+                  ps3_log("[spu-speed] tid=0x%X %llu insns in %.3f s = %.1f M/s%c",
                           t->tid, (unsigned long long)g_spu_interp_steps, sec,
                           sec > 0 ? g_spu_interp_steps / sec / 1e6 : 0.0, 10); } }
         { extern uint32_t g_spu_interp_last_pc; extern uint64_t g_spu_interp_steps;
-          fprintf(stderr, "[SPU-FRAME] tid=0x%X done (stop=0x%X, %llu insns, last pc=0x%05X)\n",
+          ps3_log("[SPU-FRAME] tid=0x%X done (stop=0x%X, %llu insns, last pc=0x%05X)\n",
                   t->tid, frc, (unsigned long long)g_spu_interp_steps, g_spu_interp_last_pc); }
         return 1;
     }
@@ -963,16 +963,16 @@ static int64_t sys_spu_thread_group_start_handler(ppu_context* ctx)
         if (_idump) {
           for (uint32_t _ia = 0x40009D00; _ia <= 0x40009F00; _ia += 0x200) {
             if (ppu_vm_size && (uint64_t)_ia + 0xA0u > (uint64_t)ppu_vm_size) {
-                fprintf(stderr, "[INSTDUMP] group_start id=0x%X CellSpurs@0x%08X is past "
+                ps3_log("[INSTDUMP] group_start id=0x%X CellSpurs@0x%08X is past "
                         "the mapped guest range (0x%08X), not read\n", id, _ia, ppu_vm_size);
                 continue;
             }
             const uint8_t* in = vm_base + _ia;
-            fprintf(stderr, "[INSTDUMP] group_start id=0x%X CellSpurs@0x%08X (0x140 bytes):\n", id, _ia);
+            ps3_log("[INSTDUMP] group_start id=0x%X CellSpurs@0x%08X (0x140 bytes):\n", id, _ia);
             for (int row=0; row<10; row++){
-                fprintf(stderr, "  +0x%03X:", row*16);
-                for (int i=0;i<4;i++){ int o=row*16+i*4; uint32_t w=((uint32_t)in[o]<<24)|((uint32_t)in[o+1]<<16)|((uint32_t)in[o+2]<<8)|in[o+3]; fprintf(stderr," %08X",w);}
-                fprintf(stderr, "\n");
+                ps3_log("  +0x%03X:", row*16);
+                for (int i=0;i<4;i++){ int o=row*16+i*4; uint32_t w=((uint32_t)in[o]<<24)|((uint32_t)in[o+1]<<16)|((uint32_t)in[o+2]<<8)|in[o+3]; ps3_log(" %08X",w);}
+                ps3_log("\n");
             }
           }
           fflush(stderr);
@@ -1029,7 +1029,7 @@ static int64_t sys_spu_thread_group_start_handler(ppu_context* ctx)
                 t->finish_event.done = 0;
                 spu_spawn_host_thread(&t->host_thread, spu_exec_thread_proc, t);
 #endif
-                fprintf(stderr, "[SPU] group_start id=0x%X tid=0x%X entry=0x%08X "
+                ps3_log("[SPU] group_start id=0x%X tid=0x%X entry=0x%08X "
                         "args=0x%08X -> LIFTED SPU execution (image %d, "
                         "r3=0x%08X%08X r4=0x%08X%08X r5=0x%08X%08X r6=0x%08X%08X)\n",
                         id, t->tid, t->entry_point, t->args_ea, t->sctx->image_id,
@@ -1060,7 +1060,7 @@ static int64_t sys_spu_thread_group_start_handler(ppu_context* ctx)
                 if (spu_workload_find_img(fp, &iid)) {
                     fb = spu_registry_fallback;
                     user = (void*)(uintptr_t)fp;
-                    fprintf(stderr, "[SPU] thread tid=0x%X image @0x%08X (%u bytes) "
+                    ps3_log("[SPU] thread tid=0x%X image @0x%08X (%u bytes) "
                             "matched lifted workload fp=0x%016llX image_id=%d\n",
                             t->tid, src, (unsigned)isz,
                             (unsigned long long)fp, iid);
@@ -1085,14 +1085,14 @@ static int64_t sys_spu_thread_group_start_handler(ppu_context* ctx)
                       uint8_t* ls = spu_thread_get_local_store(t->tid);
                       uint32_t ls_entry = 0;
                       if (ls && spu_elf_load_to_ls(vm_base + src, isz, ls, &ls_entry))
-                          fprintf(stderr, "[SPU] thread tid=0x%X local store loaded "
+                          ps3_log("[SPU] thread tid=0x%X local store loaded "
                                   "(entry 0x%05X)\n", t->tid, ls_entry);
                       else
-                          fprintf(stderr, "[SPU] thread tid=0x%X LOCAL STORE LOAD FAILED "
+                          ps3_log("[SPU] thread tid=0x%X LOCAL STORE LOAD FAILED "
                                   "-- worker will run against zeroes\n", t->tid);
                     }
                 } else {
-                    fprintf(stderr, "[SPU] thread tid=0x%X image @0x%08X (%u bytes) "
+                    ps3_log("[SPU] thread tid=0x%X image @0x%08X (%u bytes) "
                             "fp=0x%016llX is NOT in the workload registry\n",
                             t->tid, src, (unsigned)isz, (unsigned long long)fp);
                 }
@@ -1171,11 +1171,11 @@ static int64_t sys_spu_thread_group_start_handler(ppu_context* ctx)
                 { struct timespec ts = {0, 1000000}; nanosleep(&ts, 0); }
 #endif
             if (!t->live_ctx)
-                fprintf(stderr, "[SPU] group_start tid=0x%X: worker never published "
+                ps3_log("[SPU] group_start tid=0x%X: worker never published "
                         "a context -- mailbox writes will fall back to re-runs\n",
                         t->tid);
         }
-        fprintf(stderr, "[SPU] group_start id=0x%X tid=0x%X entry=0x%08X args=0x%08X -> spawned host thread\n",
+        ps3_log("[SPU] group_start id=0x%X tid=0x%X entry=0x%08X args=0x%08X -> spawned host thread\n",
                 id, t->tid, t->entry_point, t->args_ea);
         spawned++;
     }
@@ -1188,10 +1188,10 @@ static int64_t sys_spu_thread_group_start_handler(ppu_context* ctx)
          * completion synchronously (the interpreter path). Reporting "no
          * fallback" whenever spawned==0 hid a perfectly working interpreted
          * run -- say which it actually was. */
-        fprintf(stderr, "[SPU] group_start id=0x%X (%u thread(s), none spawned: %d ran synchronously, %d had no fallback)\n",
+        ps3_log("[SPU] group_start id=0x%X (%u thread(s), none spawned: %d ran synchronously, %d had no fallback)\n",
                 id, g->num_threads, instant - nofb, nofb);
     } else {
-        fprintf(stderr, "[SPU] group_start id=0x%X (%d host threads running, %d instant)\n",
+        ps3_log("[SPU] group_start id=0x%X (%d host threads running, %d instant)\n",
                 id, spawned, instant);
     }
     fflush(stderr);
@@ -1212,7 +1212,7 @@ static int64_t sys_spu_thread_group_join_handler(ppu_context* ctx)
          * games probe with stale IDs, so be lenient and fake a success. */
         vm_write_be32(cause_ea,  SPU_GROUP_CAUSE_ALL_THREADS_EXIT);
         vm_write_be32(status_ea, 0);
-        fprintf(stderr, "[SPU] group_join id=0x%X (unknown, faked ok)\n", id);
+        ps3_log("[SPU] group_join id=0x%X (unknown, faked ok)\n", id);
         fflush(stderr);
         ctx->gpr[3] = 0;
         return 0;
@@ -1284,7 +1284,7 @@ static int64_t sys_spu_thread_group_join_handler(ppu_context* ctx)
     vm_write_be32(cause_ea,  g->cause);
     vm_write_be32(status_ea, (uint32_t)g->exit_status);
 
-    fprintf(stderr, "[SPU] group_join id=0x%X cause=%u status=%d (event_queue=0x%X)\n",
+    ps3_log("[SPU] group_join id=0x%X cause=%u status=%d (event_queue=0x%X)\n",
             id, g->cause, g->exit_status, g->event_queue_id);
     fflush(stderr);
     ctx->gpr[3] = 0;
@@ -1300,7 +1300,7 @@ static int64_t sys_spu_thread_group_destroy_handler(ppu_context* ctx)
      * destroy so the group + threads survive, to see whether libsre then proceeds
      * (group_start) or just re-asserts. Logs the caller for diagnosis. */
     if (getenv("YDKJ_KEEPGROUP") && id == 0x1000) {
-        fprintf(stderr, "[SPU] group_destroy id=0x%X SKIPPED (YDKJ_KEEPGROUP) caller_lr=0x%08X cia=0x%08X r1=0x%08X r2=0x%08X\n",
+        ps3_log("[SPU] group_destroy id=0x%X SKIPPED (YDKJ_KEEPGROUP) caller_lr=0x%08X cia=0x%08X r1=0x%08X r2=0x%08X\n",
                 id, (uint32_t)ctx->lr, (uint32_t)ctx->cia, (uint32_t)ctx->gpr[1], (uint32_t)ctx->gpr[2]);
         { extern void ppu_dump_guest_stack(ppu_context*, const char*); ppu_dump_guest_stack(ctx, "group_destroy-caller"); }
         fflush(stderr);
@@ -1326,7 +1326,7 @@ static int64_t sys_spu_thread_group_destroy_handler(ppu_context* ctx)
         }
         g->in_use = 0;
     }
-    fprintf(stderr, "[SPU] group_destroy id=0x%X  caller_lr=0x%08X cia=0x%08X r3..r6=%08X %08X %08X %08X\n",
+    ps3_log("[SPU] group_destroy id=0x%X  caller_lr=0x%08X cia=0x%08X r3..r6=%08X %08X %08X %08X\n",
             id, (uint32_t)ctx->lr, (uint32_t)ctx->cia,
             (uint32_t)ctx->gpr[3], (uint32_t)ctx->gpr[4],
             (uint32_t)ctx->gpr[5], (uint32_t)ctx->gpr[6]);
@@ -1346,7 +1346,7 @@ static int64_t sys_spu_thread_group_terminate_handler(ppu_context* ctx)
         g->cause = SPU_GROUP_CAUSE_TERMINATED;
         g->exit_status = status;
     }
-    fprintf(stderr, "[SPU] group_terminate id=0x%X status=%d\n", id, status);
+    ps3_log("[SPU] group_terminate id=0x%X status=%d\n", id, status);
     fflush(stderr);
     ctx->gpr[3] = 0;
     return 0;
@@ -1396,7 +1396,7 @@ static int64_t sys_spu_thread_set_argument_handler(ppu_context* ctx)
         }
     }
 
-    fprintf(stderr, "[SPU] thread_set_argument tid=0x%X arg=0x%08X\n",
+    ps3_log("[SPU] thread_set_argument tid=0x%X arg=0x%08X\n",
             tid, arg_ea);
     fflush(stderr);
     ctx->gpr[3] = 0;
@@ -1433,6 +1433,19 @@ static int64_t sys_spu_thread_write_spu_mb_handler(ppu_context* ctx)
 
     spu_thread_t* t = spu_find_thread(tid);
     if (!t) {
+        if (tid > s_spu_next_thread_id)
+        {
+            /* Not a thread id at all. Either the guest is confused or -- far
+                         * more likely -- one of our own HLE layers passed the wrong kind
+                         * of handle. cellSpurs did exactly this for months, passing a
+                         * CellSpursJobChain*. Be loud; this is a bug on our side. */
+            ps3_log("[SPU] write_spu_mb: 0x%08X is not an SPU thread id "
+                "(never issued) -- caller bug\n", tid);
+            assert(0 && "write_spu_mb with a non-thread handle");
+            ctx->gpr[3] = (uint32_t)CELL_ESRCH;
+            return CELL_ESRCH;
+        }
+
         /* Not the guest's error -- ours. Our SPU threads are not resident:
          * a group whose work runs on the interpreter reports "1 ran
          * synchronously" and is gone by the time the PPU writes to it, so a
@@ -1453,10 +1466,9 @@ static int64_t sys_spu_thread_write_spu_mb_handler(ppu_context* ctx)
          * to its thread; this is the floor until one of those exists. */
         static int warned = 0;
         if (warned++ < 8) {
-            fprintf(stderr, "[SPU] write_spu_mb: thread 0x%X not found -- "
+            ps3_log("[SPU] write_spu_mb: thread 0x%X not found -- "
                             "dropping the word and reporting CELL_OK, as the "
                             "unimplemented stub did\n", tid);
-            fflush(stderr);
         }
         ctx->gpr[3] = CELL_OK;
         return CELL_OK;
@@ -1511,7 +1523,7 @@ static int64_t sys_spu_thread_write_spu_mb_handler(ppu_context* ctx)
             if (spu_channel_has_data(&c->ch_in_mbox)) {
                 static int _n = 0;
                 if (_n++ < 8)
-                    fprintf(stderr, "[SPU] write_spu_mb tid=0x%X val=0x%08X -> BUSY after "
+                    ps3_log("[SPU] write_spu_mb tid=0x%X val=0x%08X -> BUSY after "
                             "%d ms (mailbox still holds 0x%08X)\n",
                             tid, val, waited, c->ch_in_mbox.value);
                 ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)CELL_EBUSY;
@@ -1519,13 +1531,13 @@ static int64_t sys_spu_thread_write_spu_mb_handler(ppu_context* ctx)
             }
             { static int _n = 0;
               if (_n++ < 8)
-                  fprintf(stderr, "[SPU] write_spu_mb tid=0x%X: waited %d ms for the "
+                  ps3_log("[SPU] write_spu_mb tid=0x%X: waited %d ms for the "
                           "mailbox to drain\n", tid, waited); }
         }
 
         { static int _n = 0;
           if (_n++ < 32)
-              fprintf(stderr, "[SPU] write_spu_mb tid=0x%X val=0x%08X -> live worker\n",
+              ps3_log("[SPU] write_spu_mb tid=0x%X val=0x%08X -> live worker\n",
                       tid, val); }
         spu_channel_write(&c->ch_in_mbox, val);
         spu_ch_wake(c);
@@ -1536,7 +1548,7 @@ static int64_t sys_spu_thread_write_spu_mb_handler(ppu_context* ctx)
     /* Fallback: no run in flight (the worker finished). Queue the word and
      * re-run it from its entry with the value pre-loaded. */
     t->pending_inmbox = val;
-    fprintf(stderr, "[SPU] write_spu_mb tid=0x%X val=0x%08X%s\n", tid, val,
+    ps3_log("[SPU] write_spu_mb tid=0x%X val=0x%08X%s\n", tid, val,
             t->fb_handler ? " -> re-running worker" : " (no fallback: queued only)");
     fflush(stderr);
 
@@ -1564,7 +1576,7 @@ static int64_t sys_spu_thread_group_connect_event_handler(ppu_context* ctx)
         return -1;
     }
     g->event_queue_id = queue_id;
-    fprintf(stderr, "[SPU] group_connect_event group=0x%X queue=0x%X\n",
+    ps3_log("[SPU] group_connect_event group=0x%X queue=0x%X\n",
             group_id, queue_id);
     fflush(stderr);
     ctx->gpr[3] = 0;
@@ -1609,7 +1621,7 @@ static int spu_deliver_user_event(spu_context* spu, uint32_t value)
     extern uint32_t spurs_port_queue(uint32_t port);
     if (!spu->spu_group_id && (code >= 128 || !spurs_port_queue(code & 63))) {
         if (code < 128) { static int n; if (n++ < 16)
-            fprintf(stderr, "[spu-evt] SPURS user event on unbound port %u dropped (img=%d value=0x%08X)\n",
+            ps3_log("[spu-evt] SPURS user event on unbound port %u dropped (img=%d value=0x%08X)\n",
                     code & 63, spu->image_id, value); }
         return 0;
     }
@@ -1660,7 +1672,7 @@ static int64_t sys_spu_thread_group_disconnect_event_handler(ppu_context* ctx)
     uint32_t group_id = (uint32_t)ctx->gpr[3];
     spu_group_t* g = spu_find_group(group_id);
     if (g) g->event_queue_id = 0;
-    fprintf(stderr, "[SPU] group_disconnect_event group=0x%X\n", group_id);
+    ps3_log("[SPU] group_disconnect_event group=0x%X\n", group_id);
     fflush(stderr);
     ctx->gpr[3] = 0;
     return 0;
@@ -1687,7 +1699,7 @@ static int64_t sys_spu_thread_connect_event_handler(ppu_context* ctx)
         if (slot < 0 && t->evt_bind_n < 8) slot = t->evt_bind_n++;
         if (slot >= 0) { t->evt_bind[slot].spup = spup; t->evt_bind[slot].queue = eq; }
     }
-    fprintf(stderr, "[SPU] thread_connect_event tid=0x%X queue=0x%X et=0x%X spup=0x%X%s\n",
+    ps3_log("[SPU] thread_connect_event tid=0x%X queue=0x%X et=0x%X spup=0x%X%s\n",
             tid, eq, et, (uint32_t)ctx->gpr[6], t ? "" : " (thread not found)");
     fflush(stderr);
     ctx->gpr[3] = 0;
@@ -1724,7 +1736,7 @@ static void ydkj_spu_out_mbox_deliver(uint32_t group_id, uint32_t spu_id,
     if (!q && t && t->connected_queue) q = t->connected_queue;
     if (!q) { spu_group_t* g = spu_find_group(group_id); if (g) q = g->event_queue_id; }
     { static int s_d = 0; if (getenv("SPU_MBOXTRACE") && s_d++ < 64)
-        fprintf(stderr, "[SPU->PPU] deliver? spu=0x%X intr=%d val=0x%08X q=%u (thread %s)\n",
+        ps3_log("[SPU->PPU] deliver? spu=0x%X intr=%d val=0x%08X q=%u (thread %s)\n",
                 spu_id, is_intr, value, q, t ? "found" : "MISSING"); }
     if (!q) return;
     /* SPURS SPU-event source convention: high word tags it as an SPU thread
@@ -1733,7 +1745,7 @@ static void ydkj_spu_out_mbox_deliver(uint32_t group_id, uint32_t spu_id,
         ((uint64_t)spu_id << 32) | (is_intr ? 0x2u : 0x1u),
         (uint64_t)value, 0, 0);
     { static int s_w = 0; if (s_w++ < 32)
-        fprintf(stderr, "[SPU->PPU] mbox deliver spu=0x%X intr=%d val=0x%08X -> q=%u\n",
+        ps3_log("[SPU->PPU] mbox deliver spu=0x%X intr=%d val=0x%08X -> q=%u\n",
                 spu_id, is_intr, value, q); }
 }
 
@@ -1812,7 +1824,7 @@ static int64_t sys_spu_thread_read_ls_handler(ppu_context* ctx)
       if (s_t && n++ < 12)
           { extern void ppu_guest_caller(char*, size_t);
             char who[64]; ppu_guest_caller(who, sizeof who);
-            fprintf(stderr, "[spu-readls] tid=0x%08X off=0x%05X size=%u from %s\n",
+            ps3_log("[spu-readls] tid=0x%08X off=0x%05X size=%u from %s\n",
                     tid, ls_offset, type, who); } }
     /* A SPURS job chain is polled by its CHAIN HANDLE, not an lv2 thread id.
      * This is the SPU PRINTF service: it reads a pointer from local store and
@@ -1831,7 +1843,7 @@ static int64_t sys_spu_thread_read_ls_handler(ppu_context* ctx)
           { static int s_t = -1; if (s_t < 0) s_t = getenv("SPU_LSREAD_TRACE") ? 1 : 0;
             static int n = 0;
             if (s_t && n++ < 8)
-                fprintf(stderr, "[spu-readls] chain 0x%08X off=0x%05X -> 0x%llX\n",
+                ps3_log("[spu-readls] chain 0x%08X off=0x%05X -> 0x%llX\n",
                         tid, ls_offset, (unsigned long long)v); }
           ctx->gpr[3] = 0;
           return 0;
@@ -1949,7 +1961,7 @@ static int64_t sys_spu_image_import_handler(ppu_context* ctx)
     const uint8_t* e = vm_base + src_ea;
     if (!(e[0] == 0x7F && e[1] == 'E' && e[2] == 'L' && e[3] == 'F')) {
         memset(vm_base + img_ea, 0, 16);
-        fprintf(stderr, "[SPU] image_import img=0x%08X src=0x%08X -- not an ELF\n", img_ea, src_ea);
+        ps3_log("[SPU] image_import img=0x%08X src=0x%08X -- not an ELF\n", img_ea, src_ea);
         fflush(stderr);
         ctx->gpr[3] = (uint64_t)(int64_t)-8;   /* ENOEXEC */
         return -8;
@@ -2011,7 +2023,7 @@ static int64_t sys_spu_image_import_handler(ppu_context* ctx)
     vm_write_be32(img_ea + 0x08, nsegs ? segs_ea : 0);  /* segs (guest EA) */
     vm_write_be32(img_ea + 0x0C, (uint32_t)nsegs);
 
-    fprintf(stderr, "[SPU] image_import img=0x%08X src=0x%08X -> entry=0x%05X nsegs=%d\n",
+    ps3_log("[SPU] image_import img=0x%08X src=0x%08X -> entry=0x%05X nsegs=%d\n",
             img_ea, src_ea, entry, nsegs);
     /* SPU_DUMP_IMPORT=<dir>: save each unique imported ELF (FMOD's runtime-
      * materialized SPU overlay plugins) so they can be lifted + registered.
@@ -2037,7 +2049,7 @@ static int64_t sys_spu_image_import_handler(ppu_context* ctx)
               snprintf(path, sizeof path, "%s/import_%08X.elf", dd, src_ea);
               FILE* fo = fopen(path, "wb");
               if (fo) { fwrite(vm_base + src_ea, 1, ext, fo); fclose(fo);
-                        fprintf(stderr, "[SPU] import dumped: %s (%u bytes)\n", path, ext); }
+                        ps3_log("[SPU] import dumped: %s (%u bytes)\n", path, ext); }
           }
       } }
 #ifdef _WIN32
@@ -2061,7 +2073,7 @@ static int64_t sys_spu_image_import_handler(ppu_context* ctx)
               }
               if (bg && (t - bh) < 0x14000) p += snprintf(ln + p, sizeof(ln) - p, " %08X", bg);
           }
-          fprintf(stderr, "%s\n", ln);
+          ps3_log("%s\n", ln);
       } }
 #endif
     fflush(stderr);
@@ -2093,7 +2105,7 @@ static int64_t sys_spu_image_open_handler(ppu_context* ctx)
     }
 
     if (!path_ea || !vm_base) {
-        fprintf(stderr, "[SPU] image_open img=0x%08X path=NULL — empty image\n", img_ea);
+        ps3_log("[SPU] image_open img=0x%08X path=NULL — empty image\n", img_ea);
         fflush(stderr);
         ctx->gpr[3] = 0;
         return 0;
@@ -2105,7 +2117,7 @@ static int64_t sys_spu_image_open_handler(ppu_context* ctx)
 
     FILE* f = fopen(host_path, "rb");
     if (!f) {
-        fprintf(stderr, "[SPU] image_open img=0x%08X path='%s' (host: %s) — open failed\n",
+        ps3_log("[SPU] image_open img=0x%08X path='%s' (host: %s) — open failed\n",
                 img_ea, ps3_path, host_path);
         fflush(stderr);
         /* Sony returns CELL_ENOENT for missing SPU images. Games often
@@ -2139,7 +2151,7 @@ static int64_t sys_spu_image_open_handler(ppu_context* ctx)
     long fsz = (fseek(f, 0, SEEK_END) == 0) ? ftell(f) : -1;
     if (fsz <= 0 || fsz > (long)SPU_IMAGE_STAGE_MAX || fseek(f, 0, SEEK_SET) != 0) {
         fclose(f);
-        fprintf(stderr, "[SPU] image_open img=0x%08X path='%s' — implausible size %ld\n",
+        ps3_log("[SPU] image_open img=0x%08X path='%s' — implausible size %ld\n",
                 img_ea, ps3_path, fsz);
         fflush(stderr);
         ctx->gpr[3] = 0;
@@ -2162,7 +2174,7 @@ static int64_t sys_spu_image_open_handler(ppu_context* ctx)
     size_t got = buf ? fread(buf, 1, (size_t)fsz, f) : 0;
     fclose(f);
     if (got != (size_t)fsz) {
-        fprintf(stderr, "[SPU] image_open img=0x%08X path='%s' — short read "
+        ps3_log("[SPU] image_open img=0x%08X path='%s' — short read "
                         "(%zu of %ld)\n", img_ea, ps3_path, got, fsz);
         fflush(stderr);
         free(buf);
@@ -2173,7 +2185,7 @@ static int64_t sys_spu_image_open_handler(ppu_context* ctx)
     free(buf);
     s_spu_img_bump += ((uint32_t)fsz + 0x7F) & ~0x7Fu;          /* keep it aligned */
 
-    fprintf(stderr, "[SPU] image_open img=0x%08X path='%s' staged %ld bytes at "
+    ps3_log("[SPU] image_open img=0x%08X path='%s' staged %ld bytes at "
                     "0x%08X\n", img_ea, ps3_path, fsz, staged_ea);
     fflush(stderr);
 
@@ -2323,7 +2335,7 @@ static int64_t sys_spu_thread_write_snr_handler(ppu_context* ctx)
         extern void spu_ch_wake(spu_context*);
         spu_ch_wake(t->sctx);
         { static int n = 0; if (n < 12) { n++;
-            fprintf(stderr, "[SPU] write_snr tid=0x%X snr%u <- 0x%08X (%s)\n",
+            ps3_log("[SPU] write_snr tid=0x%X snr%u <- 0x%08X (%s)\n",
                     tid, num + 1, val, or_mode ? "OR" : "overwrite");
             fflush(stderr); } }
     }
@@ -2599,7 +2611,7 @@ int lv2_try_syscall(ppu_context* ctx)
           uint64_t k = ((uint64_t)num << 32) | (uint32_t)ctx->gpr[3];
           int f = 0; for (int i = 0; i < ns; i++) if (seen[i] == k) f = 1;
           if (!f && ns < 64) { seen[ns++] = k;
-              fprintf(stderr, "[lv2err] syscall %u(r3=0x%08X r4=0x%08X r5=0x%08X)"
+              ps3_log("[lv2err] syscall %u(r3=0x%08X r4=0x%08X r5=0x%08X)"
                               " -> 0x%08X lr=0x%08X%c",
                       num, _a3, _a4, _a5, (uint32_t)ctx->gpr[3], (uint32_t)ctx->lr, 10); } } }
     return 1;

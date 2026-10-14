@@ -7,6 +7,7 @@
 #include "cellGame.h"
 #include "../../runtime/ppu/ppu_memory.h"   /* vm_base, vm_write32 (guest mem) */
 #include "ps3emu/guest_call.h"              /* g_ps3_guest_caller (funcStat dispatch) */
+#include "ps3emu/logging.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -79,7 +80,7 @@ static const char* content_root(void)
              * directory over, with each side quietly making its own tree. */
             snprintf(s_content_path, sizeof s_content_path, "%s/game", ppu_vfs_root);
         for (char* q = s_content_path; *q; q++) if (*q == 0x5C) *q = 0x2F;
-        printf("[cellGame] content root (host /dev_hdd0/game): %s\n", s_content_path);
+        ps3_log("[cellGame] content root (host /dev_hdd0/game): %s\n", s_content_path);
     }
     return s_content_path;
 }
@@ -290,9 +291,9 @@ void cellGame_init_from_paramsfo(const char* sfo_path)
     if (sfo_read_string(sfo_path, "TITLE_ID", tmp, sizeof(tmp)) == 0 && tmp[0]) {
         strncpy(s_title_id, tmp, sizeof(s_title_id) - 1);
         s_title_id[sizeof(s_title_id) - 1] = '\0';
-        printf("[cellGame] title id from PARAM.SFO ('%s'): '%s'\n", sfo_path, s_title_id);
+        ps3_log("[cellGame] title id from PARAM.SFO ('%s'): '%s'\n", sfo_path, s_title_id);
     } else {
-        printf("[cellGame] PARAM.SFO not read ('%s'); keeping title id '%s'\n",
+        ps3_log("[cellGame] PARAM.SFO not read ('%s'); keeping title id '%s'\n",
                sfo_path, s_title_id);
     }
     if (sfo_read_string(sfo_path, "TITLE", tmp, sizeof(tmp)) == 0 && tmp[0]) {
@@ -316,7 +317,7 @@ const char* cellGame_get_title_id(void) { return s_title_id; }
 s32 cellGameBootCheck(u32* type, u32* attributes, CellGameContentSize* size,
                        char* dirName)
 {
-    printf("[cellGame] BootCheck()\n");
+    ps3_log("[cellGame] BootCheck()\n");
 
     /* Build paths based on title ID */
     snprintf(s_content_info_path, sizeof(s_content_info_path),
@@ -363,13 +364,13 @@ s32 cellGameBootCheck(u32* type, u32* attributes, CellGameContentSize* size,
     s_check_is_disc = (s_game_type == CELL_GAME_GAMETYPE_DISC);
     strncpy(s_check_dir, s_title_id, sizeof(s_check_dir) - 1);
     s_check_dir[sizeof(s_check_dir) - 1] = '\0';
-    printf("[cellGame] BootCheck: type=%u, titleId='%s'\n", s_game_type, s_title_id);
+    ps3_log("[cellGame] BootCheck: type=%u, titleId='%s'\n", s_game_type, s_title_id);
     return CELL_OK;
 }
 
 s32 cellGameContentPermit(char* contentInfoPath, char* usrdirPath)
 {
-    printf("[cellGame] ContentPermit() -> %s\n",
+    ps3_log("[cellGame] ContentPermit() -> %s\n",
            s_check_is_disc ? "/dev_bdvd/PS3_GAME" : "game-data dir");
 
     if (!s_check_is_disc) {
@@ -419,7 +420,7 @@ s32 cellGameDataCheck(u32 type, const char* dirName, CellGameContentSize* size)
      * 0x94AEA0 = the guest EA of its dir string). */
     uint32_t dir_ea = (uint32_t)(uintptr_t)dirName;   /* guest addr */
     const char* check_dir = dir_ea ? (const char*)(vm_base + dir_ea) : s_title_id;
-    printf("[cellGame] DataCheck(type=%u, dir='%s')\n", type, check_dir);
+    ps3_log("[cellGame] DataCheck(type=%u, dir='%s')\n", type, check_dir);
 
     /* Open a check session for this content; the next ContentPermit reports
      * its paths (disc -> /dev_bdvd/PS3_GAME, else the game-data dir). */
@@ -484,7 +485,7 @@ static s32 gamedata_stat_callback(const char* tag, u32 version, uint32_t dir_ea,
                                   uint32_t func_opd, uint32_t is_new_data)
 {
     const char* dir = dir_ea ? (const char*)(vm_base + dir_ea) : "";
-    printf("[cellGame] %s(version=%u dir='%s' funcStat=0x%08X)\n",
+    ps3_log("[cellGame] %s(version=%u dir='%s' funcStat=0x%08X)\n",
            tag, version, dir, func_opd);
 
     if (!g_ps3_guest_caller)
@@ -515,7 +516,7 @@ static s32 gamedata_stat_callback(const char* tag, u32 version, uint32_t dir_ea,
     g_ps3_guest_caller(func_opd, cb, get, set, 0, 0, 0, 0, 0);
 
     s32 result = (s32)vm_read32(cb + 0x000);
-    printf("[cellGame] %s: funcStat returned result=%d\n", tag, result);
+    ps3_log("[cellGame] %s: funcStat returned result=%d\n", tag, result);
     return result;
 }
 
@@ -550,7 +551,7 @@ s32 cellGameDataCheckCreate2(u32 version, const char* dirName, u32 errDialog,
 s32 cellGameDataCheckCreate(u32 version, const char* dirName, u32 errDialog,
                             void* funcStat, u32 container)
 {
-    printf("[cellGame] DataCheckCreate -> Create2%c", 10);
+    ps3_log("[cellGame] DataCheckCreate -> Create2%c", 10);
     return cellGameDataCheckCreate2(version, dirName, errDialog, funcStat, container);
 }
 
@@ -606,7 +607,9 @@ s32 cellGameSetParamString(s32 id, const char* buf)
     char*  dst;
     size_t cap;
     if (id >= CELL_GAME_PARAMID_TITLE && id <= CELL_GAME_PARAMID_TITLE_TURKISH) {
-        dst = s_title;      cap = sizeof s_title;      /* localised TITLE_## all land here */
+        /* localised TITLE_## all land here */
+        dst = s_title;      
+        cap = sizeof(s_title);      
     } else {
         switch (id) {
         case CELL_GAME_PARAMID_TITLE_ID:       dst = s_title_id;   cap = sizeof s_title_id;   break;
@@ -614,19 +617,19 @@ s32 cellGameSetParamString(s32 id, const char* buf)
         case CELL_GAME_PARAMID_PS3_SYSTEM_VER: dst = s_system_ver; cap = sizeof s_system_ver; break;
         case CELL_GAME_PARAMID_APP_VER:        dst = s_app_ver;    cap = sizeof s_app_ver;    break;
         default:
-            printf("[cellGame] SetParamString: unknown param id %d (ignored)\n", id);
+            ps3_log("[cellGame] SetParamString: unknown param id %d (ignored)\n", id);
             return CELL_OK;
         }
     }
     strncpy(dst, src, cap - 1);
     dst[cap - 1] = '\0';
-    printf("[cellGame] SetParamString(id=%d) = \"%s\"\n", id, dst);
+    ps3_log("[cellGame] SetParamString(id=%d) = \"%s\"\n", id, dst);
     return CELL_OK;
 }
 
 s32 cellGameGetParamInt(s32 id, s32* value)
 {
-    printf("[cellGame] GetParamInt(id=%d)\n", id);
+    ps3_log("[cellGame] GetParamInt(id=%d)\n", id);
 
     /* `value` is a GUEST address; write big-endian via vm_write32. */
     uint32_t value_ea = (uint32_t)(uintptr_t)value;
@@ -641,7 +644,7 @@ s32 cellGameGetParamInt(s32 id, s32* value)
         v = 0;
         break;
     default:
-        printf("[cellGame] WARNING: unknown param int id %d\n", id);
+        ps3_log("[cellGame] WARNING: unknown param int id %d\n", id);
         v = 0;
         break;
     }
@@ -652,7 +655,7 @@ s32 cellGameGetParamInt(s32 id, s32* value)
 
 s32 cellGameGetParamString(s32 id, char* buf, u32 bufsize)
 {
-    printf("[cellGame] GetParamString(id=%d, bufsize=%u)\n", id, bufsize);
+    ps3_log("[cellGame] GetParamString(id=%d, bufsize=%u)\n", id, bufsize);
 
     /* `buf` is a GUEST address (raw r4); translate through vm_base. Strings are
      * byte data, so no byte-swap -- just write into the guest buffer. A raw
@@ -673,7 +676,7 @@ s32 cellGameGetParamString(s32 id, char* buf, u32 bufsize)
         case CELL_GAME_PARAMID_PS3_SYSTEM_VER: src = s_system_ver; break;
         case CELL_GAME_PARAMID_APP_VER:        src = s_app_ver;    break;
         default:
-            printf("[cellGame] WARNING: unknown param string id %d\n", id);
+            ps3_log("[cellGame] WARNING: unknown param string id %d\n", id);
             src = "";
             break;
         }
@@ -686,7 +689,7 @@ s32 cellGameGetParamString(s32 id, char* buf, u32 bufsize)
 s32 cellGameCreateGameData(CellGameSetInitParams* init, char* tmp_contentInfoPath,
                             char* tmp_usrdirPath)
 {
-    printf("[cellGame] CreateGameData()\n");
+    ps3_log("[cellGame] CreateGameData()\n");
 
     uint32_t init_ea = (uint32_t)(uintptr_t)init;   /* guest addrs */
     if (!init_ea)
@@ -735,14 +738,14 @@ s32 cellGameCreateGameData(CellGameSetInitParams* init, char* tmp_contentInfoPat
 
 s32 cellGameDeleteGameData(const char* dirName)
 {
-    printf("[cellGame] DeleteGameData(dir='%s')\n", dirName ? dirName : "<null>");
+    ps3_log("[cellGame] DeleteGameData(dir='%s')\n", dirName ? dirName : "<null>");
 
     if (!dirName)
         return CELL_GAME_ERROR_PARAM;
 
     /* We won't recursively delete host directories for safety.
        Just report success. The game should handle this gracefully. */
-    printf("[cellGame] WARNING: DeleteGameData not performing recursive delete for safety\n");
+    ps3_log("[cellGame] WARNING: DeleteGameData not performing recursive delete for safety\n");
     return CELL_OK;
 }
 
@@ -751,7 +754,7 @@ s32 cellGameDeleteGameData(const char* dirName)
 
 s32 cellGameGetSizeKB(s32* sizeKB)
 {
-    printf("[cellGame] GetSizeKB()\n");
+    ps3_log("[cellGame] GetSizeKB()\n");
 
     uint32_t sizeKB_ea = (uint32_t)(uintptr_t)sizeKB;
     if (!sizeKB_ea)
@@ -764,7 +767,7 @@ s32 cellGameGetSizeKB(s32* sizeKB)
 
 s32 cellGameGetLocalWebContentPath(char* path)
 {
-    printf("[cellGame] GetLocalWebContentPath()\n");
+    ps3_log("[cellGame] GetLocalWebContentPath()\n");
 
     if (!path)
         return CELL_GAME_ERROR_PARAM;
@@ -806,11 +809,10 @@ s32 cellGameContentErrorDialog(s32 type, s32 errNeedSizeKB, const char* dirName)
         default:  what = "<unknown type>";            break;
     }
 
-    printf("[cellGame] *** ContentErrorDialog: %s (type=%d) dir='%s' needSizeKB=%d\n",
+    ps3_print("[cellGame] *** ContentErrorDialog: %s (type=%d) dir='%s' needSizeKB=%d\n",
            what, type, dir, errNeedSizeKB);
     if (type >= 100)
-        printf("[cellGame] *** this is an EXIT dialog -- the title quits after this\n");
-    fflush(stdout);
+        ps3_print("[cellGame] *** this is an EXIT dialog -- the title quits after this\n");
 
     return CELL_OK;
 }

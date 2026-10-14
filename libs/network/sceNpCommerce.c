@@ -40,7 +40,7 @@ s32 sceNpCommerce2DoCheckoutStartAsync(SceNpCommerce2Ctx ctx,
                                          const char* productId)
 {
     (void)ctx; (void)productId;
-    printf("[sceNpCommerce] DoCheckoutStartAsync()\n");
+    ps3_log("[sceNpCommerce] DoCheckoutStartAsync()\n");
     return (s32)SCE_NP_COMMERCE2_ERROR_NOT_CONNECTED;
 }
 

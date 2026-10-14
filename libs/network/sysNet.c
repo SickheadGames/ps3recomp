@@ -305,7 +305,7 @@ int32_t sys_net_bnet_socket(int32_t domain, int32_t type, int32_t protocol)
     }
     s_sockets[slot].p2p = (type == SYS_NET_SOCK_DGRAM_P2P || type == SYS_NET_SOCK_STREAM_P2P);
     s_sockets[slot].stream = (host_type == SOCK_STREAM);
-    printf("[sys_net] socket(%d, %d, %d) -> %d\n", domain, type, protocol, slot);
+    ps3_log("[sys_net] socket(%d, %d, %d) -> %d\n", domain, type, protocol, slot);
     return slot;
 }
 
@@ -422,7 +422,7 @@ int32_t sys_net_bnet_bind(int32_t s, const sys_net_sockaddr* addr, uint32_t addr
             return host_fail();
     }
     char ip[16];
-    printf("[sys_net] bind(%d, %s:%u%s)\n", s, ip_str(&a.sin_addr, ip), ntohs(a.sin_port),
+    ps3_log("[sys_net] bind(%d, %s:%u%s)\n", s, ip_str(&a.sin_addr, ip), ntohs(a.sin_port),
            s_sockets[s].p2p ? ", p2p" : "");
     if (s_sockets[s].p2p && !s_sockets[s].stream && s_p2p_dgram < 0) {
         s_p2p_dgram = s;
@@ -437,7 +437,7 @@ int32_t sys_net_bnet_listen(int32_t s, int32_t backlog)
     if (listen(s_sockets[s].host_fd, backlog) == HOST_SOCKET_ERROR) return host_fail();
     s_sockets[s].listening = 1;
     if (s_sockets[s].p2p) np_psnr_set_stream_sink(relayed_stream);
-    printf("[sys_net] listen(%d)\n", s);
+    ps3_log("[sys_net] listen(%d)\n", s);
     return 0;
 }
 
@@ -493,7 +493,7 @@ int32_t sys_net_bnet_accept(int32_t s, sys_net_sockaddr* addr, uint32_t* addrlen
     }
     s_sockets[slot].p2p = s_sockets[s].p2p;
     s_sockets[slot].stream = 1;
-    if (net_trace()) printf("[sys_net] accept(%d) -> %d\n", s, slot);
+    if (net_trace()) ps3_log("[sys_net] accept(%d) -> %d\n", s, slot);
     s_sockets[slot].vport = s_sockets[s].vport;
     write_sockaddr(EA(addr), EA(addrlen), &a);
     /* The mirror of connect: titles name a stream peer by the P2P port in
@@ -520,7 +520,7 @@ int32_t sys_net_bnet_connect(int32_t s, const sys_net_sockaddr* addr, uint32_t a
     }
 
     char ip[16];
-    printf("[sys_net] connect(%d, %s:%u)\n", s, ip_str(&a.sin_addr, ip), ntohs(a.sin_port));
+    ps3_log("[sys_net] connect(%d, %s:%u)\n", s, ip_str(&a.sin_addr, ip), ntohs(a.sin_port));
     if (s_sockets[s].p2p && s_sockets[s].stream) {
         /* A peer that can't take a direct connection (behind its router):
          * the stream goes through psnr's relay, and its socket replaces
@@ -539,7 +539,7 @@ int32_t sys_net_bnet_connect(int32_t s, const sys_net_sockaddr* addr, uint32_t a
         if (WSAGetLastError() == WSAEWOULDBLOCK) return fail(SYS_NET_EINPROGRESS);
 #endif
         int32_t r = host_fail();
-        if (net_trace()) printf("[sys_net] connect(%d) failed, errno %d\n", s, s_errno);
+        if (net_trace()) ps3_log("[sys_net] connect(%d) failed, errno %d\n", s, s_errno);
         return r;
     }
     return 0;
@@ -596,7 +596,7 @@ static void trace(const char* op, int32_t s, int n, const struct sockaddr_in* a)
     hh = (unsigned)tm.tm_hour; mm = (unsigned)tm.tm_min; ss = (unsigned)tm.tm_sec;
     ms = (unsigned)(tv.tv_usec / 1000);
 #endif
-    printf("[sys_net %02u:%02u:%02u.%03u] %s(%d) %s:%u -> %d (host error %d)\n", hh, mm, ss, ms,
+    ps3_log("[sys_net %02u:%02u:%02u.%03u] %s(%d) %s:%u -> %d (host error %d)\n", hh, mm, ss, ms,
            op, s, ip, a ? ntohs(a->sin_port) : 0, n, err);
 }
 
@@ -727,7 +727,7 @@ int32_t sys_net_bnet_setsockopt(int32_t s, int32_t level, int32_t optname,
             case SYS_NET_SO_USESIGNATURE:
                 break;
             default:
-                printf("[sys_net] setsockopt(%d, SOL_SOCKET, 0x%X) ignored\n", s, (unsigned)optname);
+                ps3_log("[sys_net] setsockopt(%d, SOL_SOCKET, 0x%X) ignored\n", s, (unsigned)optname);
                 break;
         }
     } else if (level == SYS_NET_IPPROTO_TCP && optname == SYS_NET_TCP_NODELAY) {
@@ -735,7 +735,7 @@ int32_t sys_net_bnet_setsockopt(int32_t s, int32_t level, int32_t optname,
     } else {
         /* ponytail: IP-level options (TTL, TOS, multicast) are accepted and
          * dropped; map them when a title's traffic depends on one. */
-        printf("[sys_net] setsockopt(%d, level %d, 0x%X) ignored\n", s, level, (unsigned)optname);
+        ps3_log("[sys_net] setsockopt(%d, level %d, 0x%X) ignored\n", s, level, (unsigned)optname);
     }
     return ret == HOST_SOCKET_ERROR ? host_fail() : 0;
 }
@@ -921,7 +921,7 @@ int32_t sys_net_bnet_select(int32_t nfds, void* readfds, void* writefds,
     if (net_trace()) {
         static int last = -1;
         if (count != last || count) {   /* changes and every ready answer, not every empty poll */
-            printf("[sys_net] socketselect(nfds %d, %d fds asked) -> %d ready\n", nfds, n, count);
+            ps3_log("[sys_net] socketselect(nfds %d, %d fds asked) -> %d ready\n", nfds, n, count);
             last = count;
         }
     }
@@ -968,7 +968,7 @@ uint32_t sys_net_bnet_gethostbyname(const char* name)
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
     if (getaddrinfo(host, NULL, &hints, &res) != 0 || !res) {
-        printf("[sys_net] gethostbyname('%s') failed\n", host);
+        ps3_log("[sys_net] gethostbyname('%s') failed\n", host);
         if (scratch(&s_h_errno_ea, 4)) vm_write32(s_h_errno_ea, SYS_NET_HOST_NOT_FOUND);
         return 0;
     }
@@ -985,7 +985,7 @@ uint32_t sys_net_bnet_gethostbyname(const char* name)
     strncpy((char*)vm_ptr8(h + 64), host, HOSTENT_SCRATCH - 65);
 
     char ip[16];
-    printf("[sys_net] gethostbyname('%s') -> %s\n", host, ip_str(&sa->sin_addr, ip));
+    ps3_log("[sys_net] gethostbyname('%s') -> %s\n", host, ip_str(&sa->sin_addr, ip));
     freeaddrinfo(res);
     return h;
 }
@@ -1058,7 +1058,7 @@ void ps3_net_host_register(unsigned int (*guest_alloc)(unsigned int size, unsign
     net_startup();
     for (size_t i = 0; i < sizeof(tab) / sizeof(tab[0]); i++)
         ps3_hle_register_ctx(ps3_compute_nid(tab[i].name), tab[i].name, tab[i].fn);
-    printf("[sys_net] PS3_NET_ONLINE: host sockets registered (%u exports)\n",
+    ps3_log("[sys_net] PS3_NET_ONLINE: host sockets registered (%u exports)\n",
            (unsigned)(sizeof(tab) / sizeof(tab[0])));
 }
 

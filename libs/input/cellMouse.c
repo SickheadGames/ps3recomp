@@ -119,7 +119,7 @@ static void mouse_push_ring(MousePortState* ms)
 
 s32 cellMouseInit(u32 max_connect)
 {
-    printf("[cellMouse] Init(max_connect=%u)\n", max_connect);
+    ps3_log("[cellMouse] Init(max_connect=%u)\n", max_connect);
 
     if (s_mouse_initialized)
         return CELL_MOUSE_ERROR_ALREADY_INITIALIZED;
@@ -143,7 +143,7 @@ s32 cellMouseInit(u32 max_connect)
 
 s32 cellMouseEnd(void)
 {
-    printf("[cellMouse] End()\n");
+    ps3_log("[cellMouse] End()\n");
 
     if (!s_mouse_initialized)
         return CELL_MOUSE_ERROR_UNINITIALIZED;
@@ -310,7 +310,7 @@ s32 cellMouseGetInfo(u32 info_ea)
 
 s32 cellMouseSetTabletMode(u32 port_no, u32 mode)
 {
-    printf("[cellMouse] SetTabletMode(port=%u, mode=%u)\n", port_no, mode);
+    ps3_log("[cellMouse] SetTabletMode(port=%u, mode=%u)\n", port_no, mode);
 
     if (!s_mouse_initialized)
         return CELL_MOUSE_ERROR_UNINITIALIZED;

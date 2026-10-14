@@ -89,7 +89,7 @@ static void vdec_on_picture(void* ctx, const VdecFfPicture* pic)
 {
     VdecSlot* v = (VdecSlot*)ctx;
     if (v->qCount == VDEC_QUEUE) {
-        printf("[cellVdec] picture queue full; dropping the oldest\n");
+        ps3_log("[cellVdec] picture queue full; dropping the oldest\n");
         free(v->queue[v->qHead].yuv);
         v->qHead = (v->qHead + 1) % VDEC_QUEUE;
         v->qCount--;
@@ -160,7 +160,7 @@ s32 cellVdecOpen(const CellVdecType* type, const CellVdecResource* res,
     u32 cb_ea = (u32)(uintptr_t)cb;
 
     u32 codec_type = type ? vm_read32(GUEST_EA(type)) : 0;   /* codecType */
-    printf("[cellVdec] Open(codecType=%u)\n", codec_type);
+    ps3_log("[cellVdec] Open(codecType=%u)\n", codec_type);
 
     if (!type || !handle)
         return (s32)CELL_VDEC_ERROR_ARG;
@@ -174,9 +174,9 @@ s32 cellVdecOpen(const CellVdecType* type, const CellVdecResource* res,
             s_vdec[i].cbArg  = cb_ea ? vm_read32(cb_ea + 4) : 0;
             s_vdec[i].ff = vdec_ff_open(codec_type);
             vm_write32((u32)(uintptr_t)handle, (u32)i);
-            printf("[cellVdec] Open -> handle=%u\n", i);
+            ps3_log("[cellVdec] Open -> handle=%u\n", i);
             if (s_vdec[i].ff)
-                printf("[cellVdec] decoding with libavcodec\n");
+                ps3_log("[cellVdec] decoding with libavcodec\n");
             return CELL_OK;
         }
     }
@@ -185,7 +185,7 @@ s32 cellVdecOpen(const CellVdecType* type, const CellVdecResource* res,
 
 s32 cellVdecClose(CellVdecHandle handle)
 {
-    printf("[cellVdec] Close(handle=%u)\n", handle);
+    ps3_log("[cellVdec] Close(handle=%u)\n", handle);
 
     if (handle >= MAX_VDEC || !s_vdec[handle].in_use)
         return (s32)CELL_VDEC_ERROR_ARG;
@@ -201,7 +201,7 @@ s32 cellVdecClose(CellVdecHandle handle)
 
 s32 cellVdecStartSeq(CellVdecHandle handle)
 {
-    printf("[cellVdec] StartSeq(handle=%u)\n", handle);
+    ps3_log("[cellVdec] StartSeq(handle=%u)\n", handle);
 
     if (handle >= MAX_VDEC || !s_vdec[handle].in_use)
         return (s32)CELL_VDEC_ERROR_ARG;
@@ -217,7 +217,7 @@ s32 cellVdecStartSeq(CellVdecHandle handle)
 
 s32 cellVdecEndSeq(CellVdecHandle handle)
 {
-    printf("[cellVdec] EndSeq(handle=%u)\n", handle);
+    ps3_log("[cellVdec] EndSeq(handle=%u)\n", handle);
 
     if (handle >= MAX_VDEC || !s_vdec[handle].in_use)
         return (s32)CELL_VDEC_ERROR_ARG;
@@ -259,7 +259,7 @@ s32 cellVdecDecodeAu(CellVdecHandle handle, s32 mode, const CellVdecAuInfo* auIn
     au.dts       = vm_read64(au_ea + (u32)offsetof(CellVdecAuInfo, dts));
     au.userData  = vm_read64(au_ea + (u32)offsetof(CellVdecAuInfo, userData));
 
-    printf("[cellVdec] DecodeAu(handle=%u, addr=0x%X, size=%u, pts=%llu)\n",
+    ps3_log("[cellVdec] DecodeAu(handle=%u, addr=0x%X, size=%u, pts=%llu)\n",
            handle, au.startAddr, au.size,
            (unsigned long long)au.pts);
 
@@ -472,7 +472,7 @@ s32 cellVdecGetPictureExt(CellVdecHandle handle, const void* format,
 
 s32 cellVdecSetFrameRate(CellVdecHandle handle, u32 frameRateCode)
 {
-    printf("[cellVdec] SetFrameRate(handle=%u, code=%u)\n",
+    ps3_log("[cellVdec] SetFrameRate(handle=%u, code=%u)\n",
            handle, frameRateCode);
 
     if (handle >= MAX_VDEC || !s_vdec[handle].in_use)

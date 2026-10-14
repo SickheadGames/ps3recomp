@@ -139,7 +139,7 @@ s32 cellPamfReaderInitialize(CellPamfReader* reader, void* pamfAddr,
     reader = pamf_host(reader);
     (void)attribute;
 
-    printf("[cellPamf] ReaderInitialize(addr=%p, size=%u)\n", pamfAddr, pamfSize);
+    ps3_log("[cellPamf] ReaderInitialize(addr=%p, size=%u)\n", pamfAddr, pamfSize);
 
     if (!reader || !pamfAddr || pamfSize < PAMF_MIN_HEADER_SIZE)
         return (s32)CELL_PAMF_ERROR_INVALID_ARG;
@@ -150,7 +150,7 @@ s32 cellPamfReaderInitialize(CellPamfReader* reader, void* pamfAddr,
     /* Verify magic */
     u32 magic = be32(base + PAMF_OFF_MAGIC);
     if (magic != CELL_PAMF_MAGIC) {
-        printf("[cellPamf] Invalid PAMF magic: 0x%08X\n", magic);
+        ps3_log("[cellPamf] Invalid PAMF magic: 0x%08X\n", magic);
         return (s32)CELL_PAMF_ERROR_INVALID_HEADER;
     }
 
@@ -165,7 +165,7 @@ s32 cellPamfReaderInitialize(CellPamfReader* reader, void* pamfAddr,
 
     u32 muxRate = be32(base + PAMF_OFF_MUX_RATE);
 
-    printf("[cellPamf] PAMF v%08X: %u streams, dataOffset=0x%X, dataSize=%u, "
+    ps3_log("[cellPamf] PAMF v%08X: %u streams, dataOffset=0x%X, dataSize=%u, "
            "streamTableOff=0x%X, muxRate=%u\n",
            be32(base + PAMF_OFF_VERSION),
            reader->numStreams, reader->dataOffset, reader->dataSize,
@@ -177,7 +177,7 @@ s32 cellPamfReaderInitialize(CellPamfReader* reader, void* pamfAddr,
         u8 rawType = desc[0];
         u8 channel = desc[1];
         s32 sdkType = raw_type_to_sdk(rawType);
-        printf("[cellPamf]   stream[%u]: rawType=%u (sdk=%d) channel=%u\n",
+        ps3_log("[cellPamf]   stream[%u]: rawType=%u (sdk=%d) channel=%u\n",
                i, rawType, sdkType, channel);
     }
 
@@ -395,7 +395,7 @@ s32 cellPamfReaderGetStreamInfo(CellPamfReader* reader, void* info, u32 infoSize
             avc->frameCropTopOffset    = desc[20];
             avc->frameCropBottomOffset = desc[21];
 
-            printf("[cellPamf] AVC info: profile=%u level=%u %ux%u "
+            ps3_log("[cellPamf] AVC info: profile=%u level=%u %ux%u "
                    "frameRate=%u aspect=%u\n",
                    avc->profileIdc, avc->levelIdc,
                    avc->horizontalSize, avc->verticalSize,
@@ -410,7 +410,7 @@ s32 cellPamfReaderGetStreamInfo(CellPamfReader* reader, void* info, u32 infoSize
             at3->numberOfChannels  = audio_channels(desc[10]);
             at3->samplingFrequency = audio_sample_rate(desc[12]);
 
-            printf("[cellPamf] ATRAC3+ info: %u ch, %u Hz\n",
+            ps3_log("[cellPamf] ATRAC3+ info: %u ch, %u Hz\n",
                    at3->numberOfChannels, at3->samplingFrequency);
         }
         break;
@@ -423,7 +423,7 @@ s32 cellPamfReaderGetStreamInfo(CellPamfReader* reader, void* info, u32 infoSize
             lpcm->bitsPerSample     = lpcm_bits(desc[11]);
             lpcm->samplingFrequency = audio_sample_rate(desc[12]);
 
-            printf("[cellPamf] LPCM info: %u ch, %u Hz, %u bits\n",
+            ps3_log("[cellPamf] LPCM info: %u ch, %u Hz, %u bits\n",
                    lpcm->numberOfChannels, lpcm->samplingFrequency,
                    lpcm->bitsPerSample);
         }
@@ -436,7 +436,7 @@ s32 cellPamfReaderGetStreamInfo(CellPamfReader* reader, void* info, u32 infoSize
             ac3->numberOfChannels  = audio_channels(desc[10]);
             ac3->samplingFrequency = audio_sample_rate(desc[12]);
 
-            printf("[cellPamf] AC3 info: %u ch, %u Hz\n",
+            ps3_log("[cellPamf] AC3 info: %u ch, %u Hz\n",
                    ac3->numberOfChannels, ac3->samplingFrequency);
         }
         break;

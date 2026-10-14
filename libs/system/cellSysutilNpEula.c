@@ -10,7 +10,7 @@
 s32 cellSysutilNpEulaCheck(void* cb, void* arg)
 {
     (void)cb; (void)arg;
-    printf("[cellSysutilNpEula] EulaCheck() — returning accepted\n");
+    ps3_log("[cellSysutilNpEula] EulaCheck() — returning accepted\n");
     /* Return 1 = EULA already accepted */
     return 1;
 }

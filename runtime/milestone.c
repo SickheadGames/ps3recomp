@@ -15,6 +15,7 @@
 #include "ps3emu/milestone.h"
 
 #include "ps3emu/portable_builtins.h"
+#include "ps3emu/logging.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -113,7 +114,7 @@ static int ms_enabled(void)
                 atexit(ps3_ms_dump);
                 e = 1;
             } else {
-                fprintf(stderr, "[milestone] cannot open %s -- log disabled\n", path);
+                ps3_log("[milestone] cannot open %s -- log disabled\n", path);
             }
         }
         port_atomic_store32(&g_enabled, e);
@@ -158,7 +159,7 @@ static void ms_insert(const char* key, unsigned h)
 
     if (!g_full_warned) {
         g_full_warned = 1;
-        fprintf(stderr, "[milestone] table full at %u keys -- dropping this key "
+        ps3_log("[milestone] table full at %u keys -- dropping this key "
                         "and later ones; raise MS_CAP\n", MS_CAP);
     }
     ms_unlock();

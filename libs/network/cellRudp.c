@@ -27,7 +27,7 @@ static RudpCtx s_ctx[CELL_RUDP_CTX_MAX];
 s32 cellRudpInit(u32 maxContexts)
 {
     (void)maxContexts;
-    printf("[cellRudp] Init()\n");
+    ps3_log("[cellRudp] Init()\n");
     if (s_initialized)
         return (s32)CELL_RUDP_ERROR_ALREADY_INITIALIZED;
     memset(s_ctx, 0, sizeof(s_ctx));
@@ -37,7 +37,7 @@ s32 cellRudpInit(u32 maxContexts)
 
 s32 cellRudpEnd(void)
 {
-    printf("[cellRudp] End()\n");
+    ps3_log("[cellRudp] End()\n");
     s_initialized = 0;
     return CELL_OK;
 }
@@ -47,7 +47,7 @@ s32 cellRudpCreateContext(const CellRudpOption* option,
                             void* arg, CellRudpCtxId* ctxId)
 {
     (void)option;
-    printf("[cellRudp] CreateContext()\n");
+    ps3_log("[cellRudp] CreateContext()\n");
 
     if (!s_initialized) return (s32)CELL_RUDP_ERROR_NOT_INITIALIZED;
     if (!ctxId) return (s32)CELL_RUDP_ERROR_INVALID_ARGUMENT;
@@ -68,7 +68,7 @@ s32 cellRudpCreateContext(const CellRudpOption* option,
 
 s32 cellRudpDestroyContext(CellRudpCtxId ctxId)
 {
-    printf("[cellRudp] DestroyContext(%u)\n", ctxId);
+    ps3_log("[cellRudp] DestroyContext(%u)\n", ctxId);
     if (ctxId >= CELL_RUDP_CTX_MAX || !s_ctx[ctxId].in_use)
         return (s32)CELL_RUDP_ERROR_CTX_NOT_FOUND;
     s_ctx[ctxId].in_use = 0;
@@ -86,7 +86,7 @@ s32 cellRudpBind(CellRudpCtxId ctxId, u16 port)
 s32 cellRudpConnect(CellRudpCtxId ctxId, u32 addr, u16 port)
 {
     (void)addr; (void)port;
-    printf("[cellRudp] Connect() - offline\n");
+    ps3_log("[cellRudp] Connect() - offline\n");
     if (ctxId >= CELL_RUDP_CTX_MAX || !s_ctx[ctxId].in_use)
         return (s32)CELL_RUDP_ERROR_CTX_NOT_FOUND;
     return (s32)CELL_RUDP_ERROR_NOT_CONNECTED;

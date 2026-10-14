@@ -16,6 +16,7 @@
 #include "../../runtime/memory/vm.h"    /* VM_HLE_INJECT_BASE */
 #include "rsx_commands.h"                    /* rsx_state, rsx_process_command_buffer */
 #include "../../include/ps3emu/guest_call.h" /* g_ps3_guest_caller for direct handler dispatch */
+#include "ps3emu/logging.h"
 
 /* Guest EA of the GCM context (begin/end/current/callback) the title writes its
  * command stream into; recorded by cellGcmSetupContext, drained by the RSX. */
@@ -209,7 +210,7 @@ static void ydkj_restore_handler_opd(u32 opd, u32 code) {
     extern u8* vm_base; if (!vm_base) return;
     if (vm_read32(opd) == 0) {
         u8* p = vm_base + opd; p[0]=(u8)(code>>24); p[1]=(u8)(code>>16); p[2]=(u8)(code>>8); p[3]=(u8)code;
-        static int _n=0; if(_n++<6) fprintf(stderr,"[HANDLERFIX] restored clobbered OPD 0x%08X code=0x%08X\n",opd,code);
+        static int _n=0; if(_n++<6) ps3_log("[HANDLERFIX] restored clobbered OPD 0x%08X code=0x%08X\n",opd,code);
     }
 }
 static void gcm_update_handler_mask(void)
@@ -403,11 +404,11 @@ static const int s_valid_pitch_count = sizeof(s_valid_pitches) / sizeof(s_valid_
 /* NID: 0xB2E761D4 */
 s32 cellGcmInit(u32 cmdSize, u32 ioSize, u32 ioAddress)
 {
-    printf("[cellGcmSys] Init(cmdSize=0x%X, ioSize=0x%X, ioAddr=0x%08X)\n",
+    ps3_log("[cellGcmSys] Init(cmdSize=0x%X, ioSize=0x%X, ioAddr=0x%08X)\n",
            cmdSize, ioSize, ioAddress);
 
     if (s_gcm_initialized) {
-        printf("[cellGcmSys] WARNING: already initialized\n");
+        ps3_log("[cellGcmSys] WARNING: already initialized\n");
         return CELL_GCM_ERROR_FAILURE;
     }
 
@@ -581,7 +582,7 @@ u32 cellGcmGetCurrentField(void)
 /* NID: 0xA53D12AE */
 void cellGcmSetFlipMode(u32 mode)
 {
-    printf("[cellGcmSys] SetFlipMode(mode=%u)\n", mode);
+    ps3_log("[cellGcmSys] SetFlipMode(mode=%u)\n", mode);
     s_flip_mode = mode;
 }
 
@@ -610,7 +611,7 @@ void cellGcmResetFlipStatus(void)
 {
     { static int n = 0;
       if (getenv("FLIP_DBG") && n++ < 12)
-          fprintf(stderr, "[FLIP] ResetFlipStatus%c", 10); }
+          ps3_log("[FLIP] ResetFlipStatus%c", 10); }
     s_flip_status = CELL_GCM_FLIP_STATUS_WAITING;
 }
 
@@ -626,7 +627,7 @@ u32 cellGcmGetFlipStatus(void)
      * completely unpaced (wave: 95 fps with a fixed-dt simulation). */
     { static int n = 0;
       if (getenv("FLIP_DBG") && n++ < 24)
-          fprintf(stderr, "[FLIP] GetFlipStatus -> %u (0=DONE 1=WAITING)%c",
+          ps3_log("[FLIP] GetFlipStatus -> %u (0=DONE 1=WAITING)%c",
                   s_flip_status, 10); }
     return s_flip_status;
 }
@@ -693,7 +694,7 @@ void cellGcm_request_tick(void)
  * may both pump, and newer causes must not overtake already claimed callbacks.
  * A nonblocking guard also prevents nested callbacks from reentering. Leave
  * pending notifications untouched when another pump is active. */
-void ppu_gcm_pump(void)
+void ppu_gcm_pump_default(void)
 {
     if (!GCM_PUMP_TRY_ENTER()) return;
     long p = (long)GCM_PENDING_TAKE();
@@ -703,7 +704,7 @@ void ppu_gcm_pump(void)
       if (d < 0) d = getenv("GCM_PUMP_DBG") ? 1 : 0;
       if (d) { calls++; if (p & 1) nv++; if (p & 2) nf++;
                if ((calls % 20000) == 0)
-                   fprintf(stderr, "[gcm-pump] calls=%u vblank=%u flip=%u vcount=%u%c",
+                   ps3_log("[gcm-pump] calls=%u vblank=%u flip=%u vcount=%u%c",
                            calls, nv, nf, s_vblank_count, 10); } }
     if ((p & 1) && s_vblank_handler_opd && g_ps3_guest_caller) {
         ydkj_restore_handler_opd(s_vblank_handler_opd, s_vblank_handler_code);
@@ -901,7 +902,7 @@ static void nv3089_blit(void)
           if ((poll++ & 63u) == 0) { FILE* g = fopen(gate, "rb"); open_gate = g != NULL; if (g) fclose(g); }
           if (open_gate) {
               int _sl = (s_nv3089.src_dma != 0xFEED0001u), _dl = (s_gcm2d.dst_dma != 0xFEED0001u);
-              printf("[NV3089G] fmt=0x%X out=%ux%u at %u,%u in=%ux%u uv=0x%08X ds=0x%X dt=0x%X src=0x%08X/%u dst=0x%08X/%u swz=%d%c",
+              ps3_log("[NV3089G] fmt=0x%X out=%ux%u at %u,%u in=%ux%u uv=0x%08X ds=0x%X dt=0x%X src=0x%08X/%u dst=0x%08X/%u swz=%d%c",
                      s_nv3089.fmt & 0xFF, out_w, out_h, out_x, out_y,
                      s_nv3089.in_sz & 0xFFFF, s_nv3089.in_sz >> 16, s_nv3089.in_uv,
                      s_nv3089.ds_dx, s_nv3089.dt_dy,
@@ -979,7 +980,7 @@ static void nv3089_blit(void)
         { static int _n = 0; static int cap = -1;
           if (cap < 0) { const char* e = getenv("NV3089_DBG"); cap = e ? atoi(e) : 0; }
           if (cap && _n < cap) { _n++;
-            printf("[NV3089] swizzled %ux%u fmt=0x%X src=0x%08X -> NV309E dst=0x%08X%c",
+            ps3_log("[NV3089] swizzled %ux%u fmt=0x%X src=0x%08X -> NV309E dst=0x%08X%c",
                    out_w, out_h, f, src2, dst2, 10); } }
         return;
       } }
@@ -999,13 +1000,13 @@ static void nv3089_blit(void)
          * incidental small transfer. */
         { int _sl = (s_nv3089.src_dma != 0xFEED0001u);
           int _dl = (s_gcm2d.dst_dma  != 0xFEED0001u);
-          printf("[NV3089] SKIPPED fmt=0x%X  %ux%u  src=0x%08X(pitch %u,%s) -> dst=0x%08X(pitch %u,%s) at %u,%u%c",
+          ps3_log("[NV3089] SKIPPED fmt=0x%X  %ux%u  src=0x%08X(pitch %u,%s) -> dst=0x%08X(pitch %u,%s) at %u,%u%c",
                  f, out_w, out_h,
                  cellGcmResolveLocated(_sl, s_nv3089.in_off), in_pitch, _sl?"LOCAL":"MAIN",
                  cellGcmResolveLocated(_dl, s_gcm2d.dst_offset), dst_pitch, _dl?"LOCAL":"MAIN",
                  out_x, out_y, 10); }
         static int _w = 0;
-        if (_w++ < 4) printf("[NV3089] unsupported colour format 0x%X, blit skipped\n", f);
+        if (_w++ < 4) ps3_log("[NV3089] unsupported colour format 0x%X, blit skipped\n", f);
         return;
     }
     int src_local = (s_nv3089.src_dma != 0xFEED0001u);
@@ -1057,7 +1058,7 @@ static void nv3089_blit(void)
     { static int _n = 0; static int cap = -1;
       if (cap < 0) { const char* e = getenv("NV3089_DBG"); cap = e ? atoi(e) : 0; }
       if (cap && _n < cap) { _n++;
-        printf("[NV3089] %ux%u fmt=0x%X src=0x%08X(pitch %u) -> dst=0x%08X(pitch %u) at %u,%u\n",
+        ps3_log("[NV3089] %ux%u fmt=0x%X src=0x%08X(pitch %u) -> dst=0x%08X(pitch %u) at %u,%u\n",
                out_w, out_h, f, src, in_pitch, dst, dst_pitch, out_x, out_y); } }
 }
 
@@ -1075,16 +1076,16 @@ static void gcm_2d_method(u32 subch, u32 method, u32 data)
           u32 mi = (method >> 2) & 1023;
           if (subch < 8 && !seen[subch][mi]) {
               seen[subch][mi] = 1;
-              printf("[GCM2D-TRACE] subch=%u method=0x%04X (first, data=0x%08X)%c",
+              ps3_log("[GCM2D-TRACE] subch=%u method=0x%04X (first, data=0x%08X)%c",
                      subch, method, data, 10);
           }
           if (++n == 400000ull) {
-              printf("[GCM2D-TRACE] --- subchannels used: ");
+              ps3_log("[GCM2D-TRACE] --- subchannels used: ");
               for (u32 sc = 0; sc < 8; sc++) {
                   u32 c = 0; for (u32 m = 0; m < 1024; m++) c += seen[sc][m];
-                  if (c) printf("%u(%u methods) ", sc, c);
+                  if (c) ps3_log("%u(%u methods) ", sc, c);
               }
-              printf("---%c", 10);
+              ps3_log("---%c", 10);
           }
       } }
     /* Subchannel bindings are libgcm-version-specific (SET_OBJECT binds are
@@ -1106,7 +1107,7 @@ static void gcm_2d_method(u32 subch, u32 method, u32 data)
         if (method == 0x0300) { s_nv309e.fmt = data; s_nv309e.active = 1;
                                 s_nv309e.subch = (int)subch;
             { static int _n = 0; if (_n++ < 4)
-                printf("[NV309E] format=0x%08X (log2 %ux%u fmt=0x%X)%c", data,
+                ps3_log("[NV309E] format=0x%08X (log2 %ux%u fmt=0x%X)%c", data,
                        1u << ((data >> 16) & 0xFF), 1u << ((data >> 24) & 0xFF),
                        data & 0xFFFF, 10); }
             return; }
@@ -1129,7 +1130,7 @@ static void gcm_2d_method(u32 subch, u32 method, u32 data)
             u32 base = cellGcmResolveLocated(local, s_gcm2d.dst_offset);
             { static int _it = 0;
               if (_it++ < 6)
-                  printf("[GCM2D] inline write dst=0x%08X (off=0x%X dma=0x%X pt=%u,%u pitch=%u) = 0x%08X\n",
+                  ps3_log("[GCM2D] inline write dst=0x%08X (off=0x%X dma=0x%X pt=%u,%u pitch=%u) = 0x%08X\n",
                          base + py * dst_pitch + px * 4, s_gcm2d.dst_offset,
                          s_gcm2d.dst_dma, px, py, dst_pitch, data); }
             vm_write32(base + py * dst_pitch + px * 4, data);
@@ -1172,9 +1173,9 @@ static void gcm_2d_method(u32 subch, u32 method, u32 data)
     static int warned = 0, wcap = -1;
     if (wcap < 0) { const char* e = getenv("GCM2D_DBG"); wcap = e ? atoi(e) : 8; }
     if (warned < wcap) { warned++;
-        printf("[GCM2D-UNH] subch %u method 0x%04X data=0x%08X\n", subch, method, data); }
+        ps3_log("[GCM2D-UNH] subch %u method 0x%04X data=0x%08X\n", subch, method, data); }
     if (0)
-        printf("[cellGcmSys] FIFO subch %u method 0x%04X (unhandled 2D engine)\n",
+        ps3_log("[cellGcmSys] FIFO subch %u method 0x%04X (unhandled 2D engine)\n",
                subch, method);
 }
 
@@ -1219,7 +1220,7 @@ static void gcm_fifo_bad_branch(const char* kind, u32 target, u32 word)
 {
     static int n = 0;
     if (n++ < 8)
-        fprintf(stderr, "[cellGcmSys] FIFO %s to unmapped IO 0x%08X (word 0x%08X) "
+        ps3_log("[cellGcmSys] FIFO %s to unmapped IO 0x%08X (word 0x%08X) "
                 "-- not taken, drain stops here\n", kind, target, word);
 }
 
@@ -1332,7 +1333,7 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
 {
     static int n = 0;
     if (n++ < 8)
-        fprintf(stderr, "[cellGcmSys] FIFO resync (%s) 0x%08X -> put 0x%08X\n",
+        ps3_log("[cellGcmSys] FIFO resync (%s) 0x%08X -> put 0x%08X\n",
                 why, *getoff, put);
     /* If an SPU DMA'd a pushbuffer that ends just short of `put`, that is the
      * stream the RSX is being pointed at -- land at its START and walk it,
@@ -1343,7 +1344,7 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
     u32 land = gcm_spu_block_for_put(put);
     if (land == 0xFFFFFFFFu) land = put;
     else { static int b = 0; if (b++ < 8)
-        fprintf(stderr, "[cellGcmSys] resync landing on SPU pushbuffer "
+        ps3_log("[cellGcmSys] resync landing on SPU pushbuffer "
                 "0x%08X (put 0x%08X) instead of skipping to put\n", land, put); }
 
     /* Sweep only the range still being skipped; the walker will consume the
@@ -1361,7 +1362,7 @@ static void gcm_fifo_resync_why(const char* why, u32* getoff, u32 put)
             rescued++;
         }
         if (rescued) { static int m = 0; if (m++ < 8)
-            fprintf(stderr, "[cellGcmSys] resync rescued %u fence(s) from"
+            ps3_log("[cellGcmSys] resync rescued %u fence(s) from"
                     " 0x%08X..0x%08X\n", rescued, from, land); }
     }
     *getoff = land;
@@ -1375,14 +1376,14 @@ static void gcm_fifo_dump_around(u32 getoff)
         u32 k = (s_tr_i + t) % GCM_TRACE_N;
         if (!s_tr_w[k]) continue;
         u32 w = s_tr_w[k];
-        fprintf(stderr, "[FIFOSTEP] io=%08X w=%08X  type=%u method=0x%04X count=%u\n",
+        ps3_log("[FIFOSTEP] io=%08X w=%08X  type=%u method=0x%04X count=%u\n",
                 s_tr_off[k], w, w >> 29, w & 0x1FFCu, (w >> 18) & 0x7FFu);
     }
     for (int k = -20; k <= 2; k++) {
         u32 io = getoff + (u32)(k * 4);
         u32 ea = gcm_io2ea(io);
         if (!ea) continue;
-        fprintf(stderr, "[FIFODUMP] %+3d io=%08X w=%08X%s\n",
+        ps3_log("[FIFODUMP] %+3d io=%08X w=%08X%s\n",
                 k, io, vm_read32(ea), k ? "" : "   <-- bad word");
     }
 }
@@ -1391,12 +1392,12 @@ static void gcm_fifo_dump_around(u32 getoff)
 static void gcm_ref_push_at(u32 v, u32 getoff)
 {
     { static int _d = -1; if (_d < 0) _d = getenv("GCM_REFLOG") ? 1 : 0;
-      if (_d) fprintf(stderr, "[refq] drained fence 0x%X at getoff=%08X\n", v, getoff); }
+      if (_d) ps3_log("[refq] drained fence 0x%X at getoff=%08X\n", v, getoff); }
     u32 t = s_ref_qtail;
     if (t - s_ref_qhead >= GCM_REF_QLEN) {   /* overflow: drop oldest (keeps liveness) */
         s_ref_qhead++;
         static int _o = 0;
-        if (_o++ < 4) fprintf(stderr, "[cellGcmSys] fence queue overflow -- oldest dropped\n");
+        if (_o++ < 4) ps3_log("[cellGcmSys] fence queue overflow -- oldest dropped\n");
     }
     s_ref_q[t % GCM_REF_QLEN] = v;
     s_ref_qtail = t + 1;
@@ -1427,7 +1428,7 @@ static void gcm_ref_publish_one(void)
      * timeline. Same stream = same ordering. */
     { static int _rd = -1; if (_rd < 0) _rd = getenv("GCM_REFPUB") ? 1 : 0;
       if (_rd) { static unsigned long _n = 0; if (++_n <= 24)
-        fprintf(stderr, "[refpub] t=%lluus #%lu wrote 0x%08X -> readback 0x%08X\n", ps3_qpc_us(), _n,
+        ps3_log("[refpub] t=%lluus #%lu wrote 0x%08X -> readback 0x%08X\n", ps3_qpc_us(), _n,
                 s_ref_q[h % GCM_REF_QLEN], vm_read32(GCM_CONTROL_GUEST_ADDR + 8)); } }
     s_ref_qhead = h + 1;
     g_gcm_ref_pub_count++;
@@ -1524,7 +1525,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
           unsigned long long now = ps3_ms_now();
           if (_t0 == 0) _t0 = now;
           if (now - _t0 >= 2000) {
-              fprintf(stderr, "[RATE] drains/sec=%.0f\n", _n * 1000.0 / (now - _t0));
+              ps3_log("[RATE] drains/sec=%.0f\n", _n * 1000.0 / (now - _t0));
               _n = 0; _t0 = now;
           }
       } }
@@ -1567,12 +1568,11 @@ static void gcm_rsx_process_fifo_unlocked(void)
         u32 cur = ptr ? vm_read32(ptr + 0x8) : 0;
         if (ptr != last_ptr || cur != last_cur) {
             last_ptr = ptr; last_cur = cur;
-            fprintf(stderr, "[CTX] gCellGcmCurrentContext@0x%08X -> 0x%08X  "
+            ps3_log("[CTX] gCellGcmCurrentContext@0x%08X -> 0x%08X  "
                     "begin=%08X end=%08X current=%08X callback=%08X  (ours=0x%08X)\n",
                     s_gcm_ctx_out_ea, ptr,
                     ptr ? vm_read32(ptr + 0x0) : 0, ptr ? vm_read32(ptr + 0x4) : 0,
                     cur, ptr ? vm_read32(ptr + 0xC) : 0, s_gcm_context_ea);
-            fflush(stderr);
         }
     }
 
@@ -1580,7 +1580,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
     if (getenv("GCM_DRAINDBG")) {
         static int n = 0;
         if (n++ % 60 == 0)
-            printf("[DRAIN] getoff=%08X put=%08X ref=%08X ctx.current=%08X\n",
+            ps3_log("[DRAIN] getoff=%08X put=%08X ref=%08X ctx.current=%08X\n",
                    s_fifo_getoff, put, vm_read32(GCM_CONTROL_GUEST_ADDR + 8),
                    vm_read32(s_gcm_context_ea + 0x8));
     }
@@ -1597,12 +1597,12 @@ static void gcm_rsx_process_fifo_unlocked(void)
             u32 w = vm_read32(ea);
             if ((w & 0x1FFCu) == 0x0050u && (w >> 29) == 0) {
                 u32 dea = gcm_io2ea(io + 4);
-                fprintf(stderr, "[SCANREF] io=%08X w=%08X count=%u arg=%08X\n",
+                ps3_log("[SCANREF] io=%08X w=%08X count=%u arg=%08X\n",
                         io, w, (w >> 18) & 0x7FFu, dea ? vm_read32(dea) : 0xDEADu);
                 found++;
             }
         }
-        fprintf(stderr, "[SCANREF] %u SET_REFERENCE in 0..%08X\n", found, put);
+        ps3_log("[SCANREF] %u SET_REFERENCE in 0..%08X\n", found, put);
       } }
 
     /* GCM_FIFO_SNAP=N: dump N snapshots of the raw words at both ends of the
@@ -1615,15 +1615,14 @@ static void gcm_rsx_process_fifo_unlocked(void)
       if (snap < 0) { const char* e = getenv("GCM_FIFO_SNAP"); snap = e ? atoi(e) : 0; }
       if (snap > 0 && put) {
           snap--;
-          fprintf(stderr, "[SNAP] get=%08X put=%08X\n", s_fifo_getoff, put);
+          ps3_log("[SNAP] get=%08X put=%08X\n", s_fifo_getoff, put);
           for (int k = 0; k < 16; k++) {
               u32 gio = s_fifo_getoff + (u32)(k * 4), pio = put + (u32)(k * 4);
               u32 gea = gcm_io2ea(gio), pea = gcm_io2ea(pio);
-              fprintf(stderr, "[SNAP]  get+%-3d io=%08X w=%08X   put+%-3d io=%08X w=%08X\n",
+              ps3_log("[SNAP]  get+%-3d io=%08X w=%08X   put+%-3d io=%08X w=%08X\n",
                       k * 4, gio, gea ? vm_read32(gea) : 0xDEADDEADu,
                       k * 4, pio, pea ? vm_read32(pea) : 0xDEADDEADu);
           }
-          fflush(stderr);
       } }
 
     int budget = 0x100000;                    /* words per tick cap */
@@ -1646,7 +1645,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
             if (s_fifo_getoff != last_bad || n < 4) {
                 last_bad = s_fifo_getoff;
                 if (n++ < 16)
-                    fprintf(stderr, "[cellGcmSys] FIFO get=0x%08X has no IO "
+                    ps3_log("[cellGcmSys] FIFO get=0x%08X has no IO "
                             "mapping -- resyncing to put=0x%08X\n",
                             s_fifo_getoff, put);
             }
@@ -1682,7 +1681,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
               if (dbg < 0) dbg = getenv("GCM_FLIPCOUNT") ? 1 : 0;
               ++flips;
               if (dbg && (flips <= 8ull || (flips % 200ull) == 0))
-                  fprintf(stderr, "[flipword] %llu FIFO flip words decoded%c",
+                  ps3_log("[flipword] %llu FIFO flip words decoded%c",
                           flips, 10); }
             if ((w & 0xFFFFFF00u) == GCM_FLIP_MARKER) {
                 /* Queued by _cellGcmSetFlipCommand, which already did the
@@ -1710,7 +1709,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
 
         if (type == 1) {                       /* JUMP: 0x20000000 | offset */
             { static int _rd = -1; if (_rd < 0) _rd = getenv("GCM_RECDBG") ? 1 : 0;
-              if (_rd) fprintf(stderr, "[JMP] %08X -> %08X (put=%08X)\n",
+              if (_rd) ps3_log("[JMP] %08X -> %08X (put=%08X)\n",
                                s_fifo_getoff, w & 0x1FFFFFFCu, put); }
             { u32 tgt = w & 0x1FFFFFFCu;
               if (!gcm_io2ea(tgt)) { gcm_fifo_bad_branch("JUMP", tgt, w); gcm_fifo_dump_around(s_fifo_getoff); gcm_fifo_resync_why("unmapped-JUMP", &s_fifo_getoff, put); break; }
@@ -1763,9 +1762,9 @@ static void gcm_rsx_process_fifo_unlocked(void)
                   hist[mi]++; tot[mi] += count;
                   static u64 seen = 0;
                   if (++seen == 200000ull && !dumped) { dumped = 1;
-                      fprintf(stderr, "[TCFIFO] method histogram (blocks, dwords):%c", 10);
+                      ps3_log("[TCFIFO] method histogram (blocks, dwords):%c", 10);
                       for (u32 k = 0; k < 2048; k++) if (hist[k])
-                          fprintf(stderr, "[TCFIFO]   0x%04X  %8u blocks %10u dwords%c",
+                          ps3_log("[TCFIFO]   0x%04X  %8u blocks %10u dwords%c",
                                   k << 2, hist[k], tot[k], 10);
                   }
               } }
@@ -1790,7 +1789,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
                     u32 v = vm_read32(dea);
                     u32 la = GCM_LABEL_GUEST_BASE + (s_sema_offset & 0xFFFFu);
                     { static int sn = 0; if (getenv("GCM_RECDBG") && sn++ < 12)
-                        fprintf(stderr, "[SEMA] m=0x%02X v=0x%08X off=0x%X\n", m, v, s_sema_offset); }
+                        ps3_log("[SEMA] m=0x%02X v=0x%08X off=0x%X\n", m, v, s_sema_offset); }
                     if (m == 0x64u)      s_sema_offset = v;
                     else if (m == 0x6Cu) vm_write32(la, v);
                     else if (m == 0x68u && vm_read32(la) != v) {
@@ -1820,7 +1819,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
                 { static int sd = -1; static unsigned long s7 = 0;
                   if (sd < 0) sd = getenv("GCM_SUBCH7") ? 1 : 0;
                   if (sd && subch == 7 && (s7++ < 16))
-                      fprintf(stderr, "[subch7] method=0x%04X data=0x%08X\n",
+                      ps3_log("[subch7] method=0x%04X data=0x%08X\n",
                               m, vm_read32(dea)); }
                 if (subch == 7 && m == 0x0B00u) {
                     extern void rsx_raise_user_cmd(u32 arg);
@@ -1844,8 +1843,8 @@ static void gcm_rsx_process_fifo_unlocked(void)
                       const unsigned h = vm_read32(dea);
                       if (subch < 8 && (!have[subch] || seen[subch] != h)) {
                           have[subch] = 1; seen[subch] = h;
-                          printf("[GCM-OBJ] subch=%u SET_OBJECT handle=0x%08X%c",
-                                 subch, h, 10); fflush(stdout);
+                          ps3_print("[GCM-OBJ] subch=%u SET_OBJECT handle=0x%08X%c",
+                                 subch, h, 10);
                       } } }
                 /* The subchannel is a binding slot, not an engine selector: a
                  * title may bind NV4097 to something other than subchannel 0.
@@ -1873,17 +1872,17 @@ static void gcm_rsx_process_fifo_unlocked(void)
                     if (vw == 1) { const char* e = getenv("GCM_VAL_WATCH"); vw = e ? (u32)strtoul(e, 0, 16) : 0; }
                     if (vw && vm_read32(dea) == vw) {
                         static int vn; if (vn++ < 64)
-                            printf("[valwatch] subch=%u method=0x%04X = 0x%08X get=0x%X%c", subch, m, vw, s_fifo_getoff, 10);
+                            ps3_log("[valwatch] subch=%u method=0x%04X = 0x%08X get=0x%X%c", subch, m, vw, s_fifo_getoff, 10);
                     } }
                   /* ...and surface offsets (colour 0x210/0x218/0x288/0x28C, zeta 0x214) and texture 1 offset */
                   if (sg && !subch && (cm3 == 0x210 || cm3 == 0x214 || cm3 == 0x218 || cm3 == 0x288 || cm3 == 0x28C ||
                                        cm3 == 0x1A20)) {
                       if ((poll++ & 255u) == 0) { FILE* g = fopen(sg, "rb"); open_g = g != NULL; if (g) fclose(g); }
-                      if (open_g) printf("[surfreg] 0x%04X = 0x%08X%c", cm3, vm_read32(dea), 10);
+                      if (open_g) ps3_log("[surfreg] 0x%04X = 0x%08X%c", cm3, vm_read32(dea), 10);
                   }
                   if (sg && subch) {
                       if ((poll++ & 255u) == 0) { FILE* g = fopen(sg, "rb"); open_g = g != NULL; if (g) fclose(g); }
-                      if (open_g) printf("[subch] %u 0x%04X = 0x%08X%c", subch, m, vm_read32(dea), 10);
+                      if (open_g) ps3_log("[subch] %u 0x%04X = 0x%08X%c", subch, m, vm_read32(dea), 10);
                   } }
                 /* Mirror the whole method stream into the live NV4097->D3D12
                  * engine (caner / canersaka). Inert unless RSX_LIVE_DRAW is set.
@@ -1913,8 +1912,8 @@ static void gcm_rsx_process_fifo_unlocked(void)
                       else if (cm == 0x1814u) n_va++;
                       else if (cm == 0x1824u) n_ia++;
                       if (((++tick) % 200000) == 0)
-                          printf("[feed] begin_end=%lld draw_arrays=%lld draw_index=%lld\n",
-                                 n_be, n_va, n_ia), fflush(stdout);
+                          ps3_print("[feed] begin_end=%lld draw_arrays=%lld draw_index=%lld\n",
+                                 n_be, n_va, n_ia);
                   } }
 
                 /* Driver methods (0xE9xx, 0xEBxx) occupy bits 2-15 of the
@@ -1938,7 +1937,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
                      * tells the title every queried object is occluded. */
                     if (m == 0x1800) {
                         const u32 v = vm_read32(dea), idx = (v & 0xFFFFFFu) / 16u;
-                        { static int rn = 0; if (rn++ < 6) printf("[GET_REPORT] type=%u idx=%u%c", v >> 24, idx, 10); }
+                        { static int rn = 0; if (rn++ < 6) ps3_log("[GET_REPORT] type=%u idx=%u%c", v >> 24, idx, 10); }
                         if (idx < CELL_GCM_MAX_REPORT_COUNT) {
                             s_report_data[idx].timestamp = get_timestamp_ns();
                             s_report_data[idx].value = (v >> 24) == 1u ? 0xFFFFu : 0u;
@@ -1952,7 +1951,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
             continue;
         }
         { static int _uw = 0; if (_uw++ < 16 && getenv("RTT_DUMP"))
-            fprintf(stderr, "[FIFOUW] unknown word 0x%08X at getoff 0x%X\n", w, s_fifo_getoff); }
+            ps3_log("[FIFOUW] unknown word 0x%08X at getoff 0x%X\n", w, s_fifo_getoff); }
         s_fifo_getoff += 4;                    /* unknown word: skip */
     }
 
@@ -1988,7 +1987,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
           if (++burned >= passes) {
               static int n = 0;
               if (n++ < 8)
-                  fprintf(stderr, "[cellGcmSys] FIFO walker circling (get=0x%08X, "
+                  ps3_log("[cellGcmSys] FIFO walker circling (get=0x%08X, "
                           "put=0x%08X, full budget burned x%d) -- following the "
                           "write head\n", s_fifo_getoff, put, burned);
               gcm_fifo_resync_why("circling", &s_fifo_getoff, put);
@@ -2009,7 +2008,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
     if (getenv("GCM_DRAINDBG")) {
         static int n2 = 0;
         if (n2++ % 60 == 0)
-            fprintf(stderr, "[DRAINEND] %s: %08X -> %08X (%u bytes), put=%08X\n",
+            ps3_log("[DRAINEND] %s: %08X -> %08X (%u bytes), put=%08X\n",
                     why, start_off, s_fifo_getoff, s_fifo_getoff - start_off, put);
     }
     /* Recycle the TITLE'S OWN command buffer when its callback will not.
@@ -2090,7 +2089,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
                 put = io_begin;
                 static int n = 0;
                 if (n++ < 8)
-                    fprintf(stderr, "[cellGcmSys] recycled the title's own ring "
+                    ps3_log("[cellGcmSys] recycled the title's own ring "
                             "(ctx=0x%08X begin=0x%08X end=0x%08X) -- its callback "
                             "does not%c", ctx, begin, end, 10);
             }
@@ -2139,12 +2138,12 @@ void cellGcm_fifo_recycle(u32 ctx_ea)
     if (current <= begin) return;                       /* nothing to recycle */
 
     if (getenv("CELLMARK_BLINKDBG"))
-        printf("[RECYCLE] ring wrap: current=0x%08X -> begin=0x%08X\n", current, begin);
+        ps3_log("[RECYCLE] ring wrap: current=0x%08X -> begin=0x%08X\n", current, begin);
 
     static int s_recdbg = -1;
     if (s_recdbg < 0) s_recdbg = getenv("GCM_RECDBG") ? 1 : 0;
     if (s_recdbg)
-        fprintf(stderr, "[REC>] tid=%lu begin=%08X cur=%08X put=%08X get=%08X drained=%08X\n",
+        ps3_log("[REC>] tid=%lu begin=%08X cur=%08X put=%08X get=%08X drained=%08X\n",
                 GetCurrentThreadId(), begin, current,
                 vm_read32(GCM_CONTROL_GUEST_ADDR + 0),
                 vm_read32(GCM_CONTROL_GUEST_ADDR + 4),
@@ -2172,14 +2171,14 @@ void cellGcm_fifo_recycle(u32 ctx_ea)
     if (spins >= 2000) {
         static int warned = 0;
         if (warned++ < 4)
-            printf("[cellGcmSys] fifo recycle: drain stalled (drained=0x%08X begin=0x%08X)\n",
+            ps3_log("[cellGcmSys] fifo recycle: drain stalled (drained=0x%08X begin=0x%08X)\n",
                    g_gcm_fifo_drained_ea, begin);
     }
 
     vm_write32(ctx_ea + 0x8, begin);                    /* recycle ring to base */
 
     if (s_recdbg)
-        fprintf(stderr, "[REC<] tid=%lu cur-now=%08X put=%08X get=%08X drained=%08X spins=%d\n",
+        ps3_log("[REC<] tid=%lu cur-now=%08X put=%08X get=%08X drained=%08X spins=%d\n",
                 GetCurrentThreadId(), vm_read32(ctx_ea + 0x8),
                 vm_read32(GCM_CONTROL_GUEST_ADDR + 0),
                 vm_read32(GCM_CONTROL_GUEST_ADDR + 4),
@@ -2206,7 +2205,7 @@ void cellGcm_replay_display_buffers_to_engine(void)
 s32 cellGcmSetDisplayBuffer(u32 bufferId, u32 offset, u32 pitch,
                             u32 width, u32 height)
 {
-    printf("[cellGcmSys] SetDisplayBuffer(id=%u, offset=0x%X, pitch=%u, %ux%u)\n",
+    ps3_log("[cellGcmSys] SetDisplayBuffer(id=%u, offset=0x%X, pitch=%u, %ux%u)\n",
            bufferId, offset, pitch, width, height);
 
     if (bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM)
@@ -2269,7 +2268,7 @@ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
           if (!t0) t0 = now;
           ++n;
           if (n <= 400ull || (n % 10ull) == 0)
-              fprintf(stderr, "[flip] %llu at %llu ms%c", n, now - t0, 10);
+              ps3_log("[flip] %llu at %llu ms%c", n, now - t0, 10);
       } }
 
     /* GCM_FLIP_BT=<n>: dump the flipping thread's guest stack for the flips
@@ -2296,7 +2295,7 @@ static s32 gcm_flip_request(u32 bufferId, int in_fifo)
       } }
 
     { static int _n=0; if (getenv("FLIP_DBG") && _n++ < 20)
-        fprintf(stderr, "[FLIP] SetFlipCommand(buf=%u) set=%d\n",
+        ps3_log("[FLIP] SetFlipCommand(buf=%u) set=%d\n",
                 bufferId, bufferId < CELL_GCM_MAX_DISPLAY_BUFFER_NUM ? s_display_buffer_set[bufferId] : -1); }
     if (bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM)
         return CELL_GCM_ERROR_INVALID_VALUE;
@@ -2403,7 +2402,7 @@ s32 cellGcmSetPrepareFlip(void* ctx, u32 bufferId)
     if (!s_display_buffer_set[bufferId])
         return CELL_GCM_ERROR_INVALID_VALUE;
 
-    printf("[cellGcmSys] SetPrepareFlip(bufferId=%u)\n", bufferId);
+    ps3_log("[cellGcmSys] SetPrepareFlip(bufferId=%u)\n", bufferId);
 
     gcm_set_current_display_buffer(bufferId);
     s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
@@ -2440,7 +2439,7 @@ void cellGcmSetFlipHandler(CellGcmFlipHandler handler)
      * the legacy host-typed value too for any callers still using
      * the old API style. Real dispatch goes through
      * cellGcmDispatchVBlank()/DispatchFlip() via g_ps3_guest_caller. */
-    printf("[cellGcmSys] SetFlipHandler(opd=0x%08X)\n", (unsigned)(size_t)handler);
+    ps3_log("[cellGcmSys] SetFlipHandler(opd=0x%08X)\n", (unsigned)(size_t)handler);
     s_flip_handler_opd = (u32)(size_t)handler;
     s_flip_handler = handler;
     { u32 c = s_flip_handler_opd ? vm_read32(s_flip_handler_opd) : 0; if (c) s_flip_handler_code = c; }
@@ -2450,7 +2449,7 @@ void cellGcmSetFlipHandler(CellGcmFlipHandler handler)
 /* NID: 0xA547ADDE */
 void cellGcmSetVBlankHandler(CellGcmVBlankHandler handler)
 {
-    printf("[cellGcmSys] SetVBlankHandler(opd=0x%08X)\n", (unsigned)(size_t)handler);
+    ps3_log("[cellGcmSys] SetVBlankHandler(opd=0x%08X)\n", (unsigned)(size_t)handler);
     s_vblank_handler_opd = (u32)(size_t)handler;
     s_vblank_handler = handler;
     { u32 c = s_vblank_handler_opd ? vm_read32(s_vblank_handler_opd) : 0; if (c) s_vblank_handler_code = c; }
@@ -2460,7 +2459,7 @@ void cellGcmSetVBlankHandler(CellGcmVBlankHandler handler)
 /* NID: 0xF9BFCDA3 */
 void cellGcmSetSecondVHandler(CellGcmSecondVHandler handler)
 {
-    printf("[cellGcmSys] SetSecondVHandler(opd=0x%08X)\n", (unsigned)(size_t)handler);
+    ps3_log("[cellGcmSys] SetSecondVHandler(opd=0x%08X)\n", (unsigned)(size_t)handler);
     s_second_v_handler_opd = (u32)(size_t)handler;
     s_second_v_handler = handler;
 }
@@ -2468,7 +2467,7 @@ void cellGcmSetSecondVHandler(CellGcmSecondVHandler handler)
 /* NID: 0x0B4B62D5 */
 void cellGcmSetUserHandler(CellGcmUserHandler handler)
 {
-    printf("[cellGcmSys] SetUserHandler(opd=0x%08X)\n", (unsigned)(size_t)handler);
+    ps3_log("[cellGcmSys] SetUserHandler(opd=0x%08X)\n", (unsigned)(size_t)handler);
     s_user_handler_opd = (u32)(size_t)handler;
     s_user_handler = handler;
     gcm_update_handler_mask();
@@ -2525,7 +2524,7 @@ s32 cellGcmAddressToOffset(u32 address, u32* offset)
       if (cap && k < cap) { k++;
         u32 nz = 0;
         for (u32 i = 0; i < 0x400u; i += 13) if (vm_base && vm_base[address + i]) nz++;
-        printf("[A2O] ea=0x%08X  (first 1KB nonzero=%u/79)\n", address, nz); } }
+        ps3_log("[A2O] ea=0x%08X  (first 1KB nonzero=%u/79)\n", address, nz); } }
 
     /* Local memory: offset = address - localBase. Record the offset page as
      * LOCAL-derived so cellGcmResolveOffset can disambiguate it from an IO
@@ -2581,7 +2580,7 @@ s32 cellGcmAddressToOffset(u32 address, u32* offset)
      * The Orange Box's chooser asks for exactly this, and the page it burned was
      * the one the following cellGcmMapMainMemory would otherwise have taken. */
     if (address < 0x100000u) {
-        printf("[cellGcmSys] AddressToOffset REFUSED: ea 0x%08X is not a mappable "
+        ps3_log("[cellGcmSys] AddressToOffset REFUSED: ea 0x%08X is not a mappable "
                "address (page 0)\n", address);
         vm_write32(off_ea, 0);
         return CELL_GCM_ERROR_INVALID_VALUE;
@@ -2607,20 +2606,20 @@ s32 cellGcmAddressToOffset(u32 address, u32* offset)
             m->ea = ea_page; m->io = io; m->size = 0x100000u; m->active = 1;
             s_io_mapping_count++;
         } else {
-            printf("[cellGcmSys] WARNING: auto-map has no free IO mapping slot; "
+            ps3_log("[cellGcmSys] WARNING: auto-map has no free IO mapping slot; "
                    "the FIFO will not be able to walk io 0x%08X\n", io);
         }
-        printf("[cellGcmSys] AddressToOffset: auto-mapped ea 0x%08X -> io 0x%08X\n",
+        ps3_log("[cellGcmSys] AddressToOffset: auto-mapped ea 0x%08X -> io 0x%08X\n",
                ea_page, io);
         vm_write32(off_ea, io | (address & 0xFFFFFu));
         return CELL_OK;
     }
 
-    printf("[cellGcmSys] WARNING: AddressToOffset failed for 0x%08X\n", address);
+    ps3_log("[cellGcmSys] WARNING: AddressToOffset failed for 0x%08X\n", address);
     vm_write32(off_ea, 0);
     { static int _d = -1; if (_d < 0) _d = getenv("A2O_FAILDBG") ? 1 : 0;
       if (_d) { static int _n = 0; if (_n++ < 12)
-          fprintf(stderr, "[A2O] FAILED ea=0x%08X (not in local or IO space)%c",
+          ps3_log("[A2O] FAILED ea=0x%08X (not in local or IO space)%c",
                   address, 10); } }
     return CELL_GCM_ERROR_FAILURE;
 }
@@ -2652,19 +2651,19 @@ s32 cellGcmMapMainMemory(u32 ea, u32 size, u32* offset)
      * addresses immediately past the region it did get, draws 20 times instead
      * of thousands, and never flips; the refusal that would explain it was
      * invisible. Same lesson as the savedata early returns. */
-    printf("[cellGcmSys] MapMainMemory(ea=0x%08X, size=0x%X)\n", ea, size);
+    ps3_log("[cellGcmSys] MapMainMemory(ea=0x%08X, size=0x%X)\n", ea, size);
 
     if (!offset) {
-        printf("[cellGcmSys] MapMainMemory REFUSED: offset out-param is NULL\n");
+        ps3_log("[cellGcmSys] MapMainMemory REFUSED: offset out-param is NULL\n");
         return CELL_GCM_ERROR_INVALID_VALUE;
     }
     /* Size and EA must both be 1MB aligned. */
     if (size == 0 || (size & 0xFFFFF) != 0) {
-        printf("[cellGcmSys] MapMainMemory REFUSED: size 0x%X is not a non-zero multiple of 1MB\n", size);
+        ps3_log("[cellGcmSys] MapMainMemory REFUSED: size 0x%X is not a non-zero multiple of 1MB\n", size);
         return CELL_GCM_ERROR_INVALID_ALIGNMENT;
     }
     if ((ea & 0xFFFFF) != 0) {
-        printf("[cellGcmSys] MapMainMemory REFUSED: ea 0x%08X is not 1MB aligned\n", ea);
+        ps3_log("[cellGcmSys] MapMainMemory REFUSED: ea 0x%08X is not 1MB aligned\n", ea);
         return CELL_GCM_ERROR_INVALID_ALIGNMENT;
     }
 
@@ -2673,7 +2672,7 @@ s32 cellGcmMapMainMemory(u32 ea, u32 size, u32* offset)
 
     IoMapping* mapping = find_free_mapping();
     if (!mapping) {
-        printf("[cellGcmSys] WARNING: no free IO mapping slots\n");
+        ps3_log("[cellGcmSys] WARNING: no free IO mapping slots\n");
         return CELL_GCM_ERROR_FAILURE;
     }
 
@@ -2695,24 +2694,24 @@ s32 cellGcmMapEaIoAddress(u32 ea, u32 io, u32 size)
     /* Logged before validation, and every failure path named -- same reason as
      * cellGcmMapMainMemory above. Two of these returned silently AFTER the log
      * line as well, so even a call that got that far could vanish. */
-    printf("[cellGcmSys] MapEaIoAddress(ea=0x%08X, io=0x%08X, size=0x%X)\n", ea, io, size);
+    ps3_log("[cellGcmSys] MapEaIoAddress(ea=0x%08X, io=0x%08X, size=0x%X)\n", ea, io, size);
 
     if ((ea & 0xFFFFF) != 0 || (io & 0xFFFFF) != 0) {
-        printf("[cellGcmSys] MapEaIoAddress REFUSED: ea 0x%08X / io 0x%08X not 1MB aligned\n", ea, io);
+        ps3_log("[cellGcmSys] MapEaIoAddress REFUSED: ea 0x%08X / io 0x%08X not 1MB aligned\n", ea, io);
         return CELL_GCM_ERROR_INVALID_ALIGNMENT;
     }
     if (size == 0 || (size & 0xFFFFF) != 0) {
-        printf("[cellGcmSys] MapEaIoAddress REFUSED: size 0x%X is not a non-zero multiple of 1MB\n", size);
+        ps3_log("[cellGcmSys] MapEaIoAddress REFUSED: size 0x%X is not a non-zero multiple of 1MB\n", size);
         return CELL_GCM_ERROR_INVALID_ALIGNMENT;
     }
     if (find_mapping_by_ea(ea) != NULL) {
-        printf("[cellGcmSys] MapEaIoAddress REFUSED: ea 0x%08X is already mapped\n", ea);
+        ps3_log("[cellGcmSys] MapEaIoAddress REFUSED: ea 0x%08X is already mapped\n", ea);
         return CELL_GCM_ERROR_ADDRESS_OVERWRAP;
     }
 
     IoMapping* mapping = find_free_mapping();
     if (!mapping) {
-        printf("[cellGcmSys] MapEaIoAddress REFUSED: no free IO mapping slots\n");
+        ps3_log("[cellGcmSys] MapEaIoAddress REFUSED: no free IO mapping slots\n");
         return CELL_GCM_ERROR_FAILURE;
     }
 
@@ -2734,7 +2733,7 @@ s32 cellGcmUnmapEaIoAddress(u32 ea)
     if (!mapping)
         return CELL_GCM_ERROR_FAILURE;
 
-    printf("[cellGcmSys] UnmapEaIoAddress(ea=0x%08X)\n", ea);
+    ps3_log("[cellGcmSys] UnmapEaIoAddress(ea=0x%08X)\n", ea);
 
     clear_offset_table(mapping->ea, mapping->io, mapping->size);
     mapping->active = 0;
@@ -2750,7 +2749,7 @@ s32 cellGcmUnmapIoAddress(u32 io)
     if (!mapping)
         return CELL_GCM_ERROR_FAILURE;
 
-    printf("[cellGcmSys] UnmapIoAddress(io=0x%08X)\n", io);
+    ps3_log("[cellGcmSys] UnmapIoAddress(io=0x%08X)\n", io);
 
     clear_offset_table(mapping->ea, mapping->io, mapping->size);
     mapping->active = 0;
@@ -2773,7 +2772,7 @@ s32 cellGcmIoOffsetToAddress(u32 ioOffset, u32* ea)
         return CELL_OK;
     }
 
-    printf("[cellGcmSys] WARNING: IoOffsetToAddress failed for 0x%08X\n", ioOffset);
+    ps3_log("[cellGcmSys] WARNING: IoOffsetToAddress failed for 0x%08X\n", ioOffset);
     vm_write32(ea_ea, 0);
     return CELL_GCM_ERROR_FAILURE;
 }
@@ -2855,7 +2854,7 @@ u32 cellGcmResolveLocated(int local, u32 offset)
 u32* cellGcmGetLabelAddress(u8 index)
 {
     if (index >= CELL_GCM_MAX_LABEL_COUNT) {
-        printf("[cellGcmSys] WARNING: GetLabelAddress index %u out of range\n", index);
+        ps3_log("[cellGcmSys] WARNING: GetLabelAddress index %u out of range\n", index);
         return NULL;
     }
     return (u32*)(uintptr_t)(GCM_LABEL_GUEST_BASE + (u32)index * GCM_LABEL_STRIDE);
@@ -2865,7 +2864,7 @@ u32* cellGcmGetLabelAddress(u8 index)
 CellGcmReportData* cellGcmGetReportDataAddress(u32 index)
 {
     if (index >= CELL_GCM_MAX_REPORT_COUNT) {
-        printf("[cellGcmSys] WARNING: GetReportDataAddress index %u out of range\n", index);
+        ps3_log("[cellGcmSys] WARNING: GetReportDataAddress index %u out of range\n", index);
         return NULL;
     }
     return &s_report_data[index];
@@ -2877,7 +2876,7 @@ CellGcmReportData* cellGcmGetReportDataAddress(u32 index)
 u32 cellGcmGetReport(u32 type, u32 index)
 {
     { static int n = 0;
-      if (n++ < 8 || (n % 2000) == 0) printf("[cellGcmSys] GetReport(type=%u, index=%u) -> %u%c", type, index,
+      if (n++ < 8 || (n % 2000) == 0) ps3_log("[cellGcmSys] GetReport(type=%u, index=%u) -> %u%c", type, index,
                           index < CELL_GCM_MAX_REPORT_COUNT ? s_report_data[index].value : 0u, 10); }
     if (index >= CELL_GCM_MAX_REPORT_COUNT) return 0;
     return s_report_data[index].value;
@@ -2907,7 +2906,7 @@ s32 cellGcmSetTile(u8 index, u8 location, u32 offset, u32 size,
     if (index >= CELL_GCM_MAX_TILE_COUNT)
         return CELL_GCM_ERROR_INVALID_VALUE;
 
-    printf("[cellGcmSys] SetTile(index=%u, loc=%u, offset=0x%X, size=0x%X, pitch=%u)\n",
+    ps3_log("[cellGcmSys] SetTile(index=%u, loc=%u, offset=0x%X, size=0x%X, pitch=%u)\n",
            index, location, offset, size, pitch);
 
     s_tiles[index].offset = offset;
@@ -2934,7 +2933,7 @@ s32 cellGcmSetZcull(u8 index, u32 offset, u32 width, u32 height,
     if (index >= CELL_GCM_MAX_ZCULL_COUNT)
         return CELL_GCM_ERROR_INVALID_VALUE;
 
-    printf("[cellGcmSys] SetZcull(index=%u, offset=0x%X, %ux%u)\n",
+    ps3_log("[cellGcmSys] SetZcull(index=%u, offset=0x%X, %ux%u)\n",
            index, offset, width, height);
 
     s_zcull[index].offset      = offset;
@@ -2959,7 +2958,7 @@ s32 cellGcmBindTile(u8 index)
     if (index >= CELL_GCM_MAX_TILE_COUNT)
         return CELL_GCM_ERROR_INVALID_VALUE;
 
-    printf("[cellGcmSys] BindTile(index=%u)\n", index);
+    ps3_log("[cellGcmSys] BindTile(index=%u)\n", index);
     s_tiles[index].bound = 1;
     return CELL_OK;
 }
@@ -2970,7 +2969,7 @@ s32 cellGcmBindZcull(u8 index)
     if (index >= CELL_GCM_MAX_ZCULL_COUNT)
         return CELL_GCM_ERROR_INVALID_VALUE;
 
-    printf("[cellGcmSys] BindZcull(index=%u)\n", index);
+    ps3_log("[cellGcmSys] BindZcull(index=%u)\n", index);
     s_zcull[index].bound = 1;
     return CELL_OK;
 }
@@ -2981,7 +2980,7 @@ s32 cellGcmUnbindTile(u8 index)
     if (index >= CELL_GCM_MAX_TILE_COUNT)
         return CELL_GCM_ERROR_INVALID_VALUE;
 
-    printf("[cellGcmSys] UnbindTile(index=%u)\n", index);
+    ps3_log("[cellGcmSys] UnbindTile(index=%u)\n", index);
     s_tiles[index].bound = 0;
     return CELL_OK;
 }
@@ -2992,7 +2991,7 @@ s32 cellGcmUnbindZcull(u8 index)
     if (index >= CELL_GCM_MAX_ZCULL_COUNT)
         return CELL_GCM_ERROR_INVALID_VALUE;
 
-    printf("[cellGcmSys] UnbindZcull(index=%u)\n", index);
+    ps3_log("[cellGcmSys] UnbindZcull(index=%u)\n", index);
     s_zcull[index].bound = 0;
     return CELL_OK;
 }
@@ -3018,14 +3017,14 @@ u32 cellGcmGetTiledPitchSize(u32 size)
             if (s_valid_pitches[i] >= size) { r = s_valid_pitches[i]; break; }
         }
     }
-    { static int _n=0; if (_n++<4) fprintf(stderr, "[cellGcmSys] GetTiledPitchSize(0x%X) -> 0x%X\n", size, r); }
+    { static int _n=0; if (_n++<4) ps3_log("[cellGcmSys] GetTiledPitchSize(0x%X) -> 0x%X\n", size, r); }
     return r;
 }
 
 /* NID: 0xBC982946 */
 void cellGcmSetDebugOutputLevel(u32 level)
 {
-    printf("[cellGcmSys] SetDebugOutputLevel(level=%u)\n", level);
+    ps3_log("[cellGcmSys] SetDebugOutputLevel(level=%u)\n", level);
     s_debug_level = level;
 }
 
@@ -3080,7 +3079,7 @@ static u32 s_default_fifo_size = 0x40000; /* 256KB default */
 
 s32 cellGcmSetDefaultFifoSize(u32 size)
 {
-    printf("[cellGcmSys] SetDefaultFifoSize(0x%X)\n", size);
+    ps3_log("[cellGcmSys] SetDefaultFifoSize(0x%X)\n", size);
     s_default_fifo_size = size;
     return CELL_OK;
 }
@@ -3134,7 +3133,7 @@ s32 cellGcmMapLocalMemory(u32* address, u32* size)
     vm_write32((uint32_t)(uintptr_t)address, s_config.localAddress);
     vm_write32((uint32_t)(uintptr_t)size,    s_config.localSize);
 
-    printf("[cellGcmSys] MapLocalMemory(address=0x%08X, size=0x%X)\n",
+    ps3_log("[cellGcmSys] MapLocalMemory(address=0x%08X, size=0x%X)\n",
            s_config.localAddress, s_config.localSize);
     return CELL_OK;
 }
@@ -3142,7 +3141,7 @@ s32 cellGcmMapLocalMemory(u32* address, u32* size)
 /* Shutdown RSX — clear all state */
 void cellGcmTerminate(void)
 {
-    printf("[cellGcmSys] Terminate\n");
+    ps3_log("[cellGcmSys] Terminate\n");
 
     s_gcm_initialized = 0;
     s_flip_mode   = CELL_GCM_DISPLAY_VSYNC;
@@ -3230,7 +3229,7 @@ u32 cellGcmGetVBlankCount(void)
 CellGcmTileInfo* cellGcmGetTileInfo(u8 index)
 {
     if (index >= CELL_GCM_MAX_TILE_COUNT) {
-        printf("[cellGcmSys] WARNING: GetTileInfo index %u out of range\n", index);
+        ps3_log("[cellGcmSys] WARNING: GetTileInfo index %u out of range\n", index);
         return NULL;
     }
     return &s_tiles[index];
@@ -3240,7 +3239,7 @@ CellGcmTileInfo* cellGcmGetTileInfo(u8 index)
 CellGcmZcullInfo* cellGcmGetZcullInfo(u8 index)
 {
     if (index >= CELL_GCM_MAX_ZCULL_COUNT) {
-        printf("[cellGcmSys] WARNING: GetZcullInfo index %u out of range\n", index);
+        ps3_log("[cellGcmSys] WARNING: GetZcullInfo index %u out of range\n", index);
         return NULL;
     }
     return &s_zcull[index];
@@ -3250,7 +3249,7 @@ CellGcmZcullInfo* cellGcmGetZcullInfo(u8 index)
 CellGcmDisplayInfo* cellGcmGetDisplayInfo(u32 index)
 {
     if (index >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM) {
-        printf("[cellGcmSys] WARNING: GetDisplayInfo index %u out of range\n", index);
+        ps3_log("[cellGcmSys] WARNING: GetDisplayInfo index %u out of range\n", index);
         return NULL;
     }
     return &s_display_buffers[index];
@@ -3259,14 +3258,14 @@ CellGcmDisplayInfo* cellGcmGetDisplayInfo(u32 index)
 /* Set default FIFO mode (before init) */
 void cellGcmInitDefaultFifoMode(s32 mode)
 {
-    printf("[cellGcmSys] InitDefaultFifoMode(mode=%d)\n", mode);
+    ps3_log("[cellGcmSys] InitDefaultFifoMode(mode=%d)\n", mode);
     s_default_fifo_mode = mode;
 }
 
 /* Set command buffer to defaults (reset put/get pointers) */
 void cellGcmSetDefaultCommandBuffer(void)
 {
-    printf("[cellGcmSys] SetDefaultCommandBuffer\n");
+    ps3_log("[cellGcmSys] SetDefaultCommandBuffer\n");
     s_control.put = 0;
     s_control.get = 0;
     s_control.ref = 0;
@@ -3298,7 +3297,7 @@ void cellGcmSetDefaultCommandBuffer(void)
     if (getenv("GCM_DEFAULT_CTX_REPOINT") && s_gcm_ctx_out_ea && s_gcm_context_ea) {
         vm_write32(s_gcm_context_ea + 0x8, vm_read32(s_gcm_context_ea + 0x0));
         vm_write32(s_gcm_ctx_out_ea, s_gcm_context_ea);
-        printf("[cellGcmSys] SetDefaultCommandBuffer: repointed "
+        ps3_log("[cellGcmSys] SetDefaultCommandBuffer: repointed "
                "gCellGcmCurrentContext@0x%08X -> 0x%08X\n",
                s_gcm_ctx_out_ea, s_gcm_context_ea);
     }
@@ -3307,7 +3306,7 @@ void cellGcmSetDefaultCommandBuffer(void)
 /* Debug dump — no-op in recomp */
 void cellGcmDumpGraphicsError(void)
 {
-    printf("[cellGcmSys] DumpGraphicsError (no-op)\n");
+    ps3_log("[cellGcmSys] DumpGraphicsError (no-op)\n");
 }
 
 /* Default command word size: 0x400 (1024) words */
@@ -3325,7 +3324,7 @@ u32 cellGcmGetDefaultSegmentWordSize(void)
 /* Immediate flip — perform flip right now */
 s32 cellGcmSetFlipImmediate(u32 bufferId)
 {
-    printf("[cellGcmSys] SetFlipImmediate(bufferId=%u)\n", bufferId);
+    ps3_log("[cellGcmSys] SetFlipImmediate(bufferId=%u)\n", bufferId);
     return cellGcmSetFlipCommand(bufferId);
 }
 
@@ -3338,28 +3337,28 @@ void cellGcmSetFlipStatus(u32 status)
 /* Store graphics handler callback */
 void cellGcmSetGraphicsHandler(CellGcmGraphicsHandler handler)
 {
-    printf("[cellGcmSys] SetGraphicsHandler(%p)\n", (void*)(size_t)handler);
+    ps3_log("[cellGcmSys] SetGraphicsHandler(%p)\n", (void*)(size_t)handler);
     s_graphics_handler = handler;
 }
 
 /* Store queue handler callback */
 void cellGcmSetQueueHandler(CellGcmQueueHandler handler)
 {
-    printf("[cellGcmSys] SetQueueHandler(%p)\n", (void*)(size_t)handler);
+    ps3_log("[cellGcmSys] SetQueueHandler(%p)\n", (void*)(size_t)handler);
     s_queue_handler = handler;
 }
 
 /* Set second V frequency */
 void cellGcmSetSecondVFrequency(u32 freq)
 {
-    printf("[cellGcmSys] SetSecondVFrequency(%u)\n", freq);
+    ps3_log("[cellGcmSys] SetSecondVFrequency(%u)\n", freq);
     s_second_v_frequency = freq;
 }
 
 /* Set VBlank frequency */
 void cellGcmSetVBlankFrequency(u32 freq)
 {
-    printf("[cellGcmSys] SetVBlankFrequency(%u)\n", freq);
+    ps3_log("[cellGcmSys] SetVBlankFrequency(%u)\n", freq);
     s_vblank_frequency = freq;
 }
 
@@ -3384,7 +3383,7 @@ s32 cellGcmSetInvalidateTile(u8 index)
     if (index >= CELL_GCM_MAX_TILE_COUNT)
         return CELL_GCM_ERROR_INVALID_VALUE;
 
-    printf("[cellGcmSys] SetInvalidateTile(index=%u)\n", index);
+    ps3_log("[cellGcmSys] SetInvalidateTile(index=%u)\n", index);
 
     s_tiles[index].bound = 0;
     memset(&s_tiles[index], 0, sizeof(CellGcmTileInfo));
@@ -3403,7 +3402,7 @@ CellGcmReportData* cellGcmGetReportDataAddressLocation(u32 index, u32 location)
     (void)location;  /* We only have one report area */
 
     if (index >= CELL_GCM_MAX_REPORT_COUNT) {
-        printf("[cellGcmSys] WARNING: GetReportDataAddressLocation index %u out of range\n", index);
+        ps3_log("[cellGcmSys] WARNING: GetReportDataAddressLocation index %u out of range\n", index);
         return NULL;
     }
     return &s_report_data[index];

@@ -36,7 +36,7 @@ static int atrac3p_alloc(void)
 
 s32 cellAdecAtrac3pOpen(const CellAdecAtrac3pConfig* config, CellAdecAtrac3pHandle* handle)
 {
-    printf("[cellAdecAtrac3p] Open()\n");
+    ps3_log("[cellAdecAtrac3p] Open()\n");
     if (!handle) return (s32)CELL_ADEC_ATRAC3P_ERROR_INVALID_ARGUMENT;
 
     int slot = atrac3p_alloc();
@@ -54,7 +54,7 @@ s32 cellAdecAtrac3pOpen(const CellAdecAtrac3pConfig* config, CellAdecAtrac3pHand
 
 s32 cellAdecAtrac3pClose(CellAdecAtrac3pHandle handle)
 {
-    printf("[cellAdecAtrac3p] Close(%u)\n", handle);
+    ps3_log("[cellAdecAtrac3p] Close(%u)\n", handle);
     if (handle >= ATRAC3P_MAX_HANDLES || !s_slots[handle].in_use)
         return (s32)CELL_ADEC_ATRAC3P_ERROR_INVALID_ARGUMENT;
 

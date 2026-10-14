@@ -128,7 +128,7 @@ fallback:
 
 s32 cellNetCtlInit(void)
 {
-    printf("[cellNetCtl] Init()\n");
+    ps3_log("[cellNetCtl] Init()\n");
 
     if (s_netctl_initialized)
         return CELL_NET_CTL_ERROR_NOT_TERMINATED;
@@ -140,7 +140,7 @@ s32 cellNetCtlInit(void)
 
 void cellNetCtlTerm(void)
 {
-    printf("[cellNetCtl] Term()\n");
+    ps3_log("[cellNetCtl] Term()\n");
 
     memset(s_handlers, 0, sizeof(s_handlers));
     s_netctl_initialized = 0;
@@ -162,12 +162,12 @@ s32 cellNetCtlGetState(s32* state)
          * after which the game proceeds offline. Still write a sane state
          * for callers that ignore the return value. */
         vm_write32((uint32_t)(uintptr_t)state, CELL_NET_CTL_STATE_Disconnected);
-        printf("[cellNetCtl] GetState() -> error NOT_INITIALIZED (offline mode)\n");
+        ps3_log("[cellNetCtl] GetState() -> error NOT_INITIALIZED (offline mode)\n");
         return CELL_NET_CTL_ERROR_NOT_INITIALIZED;
     }
 
     vm_write32((uint32_t)(uintptr_t)state, CELL_NET_CTL_STATE_IPObtained);
-    printf("[cellNetCtl] GetState() -> IPObtained\n");
+    ps3_log("[cellNetCtl] GetState() -> IPObtained\n");
     return CELL_OK;
 }
 
@@ -256,11 +256,11 @@ s32 cellNetCtlGetInfo(s32 code, CellNetCtlInfo* info)
         break;
 
     default:
-        printf("[cellNetCtl] GetInfo(code=%d) - unknown code\n", code);
+        ps3_log("[cellNetCtl] GetInfo(code=%d) - unknown code\n", code);
         return CELL_NET_CTL_ERROR_INVALID_CODE;
     }
 
-    printf("[cellNetCtl] GetInfo(code=%d) -> OK\n", code);
+    ps3_log("[cellNetCtl] GetInfo(code=%d) -> OK\n", code);
     return CELL_OK;
 }
 
@@ -279,7 +279,7 @@ s32 cellNetCtlGetNatInfo(CellNetCtlNatInfo* natInfo)
     natInfo->nat_type    = ps3_bswap32((u32)CELL_NET_CTL_NATINFO_NAT_TYPE_2); /* moderate */
     natInfo->mapped_addr = 0;
 
-    printf("[cellNetCtl] GetNatInfo() -> NAT Type 2\n");
+    ps3_log("[cellNetCtl] GetNatInfo() -> NAT Type 2\n");
     return CELL_OK;
 }
 
@@ -297,7 +297,7 @@ s32 cellNetCtlAddHandler(cellNetCtlHandler handler, void* arg, s32* hid)
             s_handlers[i].handler = handler;
             s_handlers[i].arg     = arg;
             vm_write32((uint32_t)(uintptr_t)hid, (uint32_t)i);   /* guest out-param */
-            printf("[cellNetCtl] AddHandler(hid=%d)\n", i);
+            ps3_log("[cellNetCtl] AddHandler(hid=%d)\n", i);
             return CELL_OK;
         }
     }
@@ -320,7 +320,7 @@ s32 cellNetCtlDelHandler(s32 hid)
     s_handlers[hid].handler = NULL;
     s_handlers[hid].arg     = NULL;
 
-    printf("[cellNetCtl] DelHandler(hid=%d)\n", hid);
+    ps3_log("[cellNetCtl] DelHandler(hid=%d)\n", hid);
     return CELL_OK;
 }
 
@@ -347,7 +347,7 @@ static void netstart_broadcast(u32 status)
 s32 cellNetCtlNetStartDialogLoadAsync(const CellNetCtlNetStartDialogParam* param)
 {
     (void)param;
-    printf("[cellNetCtl] NetStartDialogLoadAsync() -> auto-connect\n");
+    ps3_log("[cellNetCtl] NetStartDialogLoadAsync() -> auto-connect\n");
     netstart_broadcast(CELL_SYSUTIL_NET_CTL_NETSTART_LOADED);
     netstart_broadcast(CELL_SYSUTIL_NET_CTL_NETSTART_FINISHED);
     return CELL_OK;
@@ -355,7 +355,7 @@ s32 cellNetCtlNetStartDialogLoadAsync(const CellNetCtlNetStartDialogParam* param
 
 s32 cellNetCtlNetStartDialogAbortAsync(void)
 {
-    printf("[cellNetCtl] NetStartDialogAbortAsync()\n");
+    ps3_log("[cellNetCtl] NetStartDialogAbortAsync()\n");
     return CELL_OK;
 }
 
@@ -365,7 +365,7 @@ s32 cellNetCtlNetStartDialogUnloadAsync(CellNetCtlNetStartDialogResult* result)
         result = GUEST_PTR(result, CellNetCtlNetStartDialogResult*);
         result->result = 0;   /* 0 = connected; endian-safe */
     }
-    printf("[cellNetCtl] NetStartDialogUnloadAsync() -> result=0 (connected)\n");
+    ps3_log("[cellNetCtl] NetStartDialogUnloadAsync() -> result=0 (connected)\n");
     netstart_broadcast(CELL_SYSUTIL_NET_CTL_NETSTART_UNLOADED);
     return CELL_OK;
 }

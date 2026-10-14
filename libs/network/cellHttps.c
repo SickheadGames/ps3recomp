@@ -38,7 +38,7 @@ static int s_https_initialized = 0;
 s32 cellHttpsInit(u32 caCertNum, const CellHttpsData* caList)
 {
     (void)caCertNum; (void)caList;
-    printf("[cellHttps] Init(caCertNum=%u)\n", caCertNum);
+    ps3_log("[cellHttps] Init(caCertNum=%u)\n", caCertNum);
 
     if (s_https_initialized)
         return (s32)CELL_HTTPS_ERROR_ALREADY_INITIALIZED;
@@ -49,7 +49,7 @@ s32 cellHttpsInit(u32 caCertNum, const CellHttpsData* caList)
 
 s32 cellHttpsEnd(void)
 {
-    printf("[cellHttps] End()\n");
+    ps3_log("[cellHttps] End()\n");
 
     if (!s_https_initialized)
         return (s32)CELL_HTTPS_ERROR_NOT_INITIALIZED;
@@ -62,7 +62,7 @@ s32 cellHttpsSetCACert(CellHttpsHandle handle, const void* cert,
                        u32 certSize, u32 certType)
 {
     (void)cert; (void)certSize;
-    printf("[cellHttps] SetCACert(handle=%u, size=%u, type=%u)\n",
+    ps3_log("[cellHttps] SetCACert(handle=%u, size=%u, type=%u)\n",
            handle, certSize, certType);
 
     if (handle >= HTTPS_MAX_HANDLES || !s_slots[handle].in_use)
@@ -81,7 +81,7 @@ s32 cellHttpsSetClientCert(CellHttpsHandle handle, const void* cert,
                            u32 certSize, const void* key, u32 keySize)
 {
     (void)cert; (void)certSize; (void)key; (void)keySize;
-    printf("[cellHttps] SetClientCert(handle=%u)\n", handle);
+    ps3_log("[cellHttps] SetClientCert(handle=%u)\n", handle);
 
     if (handle >= HTTPS_MAX_HANDLES || !s_slots[handle].in_use)
         return (s32)CELL_HTTPS_ERROR_INVALID_ARGUMENT;
@@ -92,7 +92,7 @@ s32 cellHttpsSetClientCert(CellHttpsHandle handle, const void* cert,
 
 s32 cellHttpsClearCerts(CellHttpsHandle handle)
 {
-    printf("[cellHttps] ClearCerts(handle=%u)\n", handle);
+    ps3_log("[cellHttps] ClearCerts(handle=%u)\n", handle);
 
     if (handle >= HTTPS_MAX_HANDLES || !s_slots[handle].in_use)
         return (s32)CELL_HTTPS_ERROR_INVALID_ARGUMENT;
@@ -104,7 +104,7 @@ s32 cellHttpsClearCerts(CellHttpsHandle handle)
 
 s32 cellHttpsSetVerifyLevel(CellHttpsHandle handle, u32 verifyPeer, u32 verifyHost)
 {
-    printf("[cellHttps] SetVerifyLevel(handle=%u, peer=%u, host=%u)\n",
+    ps3_log("[cellHttps] SetVerifyLevel(handle=%u, peer=%u, host=%u)\n",
            handle, verifyPeer, verifyHost);
 
     if (handle >= HTTPS_MAX_HANDLES || !s_slots[handle].in_use)
@@ -118,7 +118,7 @@ s32 cellHttpsSetVerifyLevel(CellHttpsHandle handle, u32 verifyPeer, u32 verifyHo
 s32 cellHttpsGetCertInfo(CellHttpsHandle handle, CellHttpsCertInfo* info)
 {
     info = GUEST_PTR(info, CellHttpsCertInfo*);
-    printf("[cellHttps] GetCertInfo(handle=%u)\n", handle);
+    ps3_log("[cellHttps] GetCertInfo(handle=%u)\n", handle);
 
     if (handle >= HTTPS_MAX_HANDLES || !s_slots[handle].in_use)
         return (s32)CELL_HTTPS_ERROR_INVALID_ARGUMENT;

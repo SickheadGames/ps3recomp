@@ -103,7 +103,7 @@ void spu_coh_reserve(spu_context* ctx, uint32_t ea)
      * still get their events; this one would silently never wake, so say so. */
     { static int warned = 0;
       if (!warned) { warned = 1;
-          fprintf(stderr, "[spu-coh] more than %d reserving SPU contexts -- "
+          ps3_log("[spu-coh] more than %d reserving SPU contexts -- "
                           "spu=0x%X will not receive lock-line events\n",
                   SPU_COH_MAX_CTX, ctx->spu_id);
           fflush(stderr); } }
@@ -147,7 +147,7 @@ void spu_coh_forget_range(uintptr_t lo, uintptr_t hi)
         if (c >= lo && c < hi) {
             static int _n = 0;
             if (_n++ < 16)
-                fprintf(stderr, "[spu-coh] leaked ctx %p (img=%d) dropped at thread exit\n",
+                ps3_log("[spu-coh] leaked ctx %p (img=%d) dropped at thread exit\n",
                         (void*)c, s_coh_ctxs[i]->image_id);
             s_coh_ctxs[i] = NULL;
         }
@@ -203,7 +203,7 @@ void spu_coh_notify_write(uint32_t ea)
               if (s_w < 0) s_w = getenv("SPU_PUTLLC_WHY") ? 1 : 0;
               if (s_w) { static unsigned long long n;
                   if ((++n % 200000) == 1)
-                      fprintf(stderr, "[resv-lost] %llu: line 0x%08X taken from img=%d ctx=%p\n",
+                      ps3_log("[resv-lost] %llu: line 0x%08X taken from img=%d ctx=%p\n",
                               n, line, c->image_id, (void*)c); } }
             g_spu_lr_raise++;
             /* The event_status store has to be visible before the wake. The

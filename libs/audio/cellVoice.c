@@ -6,6 +6,7 @@
  */
 
 #include "cellVoice.h"
+#include "ps3emu/logging.h"
 #include <stdio.h>
 #include <string.h>
 #include "../../runtime/ppu/ppu_memory.h"   /* GUEST_PTR, vm_write*: guest EA -> host */
@@ -27,7 +28,7 @@ static VoicePort s_ports[CELL_VOICE_PORT_MAX];
 s32 cellVoiceInit(const CellVoiceInitParam* param)
 {
     (void)param;
-    printf("[cellVoice] Init()\n");
+    ps3_print("[cellVoice] Init()\n");
     if (s_initialized)
         return (s32)CELL_VOICE_ERROR_ALREADY_INITIALIZED;
     memset(s_ports, 0, sizeof(s_ports));
@@ -38,7 +39,7 @@ s32 cellVoiceInit(const CellVoiceInitParam* param)
 
 s32 cellVoiceEnd(void)
 {
-    printf("[cellVoice] End()\n");
+    ps3_print("[cellVoice] End()\n");
     s_initialized = 0;
     s_started = 0;
     return CELL_OK;
@@ -85,7 +86,7 @@ s32 cellVoiceDisconnectIPortFromOPort(CellVoicePortId inPortId, CellVoicePortId 
 
 s32 cellVoiceStart(void)
 {
-    printf("[cellVoice] Start()\n");
+    ps3_print("[cellVoice] Start()\n");
     if (!s_initialized) return (s32)CELL_VOICE_ERROR_NOT_INITIALIZED;
     s_started = 1;
     return CELL_OK;
@@ -93,7 +94,7 @@ s32 cellVoiceStart(void)
 
 s32 cellVoiceStop(void)
 {
-    printf("[cellVoice] Stop()\n");
+    ps3_print("[cellVoice] Stop()\n");
     if (!s_initialized) return (s32)CELL_VOICE_ERROR_NOT_INITIALIZED;
     s_started = 0;
     return CELL_OK;

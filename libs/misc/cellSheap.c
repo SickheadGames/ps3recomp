@@ -39,7 +39,7 @@ static u32 align_up(u32 val, u32 alignment)
 
 s32 cellSheapInitialize(const CellSheapAttr* attr, CellSheapHandle* handle)
 {
-    printf("[cellSheap] Initialize()\n");
+    ps3_log("[cellSheap] Initialize()\n");
 
     /* CellSheapAttr is { void* heapBase; u32 heapSize; u32 align; ... } --
      * the base is a 4-byte EA to the guest and 8 bytes to us, so every
@@ -74,7 +74,7 @@ s32 cellSheapInitialize(const CellSheapAttr* attr, CellSheapHandle* handle)
 
 s32 cellSheapFinalize(CellSheapHandle handle)
 {
-    printf("[cellSheap] Finalize(%u)\n", handle);
+    ps3_log("[cellSheap] Finalize(%u)\n", handle);
     if (handle >= CELL_SHEAP_MAX || !s_heaps[handle].in_use)
         return (s32)CELL_SHEAP_ERROR_INVAL;
     s_heaps[handle].in_use = 0;

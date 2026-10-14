@@ -16,7 +16,7 @@ static int s_initialized = 0;
 
 s32 cellMusicExportInit(void)
 {
-    printf("[cellMusicExport] Init()\n");
+    ps3_log("[cellMusicExport] Init()\n");
     if (s_initialized)
         return (s32)CELL_MUSIC_EXPORT_ERROR_ALREADY_INITIALIZED;
     s_initialized = 1;
@@ -25,7 +25,7 @@ s32 cellMusicExportInit(void)
 
 s32 cellMusicExportEnd(void)
 {
-    printf("[cellMusicExport] End()\n");
+    ps3_log("[cellMusicExport] End()\n");
     s_initialized = 0;
     return CELL_OK;
 }
@@ -34,7 +34,7 @@ s32 cellMusicExportStart(const CellMusicExportParam* param,
                           CellMusicExportCallback callback, void* userdata)
 {
     (void)param;
-    printf("[cellMusicExport] Start() - not supported\n");
+    ps3_log("[cellMusicExport] Start() - not supported\n");
     if (!s_initialized)
         return (s32)CELL_MUSIC_EXPORT_ERROR_NOT_INITIALIZED;
 

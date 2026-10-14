@@ -29,7 +29,7 @@ s32 sceNpBasicInit(void* poolMem, u32 poolSize)
 {
     (void)poolMem;
     (void)poolSize;
-    printf("[sceNpBasic] Init(poolSize=%u)\n", poolSize);
+    ps3_log("[sceNpBasic] Init(poolSize=%u)\n", poolSize);
 
     if (s_initialized)
         return (s32)SCE_NP_BASIC_ERROR_ALREADY_INITIALIZED;
@@ -44,7 +44,7 @@ s32 sceNpBasicInit(void* poolMem, u32 poolSize)
 
 s32 sceNpBasicTerm(void)
 {
-    printf("[sceNpBasic] Term()\n");
+    ps3_log("[sceNpBasic] Term()\n");
 
     if (!s_initialized)
         return (s32)SCE_NP_BASIC_ERROR_NOT_INITIALIZED;
@@ -77,7 +77,7 @@ s32 sceNpBasicRegisterHandler(SceNpBasicEventHandler handler,
                                SceNpBasicPresenceHandler presenceHandler,
                                void* arg)
 {
-    printf("[sceNpBasic] RegisterHandler()\n");
+    ps3_log("[sceNpBasic] RegisterHandler()\n");
 
     if (!s_initialized)
         return (s32)SCE_NP_BASIC_ERROR_NOT_INITIALIZED;
@@ -90,7 +90,7 @@ s32 sceNpBasicRegisterHandler(SceNpBasicEventHandler handler,
 
 s32 sceNpBasicUnregisterHandler(void)
 {
-    printf("[sceNpBasic] UnregisterHandler()\n");
+    ps3_log("[sceNpBasic] UnregisterHandler()\n");
 
     if (!s_initialized)
         return (s32)SCE_NP_BASIC_ERROR_NOT_INITIALIZED;
@@ -139,7 +139,7 @@ s32 sceNpBasicGetFriendPresence(const SceNpOnlineId* onlineId,
 s32 sceNpBasicSetPresence(const SceNpBasicPresence* presence)
 {
     presence = GUEST_PTR(presence, const SceNpBasicPresence*);
-    printf("[sceNpBasic] SetPresence()\n");
+    ps3_log("[sceNpBasic] SetPresence()\n");
 
     if (!s_initialized)
         return (s32)SCE_NP_BASIC_ERROR_NOT_INITIALIZED;
@@ -158,7 +158,7 @@ s32 sceNpBasicSendMessage(const SceNpOnlineId* to,
     (void)body;
     (void)bodySize;
 
-    printf("[sceNpBasic] SendMessage(to=%.16s)\n",
+    ps3_log("[sceNpBasic] SendMessage(to=%.16s)\n",
            to ? to->data : "(null)");
 
     if (!s_initialized)
@@ -175,7 +175,7 @@ s32 sceNpBasicSendMessageAttachment(const SceNpOnlineId* to,
     (void)data;
     (void)dataSize;
 
-    printf("[sceNpBasic] SendMessageAttachment(to=%.16s, subj=%s)\n",
+    ps3_log("[sceNpBasic] SendMessageAttachment(to=%.16s, subj=%s)\n",
            to ? to->data : "(null)",
            subject ? subject : "(null)");
 
@@ -192,7 +192,7 @@ s32 sceNpBasicSendInGameInvitation(const SceNpOnlineId* to,
     (void)data;
     (void)dataSize;
 
-    printf("[sceNpBasic] SendInGameInvitation(to=%.16s)\n",
+    ps3_log("[sceNpBasic] SendInGameInvitation(to=%.16s)\n",
            to ? to->data : "(null)");
 
     if (!s_initialized)
@@ -228,7 +228,7 @@ s32 sceNpBasicGetBlockListEntryCount(u32* count)
 s32 sceNpBasicAddBlockListEntry(const SceNpOnlineId* onlineId)
 {
     onlineId = GUEST_PTR(onlineId, const SceNpOnlineId*);
-    printf("[sceNpBasic] AddBlockListEntry(%.16s)\n",
+    ps3_log("[sceNpBasic] AddBlockListEntry(%.16s)\n",
            onlineId ? onlineId->data : "(null)");
 
     if (!s_initialized)

@@ -85,12 +85,12 @@ void spu_task_launch_check(spu_context* ctx, void* fn)
         !ctx->policy_mode && ctx->image_id > 0) {
         static int _n = 0;
         if (_n++ < 8)
-            fprintf(stderr, "[spurs-job] img=%d branched to LS 0 -- job complete\n",
+            ps3_log("[spurs-job] img=%d branched to LS 0 -- job complete\n",
                     ctx->image_id);
         if (s_et >= 0 && ctx->image_id == s_et) {
-            fprintf(stderr, "[spu-exit] img=%d last PCs:", ctx->image_id);
+            ps3_log("[spu-exit] img=%d last PCs:", ctx->image_id);
             for (int i = 32; i >= 1; i--)
-                fprintf(stderr, " %05X", s_ring[(s_ri - i) & 63]);
+                ps3_log(" %05X", s_ring[(s_ri - i) & 63]);
             fputc(10, stderr); fflush(stderr);
         }
         spu_halt(ctx);
@@ -110,7 +110,7 @@ void spu_task_launch_check(spu_context* ctx, void* fn)
               ((uint32_t)ctx->pc & SPU_LS_MASK) == (uint32_t)s_from) s_armed = 1;
           static int n = 0;
           if ((s_from < 0 || s_armed) && n++ < 40) {
-              fprintf(stderr, "[step] pc=0x%05X r1=0x%05X r2=0x%08X r3=0x%08X r4=0x%08X\n",
+              ps3_log("[step] pc=0x%05X r1=0x%05X r2=0x%08X r3=0x%08X r4=0x%08X\n",
                       (uint32_t)ctx->pc & SPU_LS_MASK, ctx->gpr[1]._u32[0],
                       ctx->gpr[2]._u32[0], ctx->gpr[3]._u32[0], ctx->gpr[4]._u32[0]);
               fflush(stderr);
@@ -146,7 +146,7 @@ void spu_task_launch_check(spu_context* ctx, void* fn)
     }
     static int _n = 0;
     if (marked && _n++ < 12)
-        fprintf(stderr, "[pm-jobdrain] ring-full spin: marked %d pending records done\n", marked);
+        ps3_log("[pm-jobdrain] ring-full spin: marked %d pending records done\n", marked);
 }
 
 /* Restore the active image after a lifted call bracket. The brsl/bisl emission
@@ -256,7 +256,7 @@ int spu_irq_regs_maybe_restore(spu_context* ctx)
                     { static int s_it = -1; if (s_it < 0) s_it = getenv("SPU_IRQTRACE") ? 1 : 0;
                       static int _n = 0;
                       if (s_it && _n++ < 200)
-                          fprintf(stderr, "[irq] IRET at depth %u unwinds to taking frame depth %u (srr0=0x%05X)\n",
+                          ps3_log("[irq] IRET at depth %u unwinds to taking frame depth %u (srr0=0x%05X)\n",
                                   ctx->host_depth, f->depth, ctx->pc & SPU_LS_MASK); }
                     longjmp(f->env, 1);
                 }
@@ -267,7 +267,7 @@ int spu_irq_regs_maybe_restore(spu_context* ctx)
                     { static int s_it = -1; if (s_it < 0) s_it = getenv("SPU_IRQTRACE") ? 1 : 0;
                       static int _n = 0;
                       if (s_it && _n++ < 200)
-                          fprintf(stderr, "[irq] IRET at depth %u unwinds to the driver (srr0=0x%05X)\n",
+                          ps3_log("[irq] IRET at depth %u unwinds to the driver (srr0=0x%05X)\n",
                                   ctx->host_depth, ctx->pc & SPU_LS_MASK); }
                     extern void spu_restart_dispatch(spu_context*);
                     spu_restart_dispatch(ctx);
@@ -300,7 +300,7 @@ void (*spu_take_interrupt(spu_context* ctx,
     } else {
         static int _w = 0;
         if (_w++ < 4)
-            fprintf(stderr, "[spu-int] pending (st=0x%X mask=0x%X) but LS0 word "
+            ps3_log("[spu-int] pending (st=0x%X mask=0x%X) but LS0 word "
                     "0x%08X is no branch -- not taken\n",
                     ctx->event_status, ctx->event_mask, w);
         return tf;
@@ -310,7 +310,7 @@ void (*spu_take_interrupt(spu_context* ctx,
     spu_irq_regs_save(ctx);          /* hardware contract: handler preserves regs */
     { static int s_it = -1; if (s_it < 0) s_it = getenv("SPU_IRQTRACE") ? 1 : 0;
       if (s_it) { static int _n = 0; if (_n++ < 200)
-        fprintf(stderr, "[irq] TAKE srr0=0x%05X depth=%d r13=%08X r15=%08X\n",
+        ps3_log("[irq] TAKE srr0=0x%05X depth=%d r13=%08X r15=%08X\n",
                 ctx->srr0 & SPU_LS_MASK, ctx->host_depth,
                 ctx->gpr[13]._u32[0], ctx->gpr[15]._u32[0]); } }
     ctx->pc = target & SPU_LS_MASK;
@@ -322,7 +322,7 @@ void (*spu_take_interrupt(spu_context* ctx,
            * (b) loadJobState's HALFWORDS compare equal to 1 (ceqhi).
            * Log both at interrupt entry so we can see which test fails. */
           const uint8_t* js = ctx->ls + 0x12A0;   /* g_WwsJob_loadJobState quadword */
-          fprintf(stderr, "[spu-int] TAKEN img=%d events=0x%X&0x%X vector->0x%05X "
+          ps3_log("[spu-int] TAKEN img=%d events=0x%X&0x%X vector->0x%05X "
                   "(srr0=0x%05X) stallstat=0x%X parked=0x%X loadJobState@12A0=%02X%02X%02X%02X "
                   "%02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X\n", ctx->image_id,
                   ctx->event_status, ctx->event_mask, ctx->pc, ctx->srr0,
@@ -354,15 +354,15 @@ void spu_depth_guard(spu_context* ctx)
     static int s_reported = 0;
     if (s_reported < 1) {   /* one report: five SPU threads all trip together */
         s_reported++;
-        fprintf(stderr, "[spu-depth] img=%d pc=0x%05X lr=0x%05X host_depth=%u"
+        ps3_log("[spu-depth] img=%d pc=0x%05X lr=0x%05X host_depth=%u"
                         " -- lifted call recursion, halting the SPU\n",
                 ctx->image_id, (uint32_t)ctx->pc & SPU_LS_MASK,
                 ctx->gpr[0]._u32[0] & SPU_LS_MASK, ctx->host_depth);
-        fprintf(stderr, "[spu-depth] recent drain sites (oldest first):");
+        ps3_log("[spu-depth] recent drain sites (oldest first):");
         uint32_t start = (s_n > RING) ? (s_n - RING) : 0;
         for (uint32_t k = start; k < s_n; k++)
-            fprintf(stderr, " %05X", s_ring[k % RING]);
-        fprintf(stderr, "\n");
+            ps3_log(" %05X", s_ring[k % RING]);
+        ps3_log("\n");
         fflush(stderr);
     }
     { extern void spu_halt(spu_context*); spu_halt(ctx); }
@@ -453,7 +453,7 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
             if (!fn) fn = spu_lookup(pc, ctx->image_id);
             if (fn) {
                 { static int _n = 0; if (_n++ < 8)
-                    fprintf(stderr, "[spu] drain-resume return_pc=0x%05X at lifted entry 0x%05X img=%d depth=%d ovl=%d\n",
+                    ps3_log("[spu] drain-resume return_pc=0x%05X at lifted entry 0x%05X img=%d depth=%d ovl=%d\n",
                             (unsigned)(return_pc & SPU_LS_MASK), pc, ctx->image_id, ctx->host_depth,
                             (int)ctx->resident_ovl); }
                 g_spu_trampoline_fn = spu_indirect_branch;

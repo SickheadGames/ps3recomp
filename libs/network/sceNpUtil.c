@@ -27,7 +27,7 @@ static int s_bw_test_running = 0;
 s32 sceNpUtilBandwidthTestInitStart(u32 flags)
 {
     (void)flags;
-    printf("[sceNpUtil] BandwidthTestInitStart()\n");
+    ps3_log("[sceNpUtil] BandwidthTestInitStart()\n");
     s_bw_test_running = 1;
     return CELL_OK;
 }
@@ -53,14 +53,14 @@ s32 sceNpUtilBandwidthTestGetStatus(SceNpBandwidthTestResult* result)
 
 s32 sceNpUtilBandwidthTestShutdown(void)
 {
-    printf("[sceNpUtil] BandwidthTestShutdown()\n");
+    ps3_log("[sceNpUtil] BandwidthTestShutdown()\n");
     s_bw_test_running = 0;
     return CELL_OK;
 }
 
 s32 sceNpUtilBandwidthTestAbort(void)
 {
-    printf("[sceNpUtil] BandwidthTestAbort()\n");
+    ps3_log("[sceNpUtil] BandwidthTestAbort()\n");
     s_bw_test_running = 0;
     return CELL_OK;
 }
@@ -80,7 +80,7 @@ s32 sceNpUtilGetNpEnv(s32* env)
 
 s32 sceNpUtilSetNpEnv(s32 env)
 {
-    printf("[sceNpUtil] SetNpEnv(%d)\n", env);
+    ps3_log("[sceNpUtil] SetNpEnv(%d)\n", env);
     s_np_env = env;
     return CELL_OK;
 }

@@ -61,7 +61,7 @@ s32 cellPngEncQueryAttr(const CellPngEncParam* param, u32* workMemSize)
 
 s32 cellPngEncCreate(const CellPngEncParam* param, CellPngEncHandle* handle)
 {
-    printf("[cellPngEnc] Create(%ux%u, colorSpace=%u)\n",
+    ps3_log("[cellPngEnc] Create(%ux%u, colorSpace=%u)\n",
            param ? vm_read32(GUEST_EA(param) + (u32)offsetof(CellPngEncParam, width)) : 0,
            param ? vm_read32(GUEST_EA(param) + (u32)offsetof(CellPngEncParam, height)) : 0,
            param ? vm_read32(GUEST_EA(param)
@@ -84,7 +84,7 @@ s32 cellPngEncCreate(const CellPngEncParam* param, CellPngEncHandle* handle)
 
 s32 cellPngEncDestroy(CellPngEncHandle handle)
 {
-    printf("[cellPngEnc] Destroy(%u)\n", handle);
+    ps3_log("[cellPngEnc] Destroy(%u)\n", handle);
     if (handle >= CELL_PNGENC_HANDLE_MAX || !s_handles[handle].in_use)
         return (s32)CELL_PNGENC_ERROR_INVALID_ARGUMENT;
     s_handles[handle].in_use = 0;
@@ -119,7 +119,7 @@ s32 cellPngEncEncode(CellPngEncHandle handle, const void* inputData,
         break;
     }
 
-    printf("[cellPngEnc] Encode(%ux%u, %d channels)\n", w, h_px, channels);
+    ps3_log("[cellPngEnc] Encode(%ux%u, %d channels)\n", w, h_px, channels);
 
     /* For ARGB input, we need to swizzle to RGBA for stb */
     const u8* src = (const u8*)inputData;
@@ -170,7 +170,7 @@ s32 cellPngEncEncode(CellPngEncHandle handle, const void* inputData,
     vm_write32(out_ea + (u32)offsetof(CellPngEncOutputInfo, outputData), 0);
     vm_write32(out_ea + (u32)offsetof(CellPngEncOutputInfo, outputSize), ctx.size);
     free(ctx.data);
-    printf("[cellPngEnc] Encode complete: %u bytes\n", ctx.size);
+    ps3_log("[cellPngEnc] Encode complete: %u bytes\n", ctx.size);
 
     return CELL_OK;
 }

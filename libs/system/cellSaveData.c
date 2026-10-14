@@ -297,7 +297,7 @@ static s32 dispatch_func_stat_full(uint32_t func_opd, int is_new, const char* di
     uint32_t get_ea = scratch_alloc(SAVEDATA_STATGET_SIZE);
     uint32_t set_ea = scratch_alloc(SAVEDATA_STATSET_SIZE);
     if (!cb_ea || !get_ea || !set_ea) {
-        printf("[cellSaveData] scratch alloc failed\n");
+        ps3_log("[cellSaveData] scratch alloc failed\n");
         return CELL_SAVEDATA_CBRESULT_ERR_FAILURE;
     }
 
@@ -330,7 +330,7 @@ static s32 dispatch_func_stat_full(uint32_t func_opd, int is_new, const char* di
     }
     /* StatSet zero-init by scratch_alloc */
 
-    printf("[cellSaveData] dispatching funcStat OPD=0x%08X (cb=0x%X get=0x%X set=0x%X, isNew=%d, userdata=0x%08X)\n",
+    ps3_log("[cellSaveData] dispatching funcStat OPD=0x%08X (cb=0x%X get=0x%X set=0x%X, isNew=%d, userdata=0x%08X)\n",
            func_opd, cb_ea, get_ea, set_ea, is_new, *userdata_ea);
     g_ps3_guest_caller(func_opd, cb_ea, get_ea, set_ea, 0, 0, 0, 0, 0);
 
@@ -342,7 +342,7 @@ static s32 dispatch_func_stat_full(uint32_t func_opd, int is_new, const char* di
         output->indicator = NULL;
     }
     s32 result = marshal_cbresult_read_result(cb_ea);
-    printf("[cellSaveData] funcStat returned cbResult.result=%d\n", result);
+    ps3_log("[cellSaveData] funcStat returned cbResult.result=%d\n", result);
     return result;
 }
 
@@ -406,7 +406,7 @@ static s32 dispatch_func_select(uint32_t func_opd, const CellSaveDataDirList* di
     vm_write32(get_ea + 4, listed);          /* dirListNum */
     vm_write32(get_ea + 8, listed ? buf_ea : 0);
 
-    printf("[cellSaveData] dispatching %s OPD=0x%08X (dirNum=%u listed=%u)%c",
+    ps3_log("[cellSaveData] dispatching %s OPD=0x%08X (dirNum=%u listed=%u)%c",
            who, func_opd, dirCount, listed, 10);
     g_ps3_guest_caller(func_opd, cb_ea, get_ea, set_ea, 0, 0, 0, 0, 0);
 
@@ -426,7 +426,7 @@ static s32 dispatch_func_select(uint32_t func_opd, const CellSaveDataDirList* di
         }
         selected[63] = '\0';
     }
-    printf("[cellSaveData] %s returned cbResult.result=%d fixed=%u newData=%s -> '%s'%c",
+    ps3_log("[cellSaveData] %s returned cbResult.result=%d fixed=%u newData=%s -> '%s'%c",
            who, result, fixed_n, new_name ? "yes" : "no", selected, 10);
     return result;
 }
@@ -674,7 +674,7 @@ static s32 process_file_op(const char* save_path, CellSaveDataFileSet* set)
     case CELL_SAVEDATA_FILEOP_READ: {
         FILE* fp = fopen(file_path, "rb");
         if (!fp) {
-            printf("[cellSaveData] file read: cannot open '%s'\n", file_path);
+            ps3_log("[cellSaveData] file read: cannot open '%s'\n", file_path);
             return CELL_SAVEDATA_ERROR_ACCESS_ERROR;
         }
         if (set->fileOffset > 0) {
@@ -706,7 +706,7 @@ static s32 process_file_op(const char* save_path, CellSaveDataFileSet* set)
             fp = fopen(file_path, "wb");
         }
         if (!fp) {
-            printf("[cellSaveData] file write: cannot open '%s'\n", file_path);
+            ps3_log("[cellSaveData] file write: cannot open '%s'\n", file_path);
             return CELL_SAVEDATA_ERROR_ACCESS_ERROR;
         }
         if (set->fileOffset > 0) {
@@ -814,7 +814,7 @@ static s32 savedata_execute(const char* dirName, int is_save,
 
     int is_new = !dir_has_save(save_path);
 
-    printf("[cellSaveData] %s dir='%s' (new=%d)\n",
+    ps3_log("[cellSaveData] %s dir='%s' (new=%d)\n",
            is_save ? "SAVE" : "LOAD", dirName, is_new);
 
     /* If loading and directory doesn't exist, it's not an error -
@@ -890,7 +890,7 @@ static s32 savedata_execute(const char* dirName, int is_save,
                          dirName, &callback_userdata, &statGet, &statSet);
 
     if (cbResult.result < 0) {
-        printf("[cellSaveData] stat callback returned error %d\n", cbResult.result);
+        ps3_log("[cellSaveData] stat callback returned error %d\n", cbResult.result);
         free(fileList);
         if (cbResult.result == CELL_SAVEDATA_CBRESULT_ERR_NODATA)
             return CELL_SAVEDATA_ERROR_NODATA;
@@ -916,7 +916,7 @@ static s32 savedata_execute(const char* dirName, int is_save,
                                                  &callback_userdata, exc_size, &fileSet);
             if (cbResult.result != CELL_SAVEDATA_CBRESULT_OK_NEXT) break;
             s32 exc = process_file_op(save_path, &fileSet);
-            printf("[cellSaveData] file op=%u type=%u name='%s' off=%u size=%u buf=%u -> %d\n",
+            ps3_log("[cellSaveData] file op=%u type=%u name='%s' off=%u size=%u buf=%u -> %d\n",
                    fileSet.fileOperation, fileSet.fileType,
                    fileSet.fileName ? fileSet.fileName : "", fileSet.fileOffset,
                    fileSet.fileSize, fileSet.fileBufSize, exc);
@@ -933,7 +933,7 @@ static s32 savedata_execute(const char* dirName, int is_save,
         return CELL_SAVEDATA_ERROR_CBRESULT;
     }
 
-    printf("[cellSaveData] %s complete for '%s'\n",
+    ps3_log("[cellSaveData] %s complete for '%s'\n",
            is_save ? "SAVE" : "LOAD", dirName);
     return CELL_OK;
 }
@@ -949,7 +949,7 @@ s32 cellSaveDataListSave2(u32 version, CellSaveDataSetList* setList,
                            CellSaveDataFileCallback funcFile,
                            u32 container, void* userdata)
 {
-    printf("[cellSaveData] ListSave2(version=%u)\n", version);
+    ps3_log("[cellSaveData] ListSave2(version=%u)\n", version);
 
     if (!setList || !setBuf || !funcList || !funcStat)
         return CELL_SAVEDATA_ERROR_PARAM;
@@ -1011,7 +1011,7 @@ s32 cellSaveDataListLoad2(u32 version, CellSaveDataSetList* setList,
                            CellSaveDataFileCallback funcFile,
                            u32 container, void* userdata)
 {
-    printf("[cellSaveData] ListLoad2(version=%u)\n", version);
+    ps3_log("[cellSaveData] ListLoad2(version=%u)\n", version);
 
     if (!setList || !setBuf || !funcList || !funcStat)
         return CELL_SAVEDATA_ERROR_PARAM;
@@ -1075,7 +1075,7 @@ s32 cellSaveDataListLoad2(u32 version, CellSaveDataSetList* setList,
  * only -- the value returned is unchanged. */
 static void savedata_reject_log(const char* fn, const char* why, int rc)
 {
-    printf("[cellSaveData] %s: %s (rc=0x%08X)\n", fn, why, (unsigned)rc);
+    ps3_log("[cellSaveData] %s: %s (rc=0x%08X)\n", fn, why, (unsigned)rc);
 }
 #define SAVEDATA_REJECT(rc, why) \
     do { savedata_reject_log(__func__, (why), (rc)); return (rc); } while (0)
@@ -1126,7 +1126,7 @@ static s32 savedata_fixed(int is_save, CellSaveDataSetList* setList,
         case CELL_SAVEDATA_CBRESULT_ERR_NODATA:  w = "funcFixed: ERR_NODATA -- it found nothing it wanted in our dirList"; break;
         case CELL_SAVEDATA_CBRESULT_ERR_INVALID: w = "funcFixed: ERR_INVALID"; break;
         }
-        printf("[cellSaveData] savedata_fixed: cbresult=%d listed=%u/%u prefix='%s' root='%s'\n",
+        ps3_log("[cellSaveData] savedata_fixed: cbresult=%d listed=%u/%u prefix='%s' root='%s'\n",
                result, listed, count,
                prefix ? (const char*)(vm_base + prefix) : "", s_save_root);
         SAVEDATA_REJECT(CELL_SAVEDATA_ERROR_CBRESULT, w);
@@ -1144,7 +1144,7 @@ static s32 savedata_fixed(int is_save, CellSaveDataSetList* setList,
     /* The selected string may be inside callback scratch, reused by funcStat. */
     char directory[CELL_SAVEDATA_DIRNAME_SIZE];
     memcpy(directory, name, len + 1);
-    printf("[cellSaveData] %s: proceeding with dir='%s' (%u listed)\n",
+    ps3_log("[cellSaveData] %s: proceeding with dir='%s' (%u listed)\n",
            __func__, directory, listed);
     return savedata_execute(directory, is_save, setBuf, funcStat, funcFile,
                             (void*)(uintptr_t)vm_read32(cb + 16));
@@ -1158,7 +1158,7 @@ s32 cellSaveDataFixedSave2(u32 version, CellSaveDataSetList* setList,
                             u32 container, void* userdata)
 {
     (void)container;
-    printf("[cellSaveData] FixedSave2(version=%u)\n", version);
+    ps3_log("[cellSaveData] FixedSave2(version=%u)\n", version);
     return savedata_fixed(1, setList, setBuf, funcFixed, funcStat, funcFile, userdata);
 }
 
@@ -1170,7 +1170,7 @@ s32 cellSaveDataFixedLoad2(u32 version, CellSaveDataSetList* setList,
                             u32 container, void* userdata)
 {
     (void)container;
-    printf("[cellSaveData] FixedLoad2(version=%u)\n", version);
+    ps3_log("[cellSaveData] FixedLoad2(version=%u)\n", version);
     return savedata_fixed(0, setList, setBuf, funcFixed, funcStat, funcFile, userdata);
 }
 
@@ -1183,7 +1183,7 @@ s32 cellSaveDataListAutoLoad(u32 version, u32 errDialog,
 {
     (void)container;
     if (errDialog > 2) return CELL_SAVEDATA_ERROR_PARAM;
-    printf("[cellSaveData] ListAutoLoad(version=%u)\n", version);
+    ps3_log("[cellSaveData] ListAutoLoad(version=%u)\n", version);
     return savedata_fixed(0, setList, setBuf, funcFixed, funcStat, funcFile, userdata);
 }
 
@@ -1195,7 +1195,7 @@ s32 cellSaveDataAutoSave2(u32 version, const char* dirName,
                            u32 container, void* userdata)
 {
     dirName = savedata_host_str(dirName);
-    printf("[cellSaveData] AutoSave2(version=%u, dir='%s')\n",
+    ps3_log("[cellSaveData] AutoSave2(version=%u, dir='%s')\n",
            version, dirName ? dirName : "<null>");
 
     /* Delegate to the non-_2 entry, which marshals. This used to call
@@ -1225,7 +1225,7 @@ s32 cellSaveDataAutoLoad2(u32 version, const char* dirName,
     dirName = savedata_host_str(dirName);
     (void)version; (void)errDialog; (void)setBuf; (void)funcFile;
     (void)container;
-    printf("[cellSaveData] AutoLoad2(version=%u, dir='%s')\n",
+    ps3_log("[cellSaveData] AutoLoad2(version=%u, dir='%s')\n",
            version, dirName ? dirName : "<null>");
 
     if (!dirName || !setBuf || !funcStat)
@@ -1259,7 +1259,7 @@ s32 cellSaveDataAutoLoad2(u32 version, const char* dirName,
 
 s32 cellSaveDataDelete2(u32 container)
 {
-    printf("[cellSaveData] Delete2(container=%u)\n", container);
+    ps3_log("[cellSaveData] Delete2(container=%u)\n", container);
 
     /* Without a directory name we can't delete anything meaningful.
        This variant typically shows a UI for deletion - just succeed. */
@@ -1332,7 +1332,7 @@ s32 cellSaveDataAutoSave(u32 version, const char* dirName,
 {
     dirName = savedata_host_str(dirName);
     (void)errDialog; (void)funcFile; (void)container;
-    printf("[cellSaveData] AutoSave(version=%u, dir='%s')\n",
+    ps3_log("[cellSaveData] AutoSave(version=%u, dir='%s')\n",
            version, dirName ? dirName : "<null>");
     if (!dirName || !setBuf || !funcStat)
         return CELL_SAVEDATA_ERROR_PARAM;
@@ -1367,7 +1367,7 @@ s32 cellSaveDataAutoLoad(u32 version, const char* dirName,
     dirName = savedata_host_str(dirName);
     (void)version; (void)errDialog; (void)setBuf; (void)funcFile;
     (void)container;
-    printf("[cellSaveData] AutoLoad(version=%u, dir='%s')\n",
+    ps3_log("[cellSaveData] AutoLoad(version=%u, dir='%s')\n",
            version, dirName ? dirName : "<null>");
     if (!dirName || !setBuf || !funcStat)
         return CELL_SAVEDATA_ERROR_PARAM;
@@ -1388,7 +1388,7 @@ s32 cellSaveDataDelete(u32 version, const char* dirName,
 {
     (void)version;
     dirName = savedata_host_str(dirName);
-    printf("[cellSaveData] Delete(dir='%s', container=%u)\n",
+    ps3_log("[cellSaveData] Delete(dir='%s', container=%u)\n",
            dirName ? dirName : "<null>", container);
     return CELL_OK;
 }
@@ -1406,7 +1406,7 @@ s32 cellSaveDataUserAutoSave(u32 version, u32 userId, const char* dirName,
                              CellSaveDataFileCallback funcFile, u32 container)
 {
     (void)userId;
-    printf("[cellSaveData] UserAutoSave(user=%u)\n", userId);
+    ps3_log("[cellSaveData] UserAutoSave(user=%u)\n", userId);
     return cellSaveDataAutoSave(version, dirName, errDialog, setBuf,
                                 funcStat, funcFile, container, NULL);
 }
@@ -1452,9 +1452,9 @@ static uint32_t savedata_arg9(ppu_context* ctx)
     }
     { static int dumped = 0;
       if (!dumped) { dumped = 1;
-        printf("[cellSaveData] caller SP=0x%08X param-save-area window:\n", sp);
+        ps3_log("[cellSaveData] caller SP=0x%08X param-save-area window:\n", sp);
         for (uint32_t o = 48; o <= 136; o += 8)
-            printf("    SP+%3u = 0x%016llX%s\n", o,
+            ps3_log("    SP+%3u = 0x%016llX%s\n", o,
                    (unsigned long long)vm_read64(sp + o),
                    o == (uint32_t)off ? "   <- taking as arg9 (userdata)" : "");
       } }
@@ -1473,7 +1473,7 @@ static void hle_cellSaveDataUserAutoLoad(ppu_context* ctx)
     u32   container = (u32)ctx->gpr[10];
     uint32_t userdata = savedata_arg9(ctx);
 
-    printf("[cellSaveData] UserAutoLoad(user=%u, userdata=0x%08X)\n", userId, userdata);
+    ps3_log("[cellSaveData] UserAutoLoad(user=%u, userdata=0x%08X)\n", userId, userdata);
     ctx->gpr[3] = (uint64_t)(int64_t)(s32)
         cellSaveDataAutoLoad2(version, dir, errDialog,
                               (CellSaveDataSetBuf*)setBuf,
@@ -1509,7 +1509,7 @@ s32 cellSaveDataUserAutoLoad(u32 version, u32 userId, const char* dirName,
                              CellSaveDataFileCallback funcFile, u32 container)
 {
     (void)userId;
-    printf("[cellSaveData] UserAutoLoad(user=%u) [8-arg path: userdata unavailable]\n", userId);
+    ps3_log("[cellSaveData] UserAutoLoad(user=%u) [8-arg path: userdata unavailable]\n", userId);
     return cellSaveDataAutoLoad(version, dirName, errDialog, setBuf,
                                 funcStat, funcFile, container, NULL);
 }

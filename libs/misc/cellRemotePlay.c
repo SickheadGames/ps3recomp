@@ -16,7 +16,7 @@ static int s_initialized = 0;
 
 s32 cellRemotePlayInit(void)
 {
-    printf("[cellRemotePlay] Init()\n");
+    ps3_log("[cellRemotePlay] Init()\n");
     if (s_initialized)
         return (s32)CELL_REMOTE_PLAY_ERROR_ALREADY_INITIALIZED;
     s_initialized = 1;
@@ -25,7 +25,7 @@ s32 cellRemotePlayInit(void)
 
 s32 cellRemotePlayEnd(void)
 {
-    printf("[cellRemotePlay] End()\n");
+    ps3_log("[cellRemotePlay] End()\n");
     s_initialized = 0;
     return CELL_OK;
 }

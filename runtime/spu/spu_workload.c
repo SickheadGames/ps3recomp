@@ -67,7 +67,7 @@ void spu_workload_register_img(uint64_t fingerprint, spu_lifted_entry_fn fn,
         }
     }
     if (s_registry_count >= SPU_WORKLOAD_MAX) {
-        fprintf(stderr, "[spu_workload] registry full (%u); dropping '%s'\n",
+        ps3_log("[spu_workload] registry full (%u); dropping '%s'\n",
                 SPU_WORKLOAD_MAX, name ? name : "?");
         return;
     }
@@ -78,10 +78,22 @@ void spu_workload_register_img(uint64_t fingerprint, spu_lifted_entry_fn fn,
     s_registry_count++;
 }
 
-void spu_workload_register(uint64_t fingerprint, spu_lifted_entry_fn fn,
+int32_t spu_workload_register(uint64_t fingerprint, spu_lifted_entry_fn fn,
                            const char* name)
 {
-    spu_workload_register_img(fingerprint, fn, 0, name);
+    // Re-registering the same fingerprint must reuse its id, or the functions
+    // registered under the first id are orphaned.
+    for (unsigned i = 0; i < s_registry_count; i++)
+        if (s_registry[i].fp == fingerprint)
+        {
+            spu_workload_register_img(fingerprint, fn, s_registry[i].image_id, name);
+            return s_registry[i].image_id;
+        }
+
+    static int image_id = 0x1000;
+    int id = image_id++;
+    spu_workload_register_img(fingerprint, fn, id, name);
+    return id;
 }
 
 spu_lifted_entry_fn spu_workload_find(uint64_t fingerprint)
@@ -205,7 +217,7 @@ int spu_workload_dispatch(const uint8_t* image, uint32_t image_size,
     for (unsigned i = 0; i < s_registry_count; i++)
         if (s_registry[i].fp == fp) { fn = s_registry[i].fn; image_id = s_registry[i].image_id; break; }
     if (!fn) {
-        fprintf(stderr,
+        ps3_log(
             "[spu_workload] dispatch MISS fp=0x%016llX size=%u "
             "(no lifted SPU binary registered for this image)\n",
             (unsigned long long)fp, image_size);
@@ -220,12 +232,12 @@ int spu_workload_dispatch(const uint8_t* image, uint32_t image_size,
 
     uint32_t entry = 0;
     if (!spu_elf_load_to_ls(image, image_size, ls, &entry)) {
-        fprintf(stderr, "[spu_workload] dispatch fp=0x%016llX: not a valid SPU ELF\n", (unsigned long long)fp);
+        ps3_log("[spu_workload] dispatch fp=0x%016llX: not a valid SPU ELF\n", (unsigned long long)fp);
         free(ls);
         return 0;
     }
 
-    fprintf(stderr,
+    ps3_log(
         "[spu_workload] dispatch HIT fp=0x%016llX entry=0x%05X args=0x%08X image=%d -> running\n",
         (unsigned long long)fp, entry, args_ea, image_id);
 
@@ -419,7 +431,7 @@ static void spu_taskset_task_exited(uint32_t taskset_ea, uint32_t done_task)
         if (!sz) continue;
         ts[0x20 + t / 8] &= (uint8_t)~m;                 /* pending -> started */
         run[t / 8] |= m;
-        fprintf(stderr, "[taskset] start task %u of taskset 0x%08X elf=0x%08X "
+        ps3_log("[taskset] start task %u of taskset 0x%08X elf=0x%08X "
                         "(after task %u exited)\n", t, taskset_ea, elf, done_task);
         g_ydkj_real_taskset_ea = taskset_ea; g_ydkj_real_taskid = t;
         spu_workload_dispatch_async(vm_base + elf, (uint32_t)sz, ctx);
@@ -446,7 +458,7 @@ static void spu_async_run(spu_async_job* j)
         if (!ts_slot->ls) ts_slot->ls = (uint8_t*)calloc(1, SPU_LS_SIZE);
         ls = ts_slot->ls;
         { static int _n = 0; if (_n++ < 24)
-            fprintf(stderr, "[persist-ls] taskset=0x%08X task=%u image=%d %s\n",
+            ps3_log("[persist-ls] taskset=0x%08X task=%u image=%d %s\n",
                     j->taskset_ea, j->taskid, j->image_id,
                     ts_slot->loaded ? "REUSE (state retained)" : "first load"); fflush(stderr); }
     } else {
@@ -461,7 +473,7 @@ static void spu_async_run(spu_async_job* j)
                    : (did_load = 1, spu_elf_load_to_ls(j->image, j->image_size, ls, &entry));
         if (ts_slot && did_load && loaded) ts_slot->loaded = 1;
         if (!loaded)
-            fprintf(stderr, "[spu_workload] async image=%d ELF LOAD FAILED\n",
+            ps3_log("[spu_workload] async image=%d ELF LOAD FAILED\n",
                     j->image_id), fflush(stderr);
         if (loaded) {
             /* YDKJ_CRI_POLICY (cri build experiment): the cri SPU task
@@ -495,14 +507,14 @@ static void spu_async_run(spu_async_job* j)
                 p[0]=0; p[1]=0; p[2]=0; p[3]=0;                 /* hi32 of u64 */
                 p[4]=(uint8_t)(inst>>24); p[5]=(uint8_t)(inst>>16);
                 p[6]=(uint8_t)(inst>>8);  p[7]=(uint8_t)inst;   /* lo32 */
-                fprintf(stderr, "[cri] YDKJ_CRI_TASKSET: loaded taskset policy@0xA00, LS[0x1C0]=inst, running policy entry (img23)\n");
+                ps3_log("[cri] YDKJ_CRI_TASKSET: loaded taskset policy@0xA00, LS[0x1C0]=inst, running policy entry (img23)\n");
                 fflush(stderr);
                 /* Run the taskset policy entry instead of the cri task entry.
                  * (Declared by spu_lifted_job.h -- a local extern re-declaration
                  * here conflicts with the header's static inline under clang.) */
                 int32_t prc = spu_run_lifted_job_abi(tsp_spu_func_00000A00, ls,
                                                      j->args_ea, 23, 1, j->have_r3 ? j->r3 : 0, 0);
-                fprintf(stderr, "[cri] taskset policy RETURNED rc=%d\n", prc);
+                ps3_log("[cri] taskset policy RETURNED rc=%d\n", prc);
                 fflush(stderr);
                 free(ls); free(j); return;
             }
@@ -558,14 +570,14 @@ static void spu_async_run(spu_async_job* j)
                           LSBE32(0x27A0,v); LSBE32(0x27A4,v); LSBE32(0x27A8,v); LSBE32(0x27AC,v); }
                       if ((_e=getenv("YDKJ_G1_CTX")))   { uint32_t v=(uint32_t)strtoul(_e,0,0);
                           LSBE32(0x2798,v); LSBE32(0x279C,v); } }
-                    fprintf(stderr, "[cri] REAL SpursTasksetContext built from taskset 0x%08X task %u (elf=0x%llX)\n",
+                    ps3_log("[cri] REAL SpursTasksetContext built from taskset 0x%08X task %u (elf=0x%llX)\n",
                             g_ydkj_real_taskset_ea, g_ydkj_real_taskid, (unsigned long long)elf);
                 } else {
                     LSBE32(0x27C0, 0x100);     /* kernelMgmtAddr -> SPURS kernel ctx @LS 0x100 */
                     LSBE32(0x27C4, 0xA70);     /* syscallAddr -> HLE PM syscall trampoline (0xA70) */
                     LSBE32(0x2FB0, 0xFFFFFFFFu); LSBE32(0x2FB4, 0x400);
                     LSBE32(0x2FB8, 0x2700);      LSBE32(0x2FBC, 0x3000);
-                    fprintf(stderr, "[cri] HLE cri-task ctx (minimal plant): syscallAddr@0x27C4=0xA70\n");
+                    ps3_log("[cri] HLE cri-task ctx (minimal plant): syscallAddr@0x27C4=0xA70\n");
                 }
                 #undef LSBE32
                 fflush(stderr);
@@ -577,9 +589,9 @@ static void spu_async_run(spu_async_job* j)
             if (j->image_id == 22 && j->args_ea) {
                 extern uint8_t* vm_base;
                 const uint8_t* c = vm_base + (j->args_ea & 0x0FFFFFFFu);
-                fprintf(stderr, "[cri] eaContext=0x%08X 64B decode-context:", j->args_ea);
-                for (int i = 0; i < 64; i++) { if ((i&15)==0) fprintf(stderr,"\n     +%02X:", i); fprintf(stderr, " %02X", c[i]); }
-                fprintf(stderr, "\n"); fflush(stderr);
+                ps3_log("[cri] eaContext=0x%08X 64B decode-context:", j->args_ea);
+                for (int i = 0; i < 64; i++) { if ((i&15)==0) ps3_log("\n     +%02X:", i); ps3_log(" %02X", c[i]); }
+                ps3_log("\n"); fflush(stderr);
             }
             /* Async dispatch is the SPURS-task path: the entry expects the SPURS
              * task kernel ABI in r3 ({0x40 marker, eaContext, queue EA, ...}),
@@ -626,7 +638,7 @@ static void spu_async_run(spu_async_job* j)
                  * both audio tasks run task 1's descriptor). */
                 if (j->taskset_ea) {
                     spurs_pm_build_context(ls, j->taskset_ea, j->taskid, 0, 0);
-                    fprintf(stderr, "[taskset] built SpursTasksetContext image=%d "
+                    ps3_log("[taskset] built SpursTasksetContext image=%d "
                             "taskset=0x%08X task=%u\n", j->image_id,
                             j->taskset_ea, j->taskid); fflush(stderr);
                 }
@@ -652,23 +664,23 @@ static void spu_async_run(spu_async_job* j)
                                            ((uint32_t)(base)[(off)+2]<<8)|(base)[(off)+3])
                 if (vm_base && arg >= 0x10000) {
                     const uint8_t* d = vm_base + arg;         /* FULL EA, no mask */
-                    fprintf(stderr, "[bink-desc] arg=0x%08X 256B work-descriptor:", arg);
+                    ps3_log("[bink-desc] arg=0x%08X 256B work-descriptor:", arg);
                     uint32_t words[64];
                     for (int i = 0; i < 256; i += 16) {
-                        fprintf(stderr, "\n   +%03X:", i);
+                        ps3_log("\n   +%03X:", i);
                         for (int k = 0; k < 16; k += 4) {
                             uint32_t w = RDBE32(d, i+k); words[(i+k)/4] = w;
-                            fprintf(stderr, " %08X", w);
+                            ps3_log(" %08X", w);
                         }
                     }
-                    fprintf(stderr, "\n");
+                    ps3_log("\n");
                     /* Follow each plausible pointer one level: dump +0x00..+0x60 so
                      * the output-plane EA + the plane+0x50 "needs-decode" gate show. */
                     for (int wi = 0; wi < 64; wi++) {
                         uint32_t p = words[wi];
                         if (p < 0x10000 || (p >= 0x50000000u && p < 0xC0000000u)) continue;
                         const uint8_t* q = vm_base + p;
-                        fprintf(stderr, "  [desc+%02X]=0x%08X -> +00:%08X +40:%08X +50:%08X(gate) +54:%08X\n",
+                        ps3_log("  [desc+%02X]=0x%08X -> +00:%08X +40:%08X +50:%08X(gate) +54:%08X\n",
                                 wi*4, p, RDBE32(q,0), RDBE32(q,0x40), RDBE32(q,0x50), RDBE32(q,0x54));
                     }
                     fflush(stderr);
@@ -683,21 +695,21 @@ static void spu_async_run(spu_async_job* j)
                         spurs_ea = RDBE32(t, 0x64);
                         /* Why did the policy exit without dispatching? Dump the task
                          * bitsets it reads (task N = bit 127-N; task 2 = bit 125). */
-                        fprintf(stderr, "[taskset-bits] RUNNING=%08X%08X READY=%08X%08X ENABLED=%08X%08X SIGNALLED=%08X%08X WAITING=%08X%08X\n",
+                        ps3_log("[taskset-bits] RUNNING=%08X%08X READY=%08X%08X ENABLED=%08X%08X SIGNALLED=%08X%08X WAITING=%08X%08X\n",
                                 RDBE32(t,0x00),RDBE32(t,0x04), RDBE32(t,0x10),RDBE32(t,0x14),
                                 RDBE32(t,0x30),RDBE32(t,0x34), RDBE32(t,0x40),RDBE32(t,0x44),
                                 RDBE32(t,0x50),RDBE32(t,0x54)); }
                     uint8_t real2700[0x180];
                     int st = spurs_run_taskset_policy_probe(ts, j->taskid, spurs_ea,
                                                             (uint64_t)ts, 3, real2700, sizeof real2700);
-                    fprintf(stderr, "[real-pm] status=0x%X -- LS 0x2700 diff (build_context vs real policy):\n", st);
+                    ps3_log("[real-pm] status=0x%X -- LS 0x2700 diff (build_context vs real policy):\n", st);
                     for (uint32_t o = 0; o < sizeof real2700; o += 4) {
                         uint32_t bc = ((uint32_t)ls[0x2700+o]<<24)|((uint32_t)ls[0x2700+o+1]<<16)|
                                       ((uint32_t)ls[0x2700+o+2]<<8)|ls[0x2700+o+3];
                         uint32_t rp = ((uint32_t)real2700[o]<<24)|((uint32_t)real2700[o+1]<<16)|
                                       ((uint32_t)real2700[o+2]<<8)|real2700[o+3];
                         if (bc != rp)
-                            fprintf(stderr, "   0x%04X: build=%08X real=%08X\n", 0x2700+o, bc, rp);
+                            ps3_log("   0x%04X: build=%08X real=%08X\n", 0x2700+o, bc, rp);
                     }
                     /* EMPIRICAL TEST (LBP_POLICY_CTX): overlay the REAL policy's
                      * SpursTasksetContext onto binkspu's LS 0x2700, replacing the C
@@ -707,7 +719,7 @@ static void spu_async_run(spu_async_job* j)
                      * build_context 0x100 kernel ctx (moduleId "TK") intact. */
                     if (getenv("LBP_POLICY_CTX")) {
                         memcpy(ls + 0x2700, real2700, sizeof real2700);
-                        fprintf(stderr, "[real-pm] OVERLAID policy ctx onto binkspu LS 0x2700 (LBP_POLICY_CTX)\n");
+                        ps3_log("[real-pm] OVERLAID policy ctx onto binkspu LS 0x2700 (LBP_POLICY_CTX)\n");
                     }
                     fflush(stderr);
                 }
@@ -740,12 +752,12 @@ static void spu_async_run(spu_async_job* j)
                     rc = spu_run_lifted_job_abi(j->fn, ls, j->args_ea, j->image_id,
                                                 1, j->have_r3 ? j->r3 : 0, 0);
                     if (g_cri_video_dma) {
-                        fprintf(stderr, "[cri] RESUME: cri task DECODED real video (attempt %d)\n", attempt);
+                        ps3_log("[cri] RESUME: cri task DECODED real video (attempt %d)\n", attempt);
                         break;
                     }
                 }
                 if (!g_cri_video_dma)
-                    fprintf(stderr, "[cri] RESUME: no work-ready after 400 polls (PPU never marked work)\n");
+                    ps3_log("[cri] RESUME: no work-ready after 400 polls (PPU never marked work)\n");
                 fflush(stderr);
             }
             /* YDKJ_CRI_WAKE probe: on cri task (image 22) completion, wake any PPU
@@ -754,7 +766,7 @@ static void spu_async_run(spu_async_job* j)
             if (j->image_id == 22 && getenv("YDKJ_CRI_WAKE")) {
                 extern void ydkj_wake_all_event_flags(void);
                 ydkj_wake_all_event_flags();
-                fprintf(stderr, "[cri] YDKJ_CRI_WAKE: woke all event-flag waiters on cri completion\n");
+                ps3_log("[cri] YDKJ_CRI_WAKE: woke all event-flag waiters on cri completion\n");
             }
             /* SPU_LS_DUMP=<prefix>: write this job's whole local store when it
              * ends. A reference dump from real hardware is a full local store,
@@ -765,8 +777,8 @@ static void spu_async_run(spu_async_job* j)
                   snprintf(path, sizeof path, "%s_img%d.bin", pfx, j->image_id);
                   FILE* f = fopen(path, "wb");
                   if (f) { fwrite(ls, 1, SPU_LS_SIZE, f); fclose(f);
-                      fprintf(stderr, "[spu_workload] wrote local store -> %s\n", path); } } }
-            fprintf(stderr, "[spu_workload] async image=%d RETURNED rc=%d "
+                      ps3_log("[spu_workload] wrote local store -> %s\n", path); } } }
+            ps3_log("[spu_workload] async image=%d RETURNED rc=%d "
                     "(job ran to completion, did not loop)\n", j->image_id, rc);
             spu_serial_release();
             if (j->taskset_ea) spu_taskset_task_exited(j->taskset_ea, j->taskid);
@@ -813,12 +825,17 @@ int spu_workload_dispatch_job(const uint8_t* image, uint32_t image_size,
     for (unsigned i = 0; i < s_registry_count; i++)
         if (s_registry[i].fp == fp) { fn = s_registry[i].fn; image_id = s_registry[i].image_id; break; }
     if (!fn) {
+
+        // Is this a ELF or a job?
+        const uint32_t ELF_MAGIC = 0x7F454C46;
+        int is_elf = ((uint32_t*)image)[0] == ELF_MAGIC;
+
         /* Capped: an unlifted job a title dispatches every frame (Tornado
          * Outbreak's Wwise audio jobs) wrote 2 GB of these in three minutes,
          * and the logging itself distorts guest timing. */
         { static unsigned long long miss_n = 0;
           if (++miss_n <= 32 || miss_n % 100000 == 0)
-            fprintf(stderr, "[spurs-job] dispatch MISS fp=0x%016llX size=%u job=0x%08X (#%llu)\n",
+            ps3_log("[spurs-job] dispatch MISS fp=0x%016llX size=%u job=0x%08X (#%llu)\n",
                     (unsigned long long)fp, image_size, job_ea, miss_n); }
         /* SPU_DUMP_MISS=<dir>: write the unrecognised image out so it can be
          * lifted and registered. SPURS job binaries are raw code+data blobs
@@ -840,7 +857,7 @@ int spu_workload_dispatch_job(const uint8_t* image, uint32_t image_size,
                   if (_f) {
                       fwrite(image, 1, image_size, _f);
                       fclose(_f);
-                      fprintf(stderr, "[spurs-job] dumped -> %s\n", _path);
+                      ps3_log("[spurs-job] dumped -> %s\n", _path);
                   }
               }
           } }
@@ -853,13 +870,13 @@ int spu_workload_dispatch_job(const uint8_t* image, uint32_t image_size,
      * the per-job pair is verbose-only. */
     int verbose = ps3_log_verbose();
     if (verbose) {
-        fprintf(stderr, "[spurs-job] dispatch HIT fp=0x%016llX image=%d job=0x%08X\n",
+        ps3_log("[spurs-job] dispatch HIT fp=0x%016llX image=%d job=0x%08X\n",
                 (unsigned long long)fp, image_id, job_ea);
         fflush(stderr);
     }
     int rc = spu_run_spurs_job(fn, image_id, job_ea, job_desc_size);
     if (verbose) {
-        fprintf(stderr, "[spurs-job] job 0x%08X RETURNED rc=%d\n", job_ea, rc);
+        ps3_log("[spurs-job] job 0x%08X RETURNED rc=%d\n", job_ea, rc);
         fflush(stderr);
     }
     return 1;
@@ -1014,7 +1031,7 @@ void spu_taskset_signal_task(uint32_t taskset_ea, uint32_t taskId)
     pthread_mutex_unlock(&s_sig_lock);
 #endif
     { static int _n = 0; if (_n++ < 24)
-        fprintf(stderr, "[spu_workload] signal task %u (taskset 0x%08X)\n",
+        ps3_log("[spu_workload] signal task %u (taskset 0x%08X)\n",
                 taskId, taskset_ea); fflush(stderr); }
     /* SPU_SIG_STATS=1: signals per second per (taskset, task, caller). */
     { static int s_on = -1; if (s_on < 0) s_on = getenv("SPU_SIG_STATS") ? 1 : 0;
@@ -1022,7 +1039,7 @@ void spu_taskset_signal_task(uint32_t taskset_ea, uint32_t taskId)
           static uint32_t ts[32], tk[32]; static uintptr_t ca[32]; static unsigned cnt[32];
           static unsigned long long t0;
           extern unsigned long long ps3_ms_now(void);
-          const uintptr_t c = (uintptr_t)__builtin_return_address(0);
+          const uintptr_t c = (uintptr_t)PORT_RETURN_ADDRESS();
           for (int i = 0; i < 32; i++) {
               if (cnt[i] && ts[i] == taskset_ea && tk[i] == taskId && ca[i] == c) { cnt[i]++; break; }
               if (!cnt[i] && !ts[i]) { ts[i] = taskset_ea; tk[i] = taskId; ca[i] = c; cnt[i] = 1; break; }
@@ -1031,7 +1048,7 @@ void spu_taskset_signal_task(uint32_t taskset_ea, uint32_t taskId)
           if (!t0) t0 = now;
           if (now - t0 >= 5000) {
               for (int i = 0; i < 32 && ts[i]; i++) {
-                  fprintf(stderr, "[sig-stats] taskset=0x%08X task=%u caller=%p %.1f/s\n",
+                  ps3_log("[sig-stats] taskset=0x%08X task=%u caller=%p %.1f/s\n",
                           ts[i], tk[i], (void*)ca[i], cnt[i] * 1000.0 / (now - t0));
                   cnt[i] = 0; ts[i] = 0;
               }
@@ -1082,7 +1099,7 @@ int spu_taskset_wait_signal(uint32_t taskset_ea, uint32_t taskId)
     { extern unsigned long long ps3_ms_now(void);
       unsigned long long _now = ps3_ms_now();
       static int _n = 0; if (_n++ < 200 || (_n % 500) == 0)
-        fprintf(stderr, "[spu_workload] WAIT_SIGNAL#%d enter task=%u taskset=0x%08X ran=%llums\n",
+        ps3_log("[spu_workload] WAIT_SIGNAL#%d enter task=%u taskset=0x%08X ran=%llums\n",
                 _n, taskId, taskset_ea,
                 s_wait_exit_ms ? (_now - s_wait_exit_ms) : 0ull); }
     /* LBP_SYNC_ACK: taskset sync-lane bookkeeping. On real SPURS the taskset
@@ -1111,7 +1128,7 @@ int spu_taskset_wait_signal(uint32_t taskset_ea, uint32_t taskId)
                 }
             }
             { static int _a = 0; if (_a++ < 8)
-                fprintf(stderr, "[sync-ack] lanes advanced to tickets (sync=0x%08X)\n", b); }
+                ps3_log("[sync-ack] lanes advanced to tickets (sync=0x%08X)\n", b); }
         }
     }
     unsigned secs = 0;
@@ -1134,7 +1151,7 @@ int spu_taskset_wait_signal(uint32_t taskset_ea, uint32_t taskId)
         if (!SleepConditionVariableSRW(&s_sig_cv, &s_sig_lock, 1000, 0)) {
             static int _n = 0;
             if (++secs && _n < 16) { _n++;
-                fprintf(stderr, "[spu_workload] task %u (taskset 0x%08X) sleeping "
+                ps3_log("[spu_workload] task %u (taskset 0x%08X) sleeping "
                         "%us in WAIT_SIGNAL\n", taskId, taskset_ea, secs); fflush(stderr); }
             if (drain && secs >= drain) { drained = 1; break; }
         }
@@ -1148,7 +1165,7 @@ int spu_taskset_wait_signal(uint32_t taskset_ea, uint32_t taskId)
         if (pthread_cond_timedwait(&s_sig_cv, &s_sig_lock, &ts) != 0) {
             static int _n = 0;
             if (++secs && _n < 16) { _n++;
-                fprintf(stderr, "[spu_workload] task %u (taskset 0x%08X) sleeping "
+                ps3_log("[spu_workload] task %u (taskset 0x%08X) sleeping "
                         "%us in WAIT_SIGNAL\n", taskId, taskset_ea, secs); fflush(stderr); }
             if (drain && secs >= drain) { drained = 1; break; }
         }
@@ -1157,7 +1174,7 @@ int spu_taskset_wait_signal(uint32_t taskset_ea, uint32_t taskId)
     pthread_mutex_unlock(&s_sig_lock);
 #endif
     if (drained) { static int _d = 0; if (_d++ < 24)
-        fprintf(stderr, "[spu_workload] task %u (taskset 0x%08X) WS_DRAIN resume "
+        ps3_log("[spu_workload] task %u (taskset 0x%08X) WS_DRAIN resume "
                 "after %us (no signal)\n", taskId, taskset_ea, secs); fflush(stderr); }
     spu_serial_acquire();       /* resume: re-take the serial lock */
     { extern unsigned long long ps3_ms_now(void);
@@ -1176,6 +1193,11 @@ int spu_workload_dispatch_async(const uint8_t* image, uint32_t image_size,
     for (unsigned i = 0; i < s_registry_count; i++)
         if (s_registry[i].fp == fp) { fn = s_registry[i].fn; image_id = s_registry[i].image_id; break; }
     if (!fn) {
+
+        // Is this a ELF or a job?
+        const uint32_t ELF_MAGIC = 0x464C457F;
+        int is_elf = ((uint32_t*)image)[0] == ELF_MAGIC;
+
         /* SPU_DUMP_MISS also applies here. The sync path has written the
          * unrecognised image out for a while and the async path did not, so a
          * workload policy module -- which is always dispatched async, being a
@@ -1190,14 +1212,19 @@ int spu_workload_dispatch_async(const uint8_t* image, uint32_t image_size,
               if (_k == _nseen && _nseen < 64) {
                   char _path[512];
                   _seen[_nseen++] = fp;
-                  snprintf(_path, sizeof(_path), "%s/spujob_%016llX_%u.bin",
-                           _dir, (unsigned long long)fp, image_size);
+                  if (is_elf)
+                      snprintf(_path, sizeof(_path), "%s/spujob_%016llX_%u.elf",
+                          _dir, (unsigned long long)fp, image_size);
+                  else
+                      snprintf(_path, sizeof(_path), "%s/spujob_%016llX_%u.bin",
+                               _dir, (unsigned long long)fp, image_size);
+
                   FILE* _f = fopen(_path, "wb");
                   if (_f) { fwrite(image, 1, image_size, _f); fclose(_f);
-                      fprintf(stderr, "[spu_workload] wrote %s\n", _path); }
+                      ps3_log("[spu_workload] MISS wrote %s\n", _path); }
               }
           } }
-        fprintf(stderr, "[spu_workload] async dispatch MISS fp=0x%016llX size=%u\n",
+        ps3_log("[spu_workload] async dispatch MISS fp=0x%016llX size=%u\n",
                 (unsigned long long)fp, image_size);
         return 0;
     }
@@ -1226,7 +1253,7 @@ int spu_workload_dispatch_async(const uint8_t* image, uint32_t image_size,
         if ((j->r3[0] >> 16) == 0x40) j->have_r3 = 1;   /* valid marker */
     }
 
-    fprintf(stderr,
+    ps3_log(
         "[spu_workload] dispatch HIT (async) fp=0x%016llX args=0x%08X image=%d -> spawning thread\n",
         (unsigned long long)fp, args_ea, image_id);
     if (args_ea) { extern uint8_t* vm_base; const uint8_t* c = vm_base + args_ea;
@@ -1247,12 +1274,12 @@ int spu_workload_dispatch_async(const uint8_t* image, uint32_t image_size,
             for (int ci=0; ci<5; ci++) {
                 uint32_t ea=cand[ci]; if (!ea || ea>=0x10000000) continue;
                 const uint8_t* b = vm_base + ea + 0xCC0;
-                fprintf(stderr, "[ctxbuf cand 0x%08X +0xCC0]:", ea);
+                ps3_log("[ctxbuf cand 0x%08X +0xCC0]:", ea);
                 for (int k=0;k<0x20;k+=4) {
                     uint32_t w=((uint32_t)b[k]<<24)|((uint32_t)b[k+1]<<16)|((uint32_t)b[k+2]<<8)|b[k+3];
-                    fprintf(stderr, " %08X%s", w, (w>0&&w<0x40000)?"<LS":"");
+                    ps3_log(" %08X%s", w, (w>0&&w<0x40000)?"<LS":"");
                 }
-                fprintf(stderr, "\n");
+                ps3_log("\n");
             } } }
 
 #ifdef _WIN32

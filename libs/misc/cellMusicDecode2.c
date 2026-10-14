@@ -17,7 +17,7 @@ static int s_initialized2 = 0;
 s32 cellMusicDecode2Init(CellMusicDecode2Callback callback, void* arg)
 {
     (void)callback; (void)arg;
-    printf("[cellMusicDecode2] Init()\n");
+    ps3_log("[cellMusicDecode2] Init()\n");
     if (s_initialized2)
         return (s32)CELL_MUSIC_DECODE2_ERROR_ALREADY_INITIALIZED;
     s_initialized2 = 1;
@@ -26,7 +26,7 @@ s32 cellMusicDecode2Init(CellMusicDecode2Callback callback, void* arg)
 
 s32 cellMusicDecode2Finalize(void)
 {
-    printf("[cellMusicDecode2] Finalize()\n");
+    ps3_log("[cellMusicDecode2] Finalize()\n");
     s_initialized2 = 0;
     return CELL_OK;
 }

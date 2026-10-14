@@ -53,7 +53,7 @@ static int ff_load(void)
 {
     const char* off = getenv("PS3RECOMP_FFMPEG");
     if (off && strcmp(off, "0") == 0) {
-        printf("[ffmpeg] disabled by PS3RECOMP_FFMPEG=0\n");
+        ps3_log("[ffmpeg] disabled by PS3RECOMP_FFMPEG=0\n");
         return -1;
     }
     const char* util_path  = env_or("PS3RECOMP_FFMPEG_AVUTIL", FF_AVUTIL_NAME);
@@ -63,7 +63,7 @@ static int ff_load(void)
     ff_lib util = ff_open(util_path);
     ff_lib codec = util ? ff_open(codec_path) : NULL;
     if (!util || !codec) {
-        printf("[ffmpeg] %s not found; decoders stay callback-only\n",
+        ps3_log("[ffmpeg] %s not found; decoders stay callback-only\n",
                util ? codec_path : util_path);
         if (util) ff_close(util);
         return -1;
@@ -72,7 +72,7 @@ static int ff_load(void)
     int missing = 0;
 #define FF_RESOLVE(lib, fn) \
     do { *(void**)&s_ff.fn = ff_sym(lib, #fn); \
-         if (!s_ff.fn) { printf("[ffmpeg] missing %s\n", #fn); missing = 1; } } while (0)
+         if (!s_ff.fn) { ps3_log("[ffmpeg] missing %s\n", #fn); missing = 1; } } while (0)
     FF_RESOLVE(codec, avcodec_version);
     FF_RESOLVE(codec, avcodec_find_decoder);
     FF_RESOLVE(codec, avcodec_alloc_context3);
@@ -92,7 +92,7 @@ static int ff_load(void)
 
     if (!missing && ((s_ff.avcodec_version() >> 16) != LIBAVCODEC_VERSION_MAJOR ||
                      (s_ff.avutil_version() >> 16) != LIBAVUTIL_VERSION_MAJOR)) {
-        printf("[ffmpeg] library is avcodec %u / avutil %u, built for %d / %d; "
+        ps3_log("[ffmpeg] library is avcodec %u / avutil %u, built for %d / %d; "
                "not used\n", s_ff.avcodec_version() >> 16,
                s_ff.avutil_version() >> 16,
                LIBAVCODEC_VERSION_MAJOR, LIBAVUTIL_VERSION_MAJOR);
@@ -106,7 +106,7 @@ static int ff_load(void)
     }
     s_ff.av_log_set_level(AV_LOG_ERROR);
     unsigned v = s_ff.avcodec_version();
-    printf("[ffmpeg] libavcodec %u.%u.%u loaded\n", v >> 16, (v >> 8) & 0xFF, v & 0xFF);
+    ps3_log("[ffmpeg] libavcodec %u.%u.%u loaded\n", v >> 16, (v >> 8) & 0xFF, v & 0xFF);
     /* The libraries stay loaded for the life of the process. */
     return 1;
 }

@@ -26,7 +26,7 @@ static SignalingCtx s_ctx[SCE_NP_SIGNALING_CTX_MAX];
 
 s32 sceNpSignalingInit(void)
 {
-    printf("[sceNpSignaling] Init()\n");
+    ps3_log("[sceNpSignaling] Init()\n");
     if (s_initialized)
         return (s32)SCE_NP_SIGNALING_ERROR_ALREADY_INITIALIZED;
     memset(s_ctx, 0, sizeof(s_ctx));
@@ -36,7 +36,7 @@ s32 sceNpSignalingInit(void)
 
 s32 sceNpSignalingTerm(void)
 {
-    printf("[sceNpSignaling] Term()\n");
+    ps3_log("[sceNpSignaling] Term()\n");
     s_initialized = 0;
     return CELL_OK;
 }
@@ -47,7 +47,7 @@ s32 sceNpSignalingCreateCtx(const void* npId, SceNpSignalingHandler handler,
                               void* arg, SceNpSignalingCtxId* ctxId)
 {
     (void)npId;
-    printf("[sceNpSignaling] CreateCtx()\n");
+    ps3_log("[sceNpSignaling] CreateCtx()\n");
 
     if (!s_initialized) return (s32)SCE_NP_SIGNALING_ERROR_NOT_INITIALIZED;
     if (!ctxId) return (s32)SCE_NP_SIGNALING_ERROR_INVALID_ARGUMENT;
@@ -67,7 +67,7 @@ s32 sceNpSignalingCreateCtx(const void* npId, SceNpSignalingHandler handler,
 
 s32 sceNpSignalingDestroyCtx(SceNpSignalingCtxId ctxId)
 {
-    printf("[sceNpSignaling] DestroyCtx(%u)\n", ctxId);
+    ps3_log("[sceNpSignaling] DestroyCtx(%u)\n", ctxId);
     if (ctxId >= SCE_NP_SIGNALING_CTX_MAX || !s_ctx[ctxId].in_use)
         return (s32)SCE_NP_SIGNALING_ERROR_CTX_NOT_FOUND;
     s_ctx[ctxId].in_use = 0;
@@ -81,7 +81,7 @@ s32 sceNpSignalingActivateConnection(SceNpSignalingCtxId ctxId,
                                        SceNpSignalingConnId* connId)
 {
     (void)ctxId; (void)peerNpId; (void)connId;
-    printf("[sceNpSignaling] ActivateConnection() - offline\n");
+    ps3_log("[sceNpSignaling] ActivateConnection() - offline\n");
     return (s32)SCE_NP_SIGNALING_ERROR_NOT_CONNECTED;
 }
 

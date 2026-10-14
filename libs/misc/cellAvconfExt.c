@@ -74,7 +74,7 @@ s32 cellAudioOutGetDeviceInfo(u32 audioOut, u32 deviceIndex,
     (void)audioOut;
     (void)deviceIndex;
 
-    printf("[cellAvconfExt] AudioOutGetDeviceInfo(out=%u, dev=%u)\n",
+    ps3_log("[cellAvconfExt] AudioOutGetDeviceInfo(out=%u, dev=%u)\n",
            audioOut, deviceIndex);
 
     if (!info)
@@ -112,7 +112,7 @@ s32 cellAudioOutGetConfiguration(u32 audioOut,
     (void)option;
     (void)optionSize;
 
-    printf("[cellAvconfExt] AudioOutGetConfiguration()\n");
+    ps3_log("[cellAvconfExt] AudioOutGetConfiguration()\n");
 
     if (!config)
         return CELL_EINVAL;
@@ -138,7 +138,7 @@ s32 cellAudioOutGetState(u32 audioOut, u32 deviceIndex, void* state)
 {
     (void)deviceIndex;
     uint32_t ea = (uint32_t)(uintptr_t)state;
-    printf("[cellAvconfExt] AudioOutGetState(audioOut=%u)\n", audioOut);
+    ps3_log("[cellAvconfExt] AudioOutGetState(audioOut=%u)\n", audioOut);
     if (!ea)
         return CELL_EINVAL;
 
@@ -158,7 +158,7 @@ s32 cellAudioOutGetState(u32 audioOut, u32 deviceIndex, void* state)
 s32 cellAudioOutSetCopyControl(u32 audioOut, u32 control)
 {
     (void)audioOut;
-    printf("[cellAvconfExt] AudioOutSetCopyControl(control=%u)\n", control);
+    ps3_log("[cellAvconfExt] AudioOutSetCopyControl(control=%u)\n", control);
     return CELL_OK;
 }
 
@@ -180,7 +180,7 @@ s32 cellVideoOutGetGamma(u32 videoOut, float* gamma)
 s32 cellVideoOutSetGamma(u32 videoOut, float gamma)
 {
     (void)videoOut;
-    printf("[cellAvconfExt] VideoOutSetGamma(%.2f)\n", gamma);
+    ps3_log("[cellAvconfExt] VideoOutSetGamma(%.2f)\n", gamma);
     s_gamma = gamma;
     return CELL_OK;
 }
@@ -191,6 +191,6 @@ s32 cellVideoOutSetGamma(u32 videoOut, float gamma)
 s32 cellAudioOutConfigure(u32 audioOut, void* config, void* option, u32 waitForEvent)
 {
     (void)config; (void)option; (void)waitForEvent;
-    printf("[cellAvconfExt] AudioOutConfigure(audioOut=%u) -> ok\n", audioOut);
+    ps3_log("[cellAvconfExt] AudioOutConfigure(audioOut=%u) -> ok\n", audioOut);
     return 0;
 }

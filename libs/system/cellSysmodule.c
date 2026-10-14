@@ -86,7 +86,7 @@ s32 cellSysmoduleFinalize(void)   { return CELL_OK; }
 
 s32 cellSysmoduleLoadModule(u16 id)
 {
-    printf("[cellSysmodule] LoadModule(id=0x%04X '%s')\n",
+    ps3_log("[cellSysmodule] LoadModule(id=0x%04X '%s')\n",
            id, sysmodule_id_to_name(id));
 
     int slot = sysmodule_slot(id);
@@ -103,7 +103,7 @@ s32 cellSysmoduleLoadModule(u16 id)
 /* NID: 0x112A5EE9 */
 s32 cellSysmoduleUnloadModule(u16 id)
 {
-    printf("[cellSysmodule] UnloadModule(id=0x%04X '%s')\n",
+    ps3_log("[cellSysmodule] UnloadModule(id=0x%04X '%s')\n",
            id, sysmodule_id_to_name(id));
 
     int slot = sysmodule_slot(id);
@@ -120,7 +120,7 @@ s32 cellSysmoduleUnloadModule(u16 id)
 /* NID: 0x5A59E258 */
 s32 cellSysmoduleIsLoaded(u16 id)
 {
-    printf("[cellSysmodule] IsLoaded(id=0x%04X '%s')\n",
+    ps3_log("[cellSysmodule] IsLoaded(id=0x%04X '%s')\n",
            id, sysmodule_id_to_name(id));
 
     int slot = sysmodule_slot(id);

@@ -3575,7 +3575,8 @@ def _const_base_targets(win, rC, read_u32, text_lo, text_hi, bctr_addr):
             return targets
     return None
 
-def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts):
+
+def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts=None):
     """Find `mtctr rX; bctr` switch dispatchers and read their jump tables.
 
     Handles both absolute tables (entry = case address) and base-relative
@@ -4310,35 +4311,6 @@ def main() -> None:
                 if _ao.startswith("r1,-") and _ao.endswith("(r1)"):
                     _first_alloc = _ordered[_jj]; break
             _jj += 1
-
-        # A function's prologue continues PAST its `stdu`: frame allocation is
-        # followed by callee-saved stores, mfcr/mflr, and the TOC load. Cutting
-        # at an `mflr` that appears after the stdu (AC1 func_00031638: mfcr,
-        # stdu -0x390, 20x std, lwz r30,d(r2), then mflr at +0x68) orphans the
-        # frame setup and the callee-save restores into the first fragment, so
-        # the second returns without restoring r14-r31. Only treat a prologue
-        # past the END of our own as a boundary.
-        _prologue_end = _first_alloc
-        if _first_alloc is not None:
-            _jj = _idx_of.get(_first_alloc)
-            if _jj is not None:
-                _jj += 1
-                while _jj < len(_ordered) and _ordered[_jj] < _e:
-                    _ai = _by_addr[_ordered[_jj]]
-                    _mn = _ai.mnemonic
-                    _op = _ai.operands.replace(" ", "")
-                    _is_pro = (
-                        (_mn in ("std", "stw", "stfd", "stfs") and _op.endswith("(r1)"))
-                        or _mn in ("mflr", "mfcr")
-                        or (_mn in ("lwz", "ld") and _op.endswith("(r2)"))
-                        or (_mn == "or" and len(_op.split(",")) == 3
-                            and _op.split(",")[1] == _op.split(",")[2])
-                    )
-                    if not _is_pro:
-                        break
-                    _prologue_end = _ordered[_jj]
-                    _jj += 1
-
         _cuts = []
         _j = _k + 1
         while _j < len(_ordered) and _ordered[_j] < _e:
@@ -4350,7 +4322,7 @@ def main() -> None:
             # cellSpursInitialize). A genuinely merged second function's prologue is
             # always past the first function's body, well beyond start+8.
             if (_ordered[_j] in _func_entries and _ordered[_j] > _s + 8
-                    and (_prologue_end is None or _ordered[_j] > _prologue_end)):
+                    and (_first_alloc is None or _ordered[_j] > _first_alloc)):
                 _cuts.append(_ordered[_j])
             _j += 1
         if not _cuts:
@@ -4396,7 +4368,7 @@ def main() -> None:
             return None
 
         tables = discover_jump_tables(all_insns, _raw_read_u32, [args.toc],
-                                      _raw_lo, _raw_hi, func_bounds)
+                                      _raw_lo, _raw_hi)
         jt_dispatchers = tables
         for ts in tables.values():
             jt_targets.update(ts)
@@ -4680,8 +4652,7 @@ def main() -> None:
         print(f"Wrote {os.path.basename(src_path)}")
     else:
         print("Writing C source (split into chunks)...", flush=True)
-        paths = lifter.write_source_files(args.output, base=base,
-                                          max_lines=args.chunk_lines)
+        paths = lifter.write_source_files(args.output, base=base)
         print(f"Wrote {header_path}")
         print(f"Wrote {len(paths)} source chunks: "
               f"{os.path.basename(paths[0])} .. {os.path.basename(paths[-1])}")

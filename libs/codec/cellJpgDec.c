@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../../runtime/ppu/ppu_memory.h"   /* vm_write32 (BE store into guest) */
+#include "ps3emu/logging.h"
 #include <stddef.h>   /* offsetof */
 
 /* vm_base: base pointer for the PS3 guest address space */
@@ -74,7 +75,7 @@ static int jpgdec_load_source(JpgDecSubState* sub)
         /* streamPtr is a 32-bit guest address */
         u32 guest_addr = (u32)sub->src.streamPtr;
         if (!vm_base) {
-            printf("[cellJpgDec] ERROR: vm_base is NULL, cannot translate guest addr 0x%08X\n", guest_addr);
+            ps3_log("[cellJpgDec] ERROR: vm_base is NULL, cannot translate guest addr 0x%08X\n", guest_addr);
             return -1;
         }
         sub->src_data = vm_base + guest_addr;
@@ -86,13 +87,13 @@ static int jpgdec_load_source(JpgDecSubState* sub)
     if (sub->src.srcSelect == CELL_JPGDEC_FILE) {
         char host_path[CELL_FS_MAX_FS_PATH_LENGTH];
         if (cellfs_translate_path(sub->src.fileName, host_path, sizeof(host_path)) != 0) {
-            printf("[cellJpgDec] Cannot translate path: %s\n", sub->src.fileName);
+            ps3_log("[cellJpgDec] Cannot translate path: %s\n", sub->src.fileName);
             return -1;
         }
 
         FILE* f = fopen(host_path, "rb");
         if (!f) {
-            printf("[cellJpgDec] Cannot open file: %s (host: %s)\n",
+            ps3_log("[cellJpgDec] Cannot open file: %s (host: %s)\n",
                    sub->src.fileName, host_path);
             return -1;
         }
@@ -110,7 +111,7 @@ static int jpgdec_load_source(JpgDecSubState* sub)
 
         if (read_size <= 0) {
             fclose(f);
-            printf("[cellJpgDec] File is empty or offset past end: %s\n", host_path);
+            ps3_log("[cellJpgDec] File is empty or offset past end: %s\n", host_path);
             return -1;
         }
 
@@ -123,7 +124,7 @@ static int jpgdec_load_source(JpgDecSubState* sub)
         sub->src_allocated = 1;
         fclose(f);
 
-        printf("[cellJpgDec] Loaded %u bytes from '%s'\n", sub->src_size, host_path);
+        ps3_log("[cellJpgDec] Loaded %u bytes from '%s'\n", sub->src_size, host_path);
         return 0;
     }
 
@@ -212,7 +213,7 @@ s32 cellJpgDecCreate(CellJpgDecMainHandle* mainHandle,
                      CellJpgDecThreadOutParam* threadOutParam)
 {
     (void)threadInParam;
-    printf("[cellJpgDec] Create()\n");
+    ps3_log("[cellJpgDec] Create()\n");
 
     if (!mainHandle)
         return CELL_JPGDEC_ERROR_ARG;
@@ -234,7 +235,7 @@ s32 cellJpgDecCreate(CellJpgDecMainHandle* mainHandle,
 
 s32 cellJpgDecDestroy(CellJpgDecMainHandle mainHandle)
 {
-    printf("[cellJpgDec] Destroy(handle=%u)\n", mainHandle);
+    ps3_log("[cellJpgDec] Destroy(handle=%u)\n", mainHandle);
 
     if (mainHandle >= JPGDEC_MAX_HANDLES || !s_jpg_main[mainHandle].in_use)
         return CELL_JPGDEC_ERROR_ARG;
@@ -255,7 +256,7 @@ s32 cellJpgDecOpen(CellJpgDecMainHandle mainHandle,
                    const CellJpgDecSrc* src,
                    CellJpgDecOpnInfo* openInfo)
 {
-    printf("[cellJpgDec] Open(main=%u, srcSelect=%u)\n", mainHandle,
+    ps3_log("[cellJpgDec] Open(main=%u, srcSelect=%u)\n", mainHandle,
            src ? vm_read32(JPG_EA(src)) : 0xFFFFFFFFu);
 
     if (mainHandle >= JPGDEC_MAX_HANDLES || !s_jpg_main[mainHandle].in_use)
@@ -277,9 +278,9 @@ s32 cellJpgDecOpen(CellJpgDecMainHandle mainHandle,
             /* read back from the host copy just loaded */
             const CellJpgDecSrc* hsrc = &s_jpg_sub[i].src;
             if (hsrc->srcSelect == CELL_JPGDEC_FILE)
-                printf("[cellJpgDec]   file: '%s'\n", hsrc->fileName);
+                ps3_log("[cellJpgDec]   file: '%s'\n", hsrc->fileName);
             else if (hsrc->srcSelect == CELL_JPGDEC_BUFFER)
-                printf("[cellJpgDec]   buffer: guest_addr=0x%08X size=%u\n",
+                ps3_log("[cellJpgDec]   buffer: guest_addr=0x%08X size=%u\n",
                        (u32)hsrc->streamPtr, hsrc->streamSize);
 
             return CELL_OK;
@@ -294,7 +295,7 @@ s32 cellJpgDecReadHeader(CellJpgDecMainHandle mainHandle,
                          CellJpgDecInfo* info)
 {
     (void)mainHandle;
-    printf("[cellJpgDec] ReadHeader(sub=%u)\n", subHandle);
+    ps3_print("[cellJpgDec] ReadHeader(sub=%u)\n", subHandle);
 
     if (subHandle >= JPGDEC_MAX_SUBHANDLES || !s_jpg_sub[subHandle].in_use)
         return CELL_JPGDEC_ERROR_SEQ;
@@ -311,7 +312,7 @@ s32 cellJpgDecReadHeader(CellJpgDecMainHandle mainHandle,
     {
         int w, h, comp;
         if (!stbi_info_from_memory(sub->src_data, (int)sub->src_size, &w, &h, &comp)) {
-            printf("[cellJpgDec] stbi_info failed: %s\n", stbi_failure_reason());
+            ps3_log("[cellJpgDec] stbi_info failed: %s\n", stbi_failure_reason());
             return CELL_JPGDEC_ERROR_HEADER;
         }
 
@@ -325,7 +326,7 @@ s32 cellJpgDecReadHeader(CellJpgDecMainHandle mainHandle,
             default: sub->info.colorSpace = CELL_JPGDEC_RGB;      break;
         }
 
-        printf("[cellJpgDec]   %ux%u, %u components\n", (u32)w, (u32)h, (u32)comp);
+        ps3_log("[cellJpgDec]   %ux%u, %u components\n", (u32)w, (u32)h, (u32)comp);
 
         sub->header_read = 1;
         jpgdec_info_store(JPG_EA(info), &sub->info);
@@ -350,7 +351,7 @@ s32 cellJpgDecReadHeader(CellJpgDecMainHandle mainHandle,
             sub->info.numComponents = c;
             sub->info.colorSpace    = (c == 1) ? CELL_JPGDEC_GRAYSCALE : CELL_JPGDEC_RGB;
 
-            printf("[cellJpgDec]   %ux%u (header-only parse, no stb_image)\n", w, h);
+            ps3_log("[cellJpgDec]   %ux%u (header-only parse, no stb_image)\n", w, h);
 
             sub->header_read = 1;
             jpgdec_info_store(JPG_EA(info), &sub->info);
@@ -433,7 +434,7 @@ s32 cellJpgDecDecodeData(CellJpgDecMainHandle mainHandle,
                          CellJpgDecDataInfo* dataInfo)
 {
     (void)mainHandle;
-    printf("[cellJpgDec] DecodeData(sub=%u)\n", subHandle);
+    ps3_log("[cellJpgDec] DecodeData(sub=%u)\n", subHandle);
 
     if (subHandle >= JPGDEC_MAX_SUBHANDLES || !s_jpg_sub[subHandle].in_use)
         return CELL_JPGDEC_ERROR_SEQ;
@@ -472,7 +473,7 @@ s32 cellJpgDecDecodeData(CellJpgDecMainHandle mainHandle,
         u8* pixels = stbi_load_from_memory(sub->src_data, (int)sub->src_size,
                                             &w, &h, &comp, desired_comp);
         if (!pixels) {
-            printf("[cellJpgDec] stbi_load failed: %s\n", stbi_failure_reason());
+            ps3_log("[cellJpgDec] stbi_load failed: %s\n", stbi_failure_reason());
             if (datainfo_addr) vm_write32(datainfo_addr, CELL_JPGDEC_DEC_STATUS_STOP);
             return CELL_JPGDEC_ERROR_STREAM_FORMAT;
         }
@@ -490,14 +491,14 @@ s32 cellJpgDecDecodeData(CellJpgDecMainHandle mainHandle,
         memcpy(data_host, pixels, total);
         stbi_image_free(pixels);
 
-        printf("[cellJpgDec]   decoded %ux%u (%u bytes) -> guest 0x%08X\n",
+        ps3_log("[cellJpgDec]   decoded %ux%u (%u bytes) -> guest 0x%08X\n",
                (u32)w, (u32)h, total, data_addr);
 
         if (datainfo_addr) vm_write32(datainfo_addr, CELL_JPGDEC_DEC_STATUS_FINISH);
         return CELL_OK;
     }
 #else
-    printf("[cellJpgDec] DecodeData: stb_image not available — place stb_image.h in libs/codec/\n");
+    ps3_log("[cellJpgDec] DecodeData: stb_image not available — place stb_image.h in libs/codec/\n");
     if (datainfo_addr) vm_write32(datainfo_addr, CELL_JPGDEC_DEC_STATUS_STOP);
     return (s32)CELL_ENOSYS;
 #endif
@@ -507,7 +508,7 @@ s32 cellJpgDecClose(CellJpgDecMainHandle mainHandle,
                     CellJpgDecSubHandle subHandle)
 {
     (void)mainHandle;
-    printf("[cellJpgDec] Close(sub=%u)\n", subHandle);
+    ps3_log("[cellJpgDec] Close(sub=%u)\n", subHandle);
 
     if (subHandle >= JPGDEC_MAX_SUBHANDLES || !s_jpg_sub[subHandle].in_use)
         return CELL_JPGDEC_ERROR_SEQ;

@@ -20,6 +20,8 @@
 
 #include "edat.h"
 
+#include "ps3emu/logging.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -412,7 +414,7 @@ static int edat_rif_key(const char* in_path, uint8_t out[16])
             out[n] = (uint8_t)v;
         }
         if (n == 16) return 1;
-        fprintf(stderr, "[edat] PS3_RIF_KEY is not 32 hex chars -- ignoring\n");
+        ps3_log("[edat] PS3_RIF_KEY is not 32 hex chars -- ignoring\n");
     }
     char side[1100];
     if ((size_t)snprintf(side, sizeof side, "%s.rifkey", in_path) >= sizeof side) return 0;
@@ -420,7 +422,7 @@ static int edat_rif_key(const char* in_path, uint8_t out[16])
     if (!f) return 0;
     size_t n = fread(out, 1, 16, f);
     fclose(f);
-    if (n == 16) { fprintf(stderr, "[edat] RIF key from %s\n", side); return 1; }
+    if (n == 16) { ps3_log("[edat] RIF key from %s\n", side); return 1; }
     return 0;
 }
 
@@ -431,7 +433,7 @@ int edat_decrypt_file(const char* in_path, const char* out_path)
         int rc = edat_selftest();
         checked = 1;
         if (rc != 0) {
-            fprintf(stderr, "[edat] SELF-TEST FAILED (%d) -- refusing to decrypt; the "
+            ps3_log("[edat] SELF-TEST FAILED (%d) -- refusing to decrypt; the "
                             "AES/CMAC primitives are wrong and would silently produce "
                             "garbage\n", rc);
             return -100;
@@ -452,12 +454,12 @@ int edat_decrypt_file(const char* in_path, const char* out_path)
     uint32_t block_size = be32(hdr + 0x84);
     uint64_t file_size  = be64(hdr + 0x88);
 
-    fprintf(stderr, "[edat] %s: version=%u license=%u flags=0x%08X block=0x%X size=%llu\n",
+    ps3_log("[edat] %s: version=%u license=%u flags=0x%08X block=0x%X size=%llu\n",
             in_path, version, license, flags, block_size,
             (unsigned long long)file_size);
 
     if (flags & (EDAT_COMPRESSED_FLAG | EDAT_DEBUG_DATA_FLAG)) {
-        fprintf(stderr, "[edat] unsupported flags 0x%08X (per-block zlib compression "
+        ps3_log("[edat] unsupported flags 0x%08X (per-block zlib compression "
                         "and debug data are not implemented)\n", flags);
         fclose(in); return -3;
     }
@@ -485,7 +487,7 @@ int edat_decrypt_file(const char* in_path, const char* out_path)
     int have_key = 0;
     if (flags & SDAT_FLAG) {
         for (int i = 0; i < 16; i++) key[i] = (uint8_t)(dev_hash[i] ^ SDAT_KEY[i]);
-        fprintf(stderr, "[edat] SDAT: key derived from dev_hash\n");
+        ps3_log("[edat] SDAT: key derived from dev_hash\n");
         have_key = 1;
     } else {
         int found = -1;
@@ -499,15 +501,15 @@ int edat_decrypt_file(const char* in_path, const char* out_path)
         if (found >= 0 && (license & 3) == 3) {
             memcpy(key, KLIC_CANDIDATES[found].key, 16);
             have_key = 1;
-            fprintf(stderr, "[edat] klicensee %s verified against dev_hash\n",
+            ps3_log("[edat] klicensee %s verified against dev_hash\n",
                     KLIC_CANDIDATES[found].name);
         } else if (edat_rif_key(in_path, key)) {
             have_key = 1;
-            fprintf(stderr, "[edat] license type %u: using the supplied RIF key%s\n",
+            ps3_log("[edat] license type %u: using the supplied RIF key%s\n",
                     license, found >= 0 ? "" : " (dev_hash names an unknown klicensee)");
         }
         if (!have_key) {
-            fprintf(stderr,
+            ps3_log(
                 "[edat] license type %u needs a RIF key and none was supplied.\n"
                 "[edat]   set PS3_RIF_KEY=<32 hex chars>, or put the 16 raw bytes in\n"
                 "[edat]   %s.rifkey -- it is derived from your own .rap for this\n"
@@ -609,7 +611,7 @@ int edat_decrypt_file(const char* in_path, const char* out_path)
         else               hmac_sha1(hkey, (hash_alg == 1) ? 20 : 16,
                                      enc, (size_t)padded, mac);
         if (memcmp(mac, block_hash, 16) != 0) {
-            fprintf(stderr, "[edat] block %u hash mismatch -- wrong key or corrupt "
+            ps3_log("[edat] block %u hash mismatch -- wrong key or corrupt "
                             "file; stopping rather than writing garbage\n", b);
             rc = -11; break;
         }
@@ -625,7 +627,7 @@ int edat_decrypt_file(const char* in_path, const char* out_path)
     fclose(out);
 
     if (rc == 0)
-        fprintf(stderr, "[edat] decrypted %llu bytes -> %s\n",
+        ps3_log("[edat] decrypted %llu bytes -> %s\n",
                 (unsigned long long)written, out_path);
     else
         remove(out_path);   /* never leave a half-written cache behind */

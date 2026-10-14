@@ -12,6 +12,7 @@
  */
 #include "ppu_recomp.h"     /* ppu_context */
 #include "ps3emu/nid.h"     /* ps3_compute_nid */
+#include "ps3emu/logging.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -102,7 +103,12 @@ static void sys_initialize_tls(ppu_context* ctx)
 
     ctx->gpr[13] = block + 0x7000u;   /* thread pointer; TLS data at r13-0x7000 */
     ctx->gpr[3]  = 0;                  /* CELL_OK */
-    fprintf(stderr, "[crt] sys_initialize_tls: block 0x%08X, r13=0x%08X (seg 0x%X+%u, mem %u)\n",
+
+    // RPCS3 seems to do this.
+    ctx->cr += 0x2;
+
+    
+ps3_log("[crt] sys_initialize_tls: block 0x%08X, r13=0x%08X (seg 0x%X+%u, mem %u)\n",
             block, (uint32_t)ctx->gpr[13], seg_addr, seg_size, mem_size);
 }
 
@@ -166,7 +172,7 @@ static void sys_lwmutex_create(ppu_context* ctx)
     uint32_t attr = (uint32_t)ctx->gpr[4];
     { static long long _n=0; _n++;
       if (getenv("LWM_COUNT") && (_n<=24 || (_n%50000)==0))
-        fprintf(stderr, "[LWM] create #%lld lwm=0x%08X attr=0x%08X\n", _n, lwm, attr); }
+        ps3_log("[LWM] create #%lld lwm=0x%08X attr=0x%08X\n", _n, lwm, attr); }
     uint32_t protocol = attr ? vm_read32(attr + 0) : 0;
     vm_write32(lwm + 0x00, 0);          /* owner */
     vm_write32(lwm + 0x04, 0);          /* waiter */
@@ -282,26 +288,26 @@ static void sys_lwmutex_lock(ppu_context* ctx)
              * then block. Bounded diagnostics for park hunts; uncapped while the
              * probe window is open (g_nd_inpump). */
             static long _bl = 0; long _b = ++_bl;
-            if (g_nd_inpump || _b <= 40) fprintf(stderr, "[LWM-BLOCK] tid=%llu lwm=0x%08X owner=%u recur=%u tmo=%lluus\n",
+            if (g_nd_inpump || _b <= 40) ps3_log("[LWM-BLOCK] tid=%llu lwm=0x%08X owner=%u recur=%u tmo=%lluus\n",
                 (unsigned long long)ctx->thread_id, lwm, vm_read32(lwm + LWM_OWNER), vm_read32(lwm + LWM_RECUR),
                 (unsigned long long)timeout_us);
             if (lwm_trace()) { struct LwmSlot* sl = lwm_find(lwm);
                 long h = sl ? sl->holder : 0; long long held = (sl && h) ? (lwm_now_us() - sl->acq_us) : 0;
-                fprintf(stderr, "[LWM-CONVOY] tid=%llu BLOCKs lwm=0x%08X -> held-by-tid=%ld for %lldus (guest-owner=%u)\n",
+                ps3_log("[LWM-CONVOY] tid=%llu BLOCKs lwm=0x%08X -> held-by-tid=%ld for %lldus (guest-owner=%u)\n",
                     (unsigned long long)ctx->thread_id, lwm, h, held, vm_read32(lwm + LWM_OWNER)); fflush(stderr); }
             long long _blk_start = lwm_trace() ? lwm_now_us() : 0;
             DWORD ms = INFINITE;
             if (timeout_us) { uint64_t m = (timeout_us + 999) / 1000; ms = m > 0xFFFFFFFEull ? 0xFFFFFFFEu : (DWORD)m; }
             DWORD wr = WaitForSingleObject(s, ms);
             if (wr == WAIT_TIMEOUT) {           /* honor the timeout: ETIMEDOUT, no acquire */
-                if (lwm_trace()) fprintf(stderr, "[LWM-CONVOY] tid=%llu TIMED-OUT on lwm=0x%08X after %lldus (ETIMEDOUT, retry)\n",
+                if (lwm_trace()) ps3_log("[LWM-CONVOY] tid=%llu TIMED-OUT on lwm=0x%08X after %lldus (ETIMEDOUT, retry)\n",
                     (unsigned long long)ctx->thread_id, lwm, lwm_now_us() - _blk_start);
                 ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)0x8001000Bu;
                 return;
             }
-            if (lwm_trace()) fprintf(stderr, "[LWM-CONVOY] tid=%llu ACQUIRED lwm=0x%08X after waiting %lldus\n",
+            if (lwm_trace()) ps3_log("[LWM-CONVOY] tid=%llu ACQUIRED lwm=0x%08X after waiting %lldus\n",
                 (unsigned long long)ctx->thread_id, lwm, lwm_now_us() - _blk_start);
-            if (g_nd_inpump || _b <= 40) fprintf(stderr, "[LWM-GOT] tid=%llu lwm=0x%08X\n", (unsigned long long)ctx->thread_id, lwm);
+            if (g_nd_inpump || _b <= 40) ps3_log("[LWM-GOT] tid=%llu lwm=0x%08X\n", (unsigned long long)ctx->thread_id, lwm);
         }
     }
     if (lwm_trace()) { struct LwmSlot* sl = lwm_find(lwm); if (sl) { sl->holder = (long)self; sl->acq_us = lwm_now_us(); sl->acq_fences = g_gcm_ref_pub_count; sl->acq_cpu_us = ppu_thread_cpu_us(self); } }
@@ -344,7 +350,7 @@ static void sys_lwmutex_unlock(ppu_context* ctx)
                 long long fences = g_gcm_ref_pub_count - sl->acq_fences;
                 unsigned long long cpu_now = ppu_thread_cpu_us((unsigned)sl->holder);
                 long long cpu_delta = (cpu_now && sl->acq_cpu_us) ? (long long)(cpu_now - sl->acq_cpu_us) : -1;
-                fprintf(stderr, "[LWM-CONVOY] tid=%ld RELEASES lwm=0x%08X after holding %lldus (LONG HOLD) fences=%lld cpu=%lldus (%.0f%% cpu-bound) last-hle-from=0x%08X\n",
+                ps3_log("[LWM-CONVOY] tid=%ld RELEASES lwm=0x%08X after holding %lldus (LONG HOLD) fences=%lld cpu=%lldus (%.0f%% cpu-bound) last-hle-from=0x%08X\n",
                     sl->holder, lwm, held, fences, cpu_delta,
                     cpu_delta >= 0 ? 100.0 * (double)cpu_delta / (double)held : -1.0,
                     ppu_thread_prof_pc((unsigned)sl->holder));
@@ -362,7 +368,7 @@ static void sys_lwmutex_unlock(ppu_context* ctx)
                     if (v >= 0x00010000u && v < 0x00900000u && v != prev) {
                         p += snprintf(b + p, sizeof(b) - p, " %08X", v); prev = v; found++; }
                 }
-                fprintf(stderr, "%s\n", b); fflush(stderr);
+                ps3_log("%s\n", b); fflush(stderr);
             }
             sl->holder = 0; } }
     HANDLE s = lwm_sem(lwm);
@@ -457,7 +463,7 @@ static void sys_mmapper_allocate_memory(ppu_context* ctx)
     uint32_t mem_id_ptr = (uint32_t)ctx->gpr[5];
     uint32_t id         = mmapper_new_id(size);
     if (getenv("PS3_MEMTRACE"))
-        fprintf(stderr, "[mmapper] allocate_memory(size=0x%X flags=0x%llX id_ptr=0x%X) -> id 0x%X\n",
+        ps3_log("[mmapper] allocate_memory(size=0x%X flags=0x%llX id_ptr=0x%X) -> id 0x%X\n",
                 size, (unsigned long long)ctx->gpr[4], mem_id_ptr, id);
     if (mem_id_ptr) vm_write32(mem_id_ptr, id);
     ctx->gpr[3] = 0;
@@ -471,7 +477,7 @@ static void sys_mmapper_allocate_memory_from_container(ppu_context* ctx)
     uint32_t mem_id_ptr = (uint32_t)ctx->gpr[6];
     uint32_t id = mmapper_new_id(size);
     if (getenv("PS3_MEMTRACE"))
-        fprintf(stderr, "[mmapper] alloc_from_container(size=0x%X cid=0x%X flags=0x%llX id_ptr=0x%X) -> id 0x%X\n",
+        ps3_log("[mmapper] alloc_from_container(size=0x%X cid=0x%X flags=0x%llX id_ptr=0x%X) -> id 0x%X\n",
                 size, (uint32_t)ctx->gpr[4], (unsigned long long)ctx->gpr[5], mem_id_ptr, id);
     if (mem_id_ptr) vm_write32(mem_id_ptr, id);
     ctx->gpr[3] = 0;
@@ -483,7 +489,7 @@ static void sys_lwmutex_destroy_counted(ppu_context* ctx)
 {
     { static long long _n=0; _n++;
       if (getenv("LWM_COUNT") && (_n<=24 || (_n%50000)==0))
-        fprintf(stderr, "[LWM] destroy #%lld lwm=0x%08X r4=0x%08X r5=0x%08X\n", _n,
+        ps3_log("[LWM] destroy #%lld lwm=0x%08X r4=0x%08X r5=0x%08X\n", _n,
                 (uint32_t)ctx->gpr[3], (uint32_t)ctx->gpr[4], (uint32_t)ctx->gpr[5]); }
     ctx->gpr[3] = 0;
 }
@@ -557,7 +563,7 @@ static void hle_cellGcmInitBody(ppu_context* ctx)
     uint32_t cmdSize = (uint32_t)ctx->gpr[4];
     uint32_t ioSize  = (uint32_t)ctx->gpr[5];
     uint32_t ioAddr  = (uint32_t)ctx->gpr[6];
-    fprintf(stderr, "[HLE] _cellGcmInitBody(ctx_out=0x%08X, cmdSize=0x%X, ioSize=0x%X, ioAddr=0x%X)\n",
+    ps3_log("[HLE] _cellGcmInitBody(ctx_out=0x%08X, cmdSize=0x%X, ioSize=0x%X, ioAddr=0x%X)\n",
             ctx_out, cmdSize, ioSize, ioAddr);
     cellGcmSetupContext(ctx_out, cmdSize, ioSize, ioAddr, gcm_guest_alloc, gcm_guest_write32);
     ctx->gpr[3] = 0;   /* CELL_OK */
@@ -674,13 +680,13 @@ static void hle_sys_spu_image_import(ppu_context* ctx)
 {
     uint32_t img_ea = (uint32_t)ctx->gpr[3];
     uint32_t src_ea = (uint32_t)ctx->gpr[4];
-    fprintf(stderr, "[HLE] _sys_spu_image_import(img=0x%08X src=0x%08X r5=0x%08X r6=0x%08X)\n",
+    ps3_log("[HLE] _sys_spu_image_import(img=0x%08X src=0x%08X r5=0x%08X r6=0x%08X)\n",
             img_ea, src_ea, (uint32_t)ctx->gpr[5], (uint32_t)ctx->gpr[6]);
     if (!img_ea || !src_ea || !vm_base) { ctx->gpr[3] = 0; return; }
     const uint8_t* e = vm_base + src_ea;
     if (!(e[0]==0x7F && e[1]=='E' && e[2]=='L' && e[3]=='F')) {
-        fprintf(stderr, "[HLE] _sys_spu_image_import: src not an ELF -> no-op\n");
-        fflush(stderr); ctx->gpr[3] = 0; return;
+        ps3_log("[HLE] _sys_spu_image_import: src not an ELF -> no-op\n");
+        ctx->gpr[3] = 0; return;
     }
     uint16_t machine = (uint16_t)((e[0x12] << 8) | e[0x13]);   /* 23 = SPU */
     uint32_t entry   = vm_read32(src_ea + 0x18);
@@ -738,7 +744,7 @@ static void hle_sys_spu_image_import(ppu_context* ctx)
     vm_write32(img_ea + 0x04, entry);
     vm_write32(img_ea + 0x08, nsegs ? segs_ea : 0);
     vm_write32(img_ea + 0x0C, (uint32_t)nsegs);
-    fprintf(stderr, "[HLE] _sys_spu_image_import -> entry=0x%05X nsegs=%d machine=%u (SPU=23)\n",
+    ps3_log("[HLE] _sys_spu_image_import -> entry=0x%05X nsegs=%d machine=%u (SPU=23)\n",
             entry, nsegs, machine);
     /* SPU_IMAGE_DIAG=1: r6 is a caller-supplied guest buffer that differs on
      * every call, which this handler ignores -- it points the segments at the
@@ -747,7 +753,7 @@ static void hle_sys_spu_image_import(ppu_context* ctx)
     if (getenv("SPU_IMAGE_DIAG")) {
         for (int i = 0; i < nsegs; i++) {
             uint32_t s = segs_ea + (uint32_t)i * 0x18;
-            fprintf(stderr, "        seg[%d] type=%u ls=0x%05X size=%u src=0x%08X%08X\n",
+            ps3_log("        seg[%d] type=%u ls=0x%05X size=%u src=0x%08X%08X\n",
                     i, vm_read32(s + 0x00), vm_read32(s + 0x04), vm_read32(s + 0x08),
                     vm_read32(s + 0x10), vm_read32(s + 0x14));
         }
@@ -760,9 +766,9 @@ static void hle_sys_spu_image_import(ppu_context* ctx)
             for (int32_t o = -0x400; o <= 0x400; o += 4) {
                 uint32_t a = (uint32_t)((int32_t)r6 + o);
                 if (vm_read32(a) == 0x0052E1E8u)
-                    fprintf(stderr, "        descriptor marker 0x0052E1E8 at r6%+d (0x%08X)\n", o, a);
+                    ps3_log("        descriptor marker 0x0052E1E8 at r6%+d (0x%08X)\n", o, a);
                 if (vm_read32(a) == 0x00000248u && vm_read32(a + 4) == 0x00002CB0u)
-                    fprintf(stderr, "        image quad {248,2CB0,80,2CB0} at r6%+d (0x%08X) "
+                    ps3_log("        image quad {248,2CB0,80,2CB0} at r6%+d (0x%08X) "
                             "=> descriptor+0x150, descriptor=0x%08X, its +0x140=%08X %08X %08X %08X\n",
                             o, a, a - 0x150,
                             vm_read32(a - 0x10), vm_read32(a - 0xC),
@@ -862,7 +868,7 @@ static void sys_spinlock_lock(ppu_context* ctx)
             unsigned long me    = GetCurrentThreadId();
             static int reported = 0;
             if (reported++ < 8)
-                fprintf(stderr,
+                ps3_log(
                         "[spinlock] STUCK on 0x%08X after 200k spins: guest lr=0x%08X, "
                         "held by tid %lu, this is tid %lu%s\n",
                         ea, (uint32_t)ctx->lr, owner, me,

@@ -64,7 +64,7 @@ void cellSysutilQueueEvent(int slot, uint32_t status, uint32_t param)
 {
     int next = (s_event_tail + 1) % SYSUTIL_EVENT_QUEUE_SIZE;
     if (next == s_event_head) {
-        printf("[cellSysutil] event queue full — dropping status=0x%X\n", status);
+        ps3_log("[cellSysutil] event queue full — dropping status=0x%X\n", status);
         return;
     }
     s_event_queue[s_event_tail].slot   = slot;
@@ -157,7 +157,7 @@ s32 cellSysutilRegisterCallback(s32 slot, CellSysutilCallback func, void* userda
     uint32_t func_addr     = (uint32_t)(uintptr_t)func;
     uint32_t userdata_addr = (uint32_t)(uintptr_t)userdata;
 
-    printf("[cellSysutil] RegisterCallback(slot=%d, func=0x%08X)\n",
+    ps3_log("[cellSysutil] RegisterCallback(slot=%d, func=0x%08X)\n",
            slot, func_addr);
 
     if (slot < 0 || slot >= CELL_SYSUTIL_MAX_CALLBACKS)
@@ -180,7 +180,7 @@ s32 cellSysutilRegisterCallback(s32 slot, CellSysutilCallback func, void* userda
 
 s32 cellSysutilUnregisterCallback(s32 slot)
 {
-    printf("[cellSysutil] UnregisterCallback(slot=%d)\n", slot);
+    ps3_log("[cellSysutil] UnregisterCallback(slot=%d)\n", slot);
 
     if (slot < 0 || slot >= CELL_SYSUTIL_MAX_CALLBACKS)
         return CELL_SYSUTIL_ERROR_NUM;
@@ -215,7 +215,7 @@ s32 cellSysutilCheckCallback(void)
     {
       if (!s_pump_seen) {
           s_pump_seen = 1;
-          printf("[cellSysutil] CheckCallback: the title pumps sysutil%c", 10);
+          ps3_log("[cellSysutil] CheckCallback: the title pumps sysutil%c", 10);
       }
     }
     /* Drain the event queue, dispatching each event into guest code via
@@ -282,7 +282,7 @@ s32 cellSysutilGetSystemParamInt(s32 id, u32 value_ea)
     case CELL_SYSUTIL_SYSTEMPARAM_ID_KEYBOARD_TYPE:  v = 0; break; /* US/101 */
     case CELL_SYSUTIL_SYSTEMPARAM_ID_PAD_AUTOOFF:    v = 0; break; /* Disabled */
     default:
-        printf("[cellSysutil] GetSystemParamInt: unknown id 0x%04X\n", id);
+        ps3_log("[cellSysutil] GetSystemParamInt: unknown id 0x%04X\n", id);
         v = 0;
         break;
     }
@@ -315,7 +315,7 @@ s32 cellSysutilGetSystemParamString(s32 id, u32 buf_ea, u32 bufsize)
         break;
     }
     default:
-        printf("[cellSysutil] GetSystemParamString: unknown id 0x%04X\n", id);
+        ps3_log("[cellSysutil] GetSystemParamString: unknown id 0x%04X\n", id);
         vm_write8(buf_ea, 0);
         break;
     }
@@ -329,14 +329,14 @@ s32 cellSysutilGetSystemParamString(s32 id, u32 buf_ea, u32 bufsize)
 
 s32 cellSysutilEnableBgmPlayback(void)
 {
-    printf("[cellSysutil] EnableBgmPlayback()\n");
+    ps3_log("[cellSysutil] EnableBgmPlayback()\n");
     s_bgm_enabled = 1;
     return CELL_OK;
 }
 
 s32 cellSysutilDisableBgmPlayback(void)
 {
-    printf("[cellSysutil] DisableBgmPlayback()\n");
+    ps3_log("[cellSysutil] DisableBgmPlayback()\n");
     s_bgm_enabled = 0;
     s_bgm_status = CELL_SYSUTIL_BGMPLAYBACK_STATUS_STOP;
     return CELL_OK;
@@ -367,21 +367,21 @@ s32 cellSysutilGetBgmPlaybackStatus(s32* status)
 s32 cellSysutilSetBgmPlaybackExtraParam(void* param)
 {
     (void)param;
-    printf("[cellSysutil] SetBgmPlaybackExtraParam()\n");
+    ps3_log("[cellSysutil] SetBgmPlaybackExtraParam()\n");
     return CELL_OK;
 }
 
 s32 cellSysutilEnableBgmPlaybackEx(s32 param)
 {
     (void)param;
-    printf("[cellSysutil] EnableBgmPlaybackEx(%d)\n", param);
+    ps3_log("[cellSysutil] EnableBgmPlaybackEx(%d)\n", param);
     s_bgm_enabled = 1;
     return CELL_OK;
 }
 
 s32 cellSysutilDisableBgmPlaybackEx(void)
 {
-    printf("[cellSysutil] DisableBgmPlaybackEx()\n");
+    ps3_log("[cellSysutil] DisableBgmPlaybackEx()\n");
     s_bgm_enabled = 0;
     s_bgm_status = CELL_SYSUTIL_BGMPLAYBACK_STATUS_STOP;
     return CELL_OK;
@@ -406,7 +406,7 @@ s32 cellSysCacheMount(char* param)
     char cache_id[33];
     memcpy(cache_id, vm_base + ea, 32);
     cache_id[32] = '\0';
-    printf("[cellSysutil] SysCacheMount(id='%s')\n", cache_id);
+    ps3_log("[cellSysutil] SysCacheMount(id='%s')\n", cache_id);
 
     snprintf(s_cache_path, CELL_SYSCACHE_PATH_MAX, "/dev_hdd1/cache/%s", cache_id);
     size_t n = strlen(s_cache_path);
@@ -420,7 +420,7 @@ s32 cellSysCacheMount(char* param)
 
 s32 cellSysCacheClear(void)
 {
-    printf("[cellSysutil] SysCacheClear()\n");
+    ps3_log("[cellSysutil] SysCacheClear()\n");
     s_cache_mounted = 0;
     s_cache_path[0] = '\0';
     return CELL_OK;
@@ -447,7 +447,7 @@ s32 cellSysCacheClear(void)
 s32 cellDiscGameGetBootDiscInfo(void* getParam)
 {
     uint32_t ea = (uint32_t)(uintptr_t)getParam;
-    printf("[cellSysutil] DiscGameGetBootDiscInfo(param=0x%08X)\n", ea);
+    ps3_log("[cellSysutil] DiscGameGetBootDiscInfo(param=0x%08X)\n", ea);
 
     if (ea) {
         extern const char* cellGame_get_title_id(void);
@@ -467,17 +467,17 @@ s32 cellDiscGameGetBootDiscInfo(void* getParam)
       if (s_disc < 0) { const char* e = getenv("PS3_DISCGAME_BOOT");
                         s_disc = e ? atoi(e) : 1; }
       if (!s_disc) {
-          printf("[cellSysutil]   -> NOT_DISCBOOT\n");
+          ps3_log("[cellSysutil]   -> NOT_DISCBOOT\n");
           return (s32)CELL_DISCGAME_ERROR_NOT_DISCBOOT;
       } }
-    printf("[cellSysutil]   -> disc boot, titleId='%s'\n",
+    ps3_log("[cellSysutil]   -> disc boot, titleId='%s'\n",
            (const char*)(vm_base + ea));
     return CELL_OK;
 }
 
 s32 cellDiscGameRegisterDiscChangeCallback(void (*callback)(void*), void* arg)
 {
-    printf("[cellSysutil] DiscGameRegisterDiscChangeCallback()\n");
+    ps3_log("[cellSysutil] DiscGameRegisterDiscChangeCallback()\n");
     s_disc_change_cb = callback;
     s_disc_change_arg = arg;
     return CELL_OK;
@@ -485,7 +485,7 @@ s32 cellDiscGameRegisterDiscChangeCallback(void (*callback)(void*), void* arg)
 
 s32 cellDiscGameUnregisterDiscChangeCallback(void)
 {
-    printf("[cellSysutil] DiscGameUnregisterDiscChangeCallback()\n");
+    ps3_log("[cellSysutil] DiscGameUnregisterDiscChangeCallback()\n");
     s_disc_change_cb = NULL;
     s_disc_change_arg = NULL;
     return CELL_OK;

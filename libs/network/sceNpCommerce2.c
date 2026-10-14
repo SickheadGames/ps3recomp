@@ -17,7 +17,7 @@ static int s_ctx_in_use[MAX_CTX];
 
 s32 sceNpCommerce2Init(void)
 {
-    printf("[sceNpCommerce2] Init()\n");
+    ps3_log("[sceNpCommerce2] Init()\n");
     s_initialized = 1;
     memset(s_ctx_in_use, 0, sizeof(s_ctx_in_use));
     return CELL_OK;
@@ -25,7 +25,7 @@ s32 sceNpCommerce2Init(void)
 
 s32 sceNpCommerce2Term(void)
 {
-    printf("[sceNpCommerce2] Term()\n");
+    ps3_log("[sceNpCommerce2] Term()\n");
     s_initialized = 0;
     return CELL_OK;
 }
@@ -33,7 +33,7 @@ s32 sceNpCommerce2Term(void)
 s32 sceNpCommerce2CreateCtx(u32 version, const void* npId,
                               SceNpCommerce2Context* ctx)
 {
-    printf("[sceNpCommerce2] CreateCtx(version=%u)\n", version);
+    ps3_log("[sceNpCommerce2] CreateCtx(version=%u)\n", version);
     if (!ctx) return SCE_NP_COMMERCE2_ERROR_INVALID_ARGUMENT;
 
     for (int i = 0; i < MAX_CTX; i++) {
@@ -55,7 +55,7 @@ s32 sceNpCommerce2DestroyCtx(SceNpCommerce2Context ctx)
 s32 sceNpCommerce2CreateSessionStart(SceNpCommerce2Context ctx)
 {
     (void)ctx;
-    printf("[sceNpCommerce2] CreateSessionStart — returning server error\n");
+    ps3_log("[sceNpCommerce2] CreateSessionStart — returning server error\n");
     return SCE_NP_COMMERCE2_ERROR_SERVER_ERROR;
 }
 

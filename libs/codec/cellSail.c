@@ -60,7 +60,7 @@ static int sail_player_slot(u32 self_ea)
 
 s32 cellSailInit(void)
 {
-    printf("[cellSail] Init()\n");
+    ps3_log("[cellSail] Init()\n");
     if (s_initialized)
         return (s32)CELL_SAIL_ERROR_ALREADY_INITIALIZED;
     memset(s_players, 0, sizeof(s_players));
@@ -70,7 +70,7 @@ s32 cellSailInit(void)
 
 s32 cellSailTerm(void)
 {
-    printf("[cellSail] Term()\n");
+    ps3_log("[cellSail] Term()\n");
     s_initialized = 0;
     return CELL_OK;
 }
@@ -84,7 +84,7 @@ s32 cellSailPlayerCreate(const CellSailPlayerAttribute* attr,
                            CellSailPlayerHandle* handle)
 {
     (void)attr; (void)resource;
-    printf("[cellSail] PlayerCreate()\n");
+    ps3_log("[cellSail] PlayerCreate()\n");
 
     if (!s_initialized) return (s32)CELL_SAIL_ERROR_NOT_INITIALIZED;
     if (!handle) return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
@@ -105,7 +105,7 @@ s32 cellSailPlayerCreate(const CellSailPlayerAttribute* attr,
 
 s32 cellSailPlayerDestroy(CellSailPlayerHandle handle)
 {
-    printf("[cellSail] PlayerDestroy(%u)\n", handle);
+    ps3_log("[cellSail] PlayerDestroy(%u)\n", handle);
     const int _sp = sail_player_slot((u32)handle);
     if (_sp < 0)
         return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
@@ -155,7 +155,7 @@ static void sail_call(int slot, u32 call, u32 via, u32 to)
 s32 cellSailPlayerBoot(CellSailPlayerHandle handle, u64 userParam)
 {
     (void)userParam;
-    printf("[cellSail] PlayerBoot(%u)\n", handle);
+    ps3_log("[cellSail] PlayerBoot(%u)\n", handle);
     const int _sp = sail_player_slot((u32)handle);
     if (_sp < 0)
         return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
@@ -180,7 +180,7 @@ s32 cellSailPlayerOpenStream(CellSailPlayerHandle handle, const char* path)
         }
         path_host[n] = '\0';
     }
-    printf("[cellSail] PlayerOpenStream(%u, \"%s\") - stub\n", handle,
+    ps3_log("[cellSail] PlayerOpenStream(%u, \"%s\") - stub\n", handle,
            path ? path_host : "null");
     const int _sp = sail_player_slot((u32)handle);
     if (_sp < 0)
@@ -201,7 +201,7 @@ s32 cellSailPlayerCloseStream(CellSailPlayerHandle handle)
 
 s32 cellSailPlayerStart(CellSailPlayerHandle handle)
 {
-    printf("[cellSail] PlayerStart(%u)\n", handle);
+    ps3_log("[cellSail] PlayerStart(%u)\n", handle);
     const int _sp = sail_player_slot((u32)handle);
     if (_sp < 0)
         return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
@@ -219,7 +219,7 @@ s32 cellSailPlayerStart(CellSailPlayerHandle handle)
 
 s32 cellSailPlayerStop(CellSailPlayerHandle handle)
 {
-    printf("[cellSail] PlayerStop(%u)\n", handle);
+    ps3_log("[cellSail] PlayerStop(%u)\n", handle);
     const int _sp = sail_player_slot((u32)handle);
     if (_sp < 0)
         return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
@@ -328,7 +328,7 @@ s32 cellSailPlayerIsPaused(CellSailPlayerHandle handle)
 s32 cellSailPlayerSetRepeatMode(CellSailPlayerHandle handle, s32 repeatMode, void* command)
 {
     (void)command;
-    printf("[cellSail] SetRepeatMode(%u, %d)\n", handle, repeatMode);
+    ps3_log("[cellSail] SetRepeatMode(%u, %d)\n", handle, repeatMode);
     const int _sp = sail_player_slot((u32)handle);
     if (_sp < 0)
         return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
@@ -376,7 +376,7 @@ s32 cellSailPlayerCreateDescriptor(CellSailPlayerHandle handle,
         uri_host[n] = '\0';
     }
 
-    printf("[cellSail] CreateDescriptor(player=%u, type=%d, uri=\"%s\")\n", handle,
+    ps3_log("[cellSail] CreateDescriptor(player=%u, type=%d, uri=\"%s\")\n", handle,
            streamType, uri ? uri_host : "null");
     if (!desc) return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
 
@@ -408,7 +408,7 @@ s32 cellSailPlayerAddDescriptor(CellSailPlayerHandle handle,
                                   CellSailDescriptorHandle desc)
 {
     (void)handle;
-    printf("[cellSail] AddDescriptor(player=%u, desc=%u)\n", handle, desc);
+    ps3_log("[cellSail] AddDescriptor(player=%u, desc=%u)\n", handle, desc);
     if (desc >= MAX_DESCRIPTORS || !s_descs[desc].in_use)
         return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
     return CELL_OK;
@@ -427,7 +427,7 @@ s32 cellSailDescriptorCreateDatabase(CellSailDescriptorHandle desc,
                                        void* dbAddr, u32 dbSize, u64 arg)
 {
     (void)dbAddr; (void)dbSize; (void)arg;
-    printf("[cellSail] DescriptorCreateDatabase(desc=%u)\n", desc);
+    ps3_log("[cellSail] DescriptorCreateDatabase(desc=%u)\n", desc);
     if (desc >= MAX_DESCRIPTORS || !s_descs[desc].in_use)
         return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
     return CELL_OK;
@@ -495,7 +495,7 @@ s32 cellSailPlayerInitialize2(u32 pSelf, u32 pAllocator, u32 pCallback,
                               u32 pUserParam, u32 pAttribute, u32 pResource)
 {
     (void)pAttribute; (void)pResource;
-    printf("[cellSail] PlayerInitialize2(self=0x%08X alloc=0x%08X cb=0x%08X)\n",
+    ps3_log("[cellSail] PlayerInitialize2(self=0x%08X alloc=0x%08X cb=0x%08X)\n",
            pSelf, pAllocator, pCallback);
     if (!pSelf) return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
 
@@ -505,7 +505,7 @@ s32 cellSailPlayerInitialize2(u32 pSelf, u32 pAllocator, u32 pCallback,
      * a stub that spawns nothing. Failing cleanly lets a title take its
      * "no video" path instead of deadlocking during setup. */
     if (getenv("PS3_NO_SAIL")) {
-        printf("[cellSail] PS3_NO_SAIL -- reporting player creation failure\n");
+        ps3_log("[cellSail] PS3_NO_SAIL -- reporting player creation failure\n");
         return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
     }
 
@@ -528,7 +528,7 @@ s32 cellSailPlayerInitialize2(u32 pSelf, u32 pAllocator, u32 pCallback,
  * Same reasoning: zero it rather than leave the guest reading stale memory. */
 s32 cellSailSoundAdapterInitialize(u32 pSelf, u32 pCallbacks, u32 pArg)
 {
-    printf("[cellSail] SoundAdapterInitialize(self=0x%08X funcs=0x%08X)\n",
+    ps3_log("[cellSail] SoundAdapterInitialize(self=0x%08X funcs=0x%08X)\n",
            pSelf, pCallbacks);
     if (!pSelf) return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
     sail_zero_guest(pSelf, SAIL_ADAPTER_CLEAR);
@@ -545,7 +545,7 @@ s32 cellSailSoundAdapterInitialize(u32 pSelf, u32 pCallbacks, u32 pArg)
 s32 cellSailGraphicsAdapterInitialize(u32 pSelf, u32 pCallbacks, u32 pArg)
 {
     (void)pArg;
-    printf("[cellSail] GraphicsAdapterInitialize(self=0x%08X funcs=0x%08X)\n",
+    ps3_log("[cellSail] GraphicsAdapterInitialize(self=0x%08X funcs=0x%08X)\n",
            pSelf, pCallbacks);
     if (!pSelf) return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
     sail_zero_guest(pSelf, SAIL_ADAPTER_CLEAR);
@@ -559,7 +559,7 @@ s32 cellSailGraphicsAdapterInitialize(u32 pSelf, u32 pCallbacks, u32 pArg)
  * an error here concludes its graphics adapter is unusable. */
 s32 cellSailGraphicsAdapterSetPreferredFormat(u32 pSelf, u32 pFormat)
 {
-    printf("[cellSail] GraphicsAdapterSetPreferredFormat(self=0x%08X fmt=0x%08X)\n",
+    ps3_log("[cellSail] GraphicsAdapterSetPreferredFormat(self=0x%08X fmt=0x%08X)\n",
            pSelf, pFormat);
     if (!pSelf) return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
     return CELL_OK;
@@ -575,7 +575,7 @@ s32 cellSailMemAllocatorInitialize(CellSailMemAllocator* allocator,
      * values stored here are guest OPD addresses that SAIL calls back into. */
     u32 alloc_ea = (u32)(uintptr_t)allocator;
     u32 funcs_ea = (u32)(uintptr_t)pFuncs;
-    printf("[cellSail] MemAllocatorInitialize(allocator=0x%08X funcs=0x%08X)\n",
+    ps3_log("[cellSail] MemAllocatorInitialize(allocator=0x%08X funcs=0x%08X)\n",
            alloc_ea, funcs_ea);
     if (!alloc_ea) return (s32)CELL_SAIL_ERROR_INVALID_ARGUMENT;
     if (funcs_ea) {

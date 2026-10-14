@@ -94,7 +94,7 @@ s32 cellSpursCreateJobQueue(void* spurs, CellSpursJobQueue* jq,
     attr = GUEST_PTR(attr, const CellSpursJobQueueAttribute*);
     jq = GUEST_PTR(jq, CellSpursJobQueue*);
     (void)spurs; (void)buffer; (void)bufferSize;
-    printf("[cellSpursJq] CreateJobQueue()\n");
+    ps3_log("[cellSpursJq] CreateJobQueue()\n");
 
     if (!jq || !attr) return (s32)CELL_SPURS_JQ_ERROR_INVALID_ARGUMENT;
 
@@ -123,7 +123,7 @@ s32 cellSpursDestroyJobQueue(CellSpursJobQueue* jq)
     if (slot >= CELL_SPURS_JQ_MAX_QUEUES || !s_queues[slot].in_use)
         return (s32)CELL_SPURS_JQ_ERROR_INVALID_ARGUMENT;
 
-    printf("[cellSpursJq] DestroyJobQueue(%u)\n", slot);
+    ps3_log("[cellSpursJq] DestroyJobQueue(%u)\n", slot);
     s_queues[slot].in_use = 0;
     return CELL_OK;
 }

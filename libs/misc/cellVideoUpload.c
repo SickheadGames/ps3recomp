@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include "../../runtime/ppu/ppu_memory.h"   /* vm_write*: guest EA -> host, byte-swapped */
 
+#include "ps3emu/logging.h"
+
 /* Internal state */
 
 static int s_initialized = 0;
@@ -16,7 +18,7 @@ static int s_initialized = 0;
 
 s32 cellVideoUploadInit(void)
 {
-    printf("[cellVideoUpload] Init()\n");
+    ps3_log("[cellVideoUpload] Init()\n");
     if (s_initialized)
         return (s32)CELL_VIDEO_UPLOAD_ERROR_ALREADY_INITIALIZED;
     s_initialized = 1;
@@ -25,7 +27,7 @@ s32 cellVideoUploadInit(void)
 
 s32 cellVideoUploadTerm(void)
 {
-    printf("[cellVideoUpload] Term()\n");
+    ps3_log("[cellVideoUpload] Term()\n");
     s_initialized = 0;
     return CELL_OK;
 }
@@ -34,7 +36,7 @@ s32 cellVideoUploadStart(const CellVideoUploadParam* param,
                            CellVideoUploadCallback callback, void* arg)
 {
     (void)param; (void)callback; (void)arg;
-    printf("[cellVideoUpload] Start() - not supported\n");
+    ps3_log("[cellVideoUpload] Start() - not supported\n");
     if (!s_initialized) return (s32)CELL_VIDEO_UPLOAD_ERROR_NOT_INITIALIZED;
     return (s32)CELL_VIDEO_UPLOAD_ERROR_NOT_SUPPORTED;
 }

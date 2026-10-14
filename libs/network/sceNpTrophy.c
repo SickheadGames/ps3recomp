@@ -99,7 +99,7 @@ static void trophy_save(TrophyContext* ctx)
 
     fp = fopen(filepath, "w");
     if (!fp) {
-        printf("[sceNpTrophy] WARNING: Could not save trophies to %s\n",
+        ps3_log("[sceNpTrophy] WARNING: Could not save trophies to %s\n",
                filepath);
         return;
     }
@@ -153,7 +153,7 @@ static void trophy_load(TrophyContext* ctx)
     }
     fclose(fp);
 
-    printf("[sceNpTrophy] Loaded trophy data from %s\n", filepath);
+    ps3_log("[sceNpTrophy] Loaded trophy data from %s\n", filepath);
 }
 
 static u32 trophy_count_unlocked(TrophyContext* ctx)
@@ -181,7 +181,7 @@ s32 sceNpTrophyInit(void* poolPtr, u32 poolSize, u32 containerId, u64 options)
 {
     (void)poolPtr; (void)poolSize; (void)containerId; (void)options;
 
-    printf("[sceNpTrophy] Init()\n");
+    ps3_log("[sceNpTrophy] Init()\n");
 
     if (s_trophy_initialized)
         return SCE_NP_TROPHY_ERROR_ALREADY_INITIALIZED;
@@ -194,7 +194,7 @@ s32 sceNpTrophyInit(void* poolPtr, u32 poolSize, u32 containerId, u64 options)
 
 s32 sceNpTrophyTerm(void)
 {
-    printf("[sceNpTrophy] Term()\n");
+    ps3_log("[sceNpTrophy] Term()\n");
 
     if (!s_trophy_initialized)
         return SCE_NP_TROPHY_ERROR_NOT_INITIALIZED;
@@ -232,7 +232,7 @@ s32 sceNpTrophyCreateContext(SceNpTrophyContext* context,
             s_contexts[i].commId = *commId_h;
             s_contexts[i].total_trophies = SCE_NP_TROPHY_MAX_NUM_TROPHIES;
             vm_write32(GUEST_EA(context), (u32)i);
-            printf("[sceNpTrophy] CreateContext(commId=\"%s\") -> ctx=%d\n",
+            ps3_log("[sceNpTrophy] CreateContext(commId=\"%s\") -> ctx=%d\n",
                    commId_h->data, i);
             return CELL_OK;
         }
@@ -254,7 +254,7 @@ s32 sceNpTrophyDestroyContext(SceNpTrophyContext context)
         trophy_save(&s_contexts[context]);
 
     s_contexts[context].in_use = 0;
-    printf("[sceNpTrophy] DestroyContext(ctx=%d)\n", context);
+    ps3_log("[sceNpTrophy] DestroyContext(ctx=%d)\n", context);
     return CELL_OK;
 }
 
@@ -270,7 +270,7 @@ s32 sceNpTrophyCreateHandle(SceNpTrophyHandle* handle)
         if (!s_handles[i].in_use) {
             s_handles[i].in_use = 1;
             vm_write32(GUEST_EA(handle), (u32)i);
-            printf("[sceNpTrophy] CreateHandle() -> handle=%d\n", i);
+            ps3_log("[sceNpTrophy] CreateHandle() -> handle=%d\n", i);
             return CELL_OK;
         }
     }
@@ -288,7 +288,7 @@ s32 sceNpTrophyDestroyHandle(SceNpTrophyHandle handle)
         return SCE_NP_TROPHY_ERROR_INVALID_HANDLE;
 
     s_handles[handle].in_use = 0;
-    printf("[sceNpTrophy] DestroyHandle(handle=%d)\n", handle);
+    ps3_log("[sceNpTrophy] DestroyHandle(handle=%d)\n", handle);
     return CELL_OK;
 }
 
@@ -321,7 +321,7 @@ s32 sceNpTrophyRegisterContext(SceNpTrophyContext context,
     trophy_load(&s_contexts[context]);
     s_contexts[context].registered = 1;
 
-    printf("[sceNpTrophy] RegisterContext(ctx=%d, handle=%d, statusCb=0x%08X, "
+    ps3_log("[sceNpTrophy] RegisterContext(ctx=%d, handle=%d, statusCb=0x%08X, "
            "arg=0x%08X) -> loaded saved data\n", context, handle, statusCb, arg);
 
     /* Use the runner's OPD bridge, not the optional code/TOC scaffold entry
@@ -368,7 +368,7 @@ s32 sceNpTrophyGetRequiredDiskSpace(SceNpTrophyContext context,
      * errB underflow negative -> cellGame GameData check returns ERROR-B ->
      * boot bails. (Same LE-write class as the cellUserInfo fix.) */
     *reqSpace = ps3_bswap64((u64)(1024 * 1024)); /* 1 MB, big-endian */
-    printf("[sceNpTrophy] GetRequiredDiskSpace(ctx=%d) -> 1MB\n", context);
+    ps3_log("[sceNpTrophy] GetRequiredDiskSpace(ctx=%d) -> 1MB\n", context);
     return CELL_OK;
 }
 
@@ -415,7 +415,7 @@ s32 sceNpTrophyGetGameInfo(SceNpTrophyContext context,
         data->unlockedBronze   = data->unlockedTrophies;
     }
 
-    printf("[sceNpTrophy] GetGameInfo(ctx=%d)\n", context);
+    ps3_log("[sceNpTrophy] GetGameInfo(ctx=%d)\n", context);
     return CELL_OK;
 }
 
@@ -490,12 +490,12 @@ s32 sceNpTrophyUnlockTrophy(SceNpTrophyContext context,
     s_contexts[context].unlocked[trophyId] = 1;
     s_contexts[context].unlock_time[trophyId] = (u64)time(NULL);
 
-    printf("************************************************************\n");
-    printf("*  TROPHY UNLOCKED!  Trophy #%d                            \n",
+    ps3_log("************************************************************\n");
+    ps3_log("*  TROPHY UNLOCKED!  Trophy #%d                            \n",
            trophyId);
-    printf("*  Context: %d  CommId: %s                                 \n",
+    ps3_log("*  Context: %d  CommId: %s                                 \n",
            context, s_contexts[context].commId.data);
-    printf("************************************************************\n");
+    ps3_log("************************************************************\n");
 
     /* Save immediately */
     trophy_save(&s_contexts[context]);
@@ -570,7 +570,7 @@ s32 sceNpTrophyGetGameProgress(SceNpTrophyContext context,
     s32 pct = total > 0 ? (s32)((unlocked * 100) / total) : 0;
     vm_write32(GUEST_EA(percentage), (u32)pct);
 
-    printf("[sceNpTrophy] GetGameProgress(ctx=%d) -> %d%%\n",
+    ps3_log("[sceNpTrophy] GetGameProgress(ctx=%d) -> %d%%\n",
            context, pct);
     return CELL_OK;
 }

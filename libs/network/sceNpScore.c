@@ -202,7 +202,7 @@ static s32 record(s32 transId, u32 boardId, s64 score, u32 comment, u32 tmpRank)
     size_t cl = comment ? strnlen((const char*)vm_ptr8(comment), 63) : 0;
     p = psnr_put16(p, (u16)cl);
     if (cl) { memcpy(p, vm_ptr8(comment), cl); p += cl; }
-    printf("[sceNpScore] RecordScore(board %u, %lld)\n", boardId, (long long)score);
+    ps3_log("[sceNpScore] RecordScore(board %u, %lld)\n", boardId, (long long)score);
     if (!np_psnr_request(PSNR_RECORD_SCORE, body, (u32)(p - body), on_recorded,
                          (void*)(uintptr_t)trans_id_of(t)))
         return fail_now(t, (s32)SCORE_ERROR_NO_SERVER);

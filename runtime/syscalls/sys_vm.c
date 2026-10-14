@@ -24,6 +24,8 @@
  */
 
 #include "sys_vm.h"
+#include "ps3emu/logging.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -97,7 +99,7 @@ int64_t sys_vm_memory_map(ppu_context* ctx)
     if (addr_out != 0)
         write_be32(addr_out, base);
 
-    fprintf(stderr, "[sys_vm] memory_map(vsize=0x%X, psize=0x%X) -> 0x%08X\n",
+    ps3_log("[sys_vm] memory_map(vsize=0x%X, psize=0x%X) -> 0x%08X\n",
             vsize, psize, base);
     return CELL_OK;
 }
@@ -120,7 +122,7 @@ int64_t sys_vm_unmap(ppu_context* ctx)
      * is bump-allocated, so the range is never handed out again. */
     m->active = 0;
 
-    fprintf(stderr, "[sys_vm] unmap(0x%08X)\n", addr);
+    ps3_log("[sys_vm] unmap(0x%08X)\n", addr);
     return CELL_OK;
 }
 

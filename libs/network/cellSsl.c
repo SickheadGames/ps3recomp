@@ -34,7 +34,7 @@ s32 cellSslInit(void* pool, u32 poolSize)
 {
     (void)pool;
     (void)poolSize;
-    printf("[cellSsl] Init(poolSize=%u)\n", poolSize);
+    ps3_log("[cellSsl] Init(poolSize=%u)\n", poolSize);
 
     if (s_ssl_initialized)
         return (s32)CELL_SSL_ERROR_ALREADY_INITIALIZED;
@@ -45,7 +45,7 @@ s32 cellSslInit(void* pool, u32 poolSize)
 
 s32 cellSslEnd(void)
 {
-    printf("[cellSsl] End()\n");
+    ps3_log("[cellSsl] End()\n");
 
     if (!s_ssl_initialized)
         return (s32)CELL_SSL_ERROR_NOT_INITIALIZED;
@@ -57,7 +57,7 @@ s32 cellSslEnd(void)
 s32 cellSslCertificateLoader(u64 flags, char* buffer, u32 size, u32* required)
 {
     (void)buffer; (void)size;
-    printf("[cellSsl] CertificateLoader(flags=0x%llX)\n", (unsigned long long)flags);
+    ps3_log("[cellSsl] CertificateLoader(flags=0x%llX)\n", (unsigned long long)flags);
     if (required)
         vm_write32((uint32_t)(uintptr_t)required, 0);  /* required is a guest EA -> write guest mem, not host deref */
     return CELL_OK;
@@ -66,7 +66,7 @@ s32 cellSslCertificateLoader(u64 flags, char* buffer, u32 size, u32* required)
 s32 cellSslCertGetSerialNumber(CellSslCertId certId, u8* serial, u32* serialSize)
 {
     (void)certId;
-    printf("[cellSsl] CertGetSerialNumber()\n");
+    ps3_log("[cellSsl] CertGetSerialNumber()\n");
 
     if (!serial || !serialSize)
         return (s32)CELL_SSL_ERROR_INVALID_ARG;
@@ -86,7 +86,7 @@ s32 cellSslCertGetPublicKey(CellSslCertId certId, u8* key, u32* keySize)
 {
     (void)certId;
     (void)key;
-    printf("[cellSsl] CertGetPublicKey()\n");
+    ps3_log("[cellSsl] CertGetPublicKey()\n");
 
     if (keySize)
         vm_write32((u32)(uintptr_t)keySize, (u32)0);

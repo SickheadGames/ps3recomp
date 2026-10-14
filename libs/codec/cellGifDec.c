@@ -18,6 +18,7 @@
 #include "../../runtime/ppu/ppu_memory.h"   /* vm_write*: guest EA -> host, byte-swapped */
 #include <stddef.h>   /* offsetof */
 #include "../guest_struct.h"   /* GUEST_EA, guest_struct_load/store */
+#include "ps3emu/logging.h"
 
 /* vm_base: base pointer for the PS3 guest address space */
 extern uint8_t* vm_base;
@@ -76,7 +77,7 @@ static int gifdec_load_source(GifDecSubState* sub)
         /* streamPtr is a 32-bit guest address */
         u32 guest_addr = (u32)sub->src.streamPtr;
         if (!vm_base) {
-            printf("[cellGifDec] ERROR: vm_base is NULL, cannot translate guest addr 0x%08X\n", guest_addr);
+            ps3_print("[cellGifDec] ERROR: vm_base is NULL, cannot translate guest addr 0x%08X\n", guest_addr);
             return -1;
         }
         sub->src_data = vm_base + guest_addr;
@@ -88,13 +89,13 @@ static int gifdec_load_source(GifDecSubState* sub)
     if (sub->src.srcSelect == CELL_GIFDEC_FILE) {
         char host_path[CELL_FS_MAX_FS_PATH_LENGTH];
         if (cellfs_translate_path(sub->src.fileName, host_path, sizeof(host_path)) != 0) {
-            printf("[cellGifDec] Cannot translate path: %s\n", sub->src.fileName);
+            ps3_print("[cellGifDec] Cannot translate path: %s\n", sub->src.fileName);
             return -1;
         }
 
         FILE* f = fopen(host_path, "rb");
         if (!f) {
-            printf("[cellGifDec] Cannot open file: %s (host: %s)\n",
+            ps3_print("[cellGifDec] Cannot open file: %s (host: %s)\n",
                    sub->src.fileName, host_path);
             return -1;
         }
@@ -112,7 +113,7 @@ static int gifdec_load_source(GifDecSubState* sub)
 
         if (read_size <= 0) {
             fclose(f);
-            printf("[cellGifDec] File is empty or offset past end: %s\n", host_path);
+            ps3_print("[cellGifDec] File is empty or offset past end: %s\n", host_path);
             return -1;
         }
 
@@ -124,7 +125,7 @@ static int gifdec_load_source(GifDecSubState* sub)
         sub->src_allocated = 1;
         fclose(f);
 
-        printf("[cellGifDec] Loaded %u bytes from '%s'\n", sub->src_size, host_path);
+        ps3_print("[cellGifDec] Loaded %u bytes from '%s'\n", sub->src_size, host_path);
         return 0;
     }
 
@@ -187,7 +188,7 @@ s32 cellGifDecCreate(CellGifDecMainHandle* mainHandle,
                      CellGifDecThreadOutParam* threadOutParam)
 {
     (void)threadInParam;
-    printf("[cellGifDec] Create()\n");
+    ps3_print("[cellGifDec] Create()\n");
 
     if (!mainHandle) return CELL_GIFDEC_ERROR_ARG;
 
@@ -207,7 +208,7 @@ s32 cellGifDecCreate(CellGifDecMainHandle* mainHandle,
 
 s32 cellGifDecDestroy(CellGifDecMainHandle mainHandle)
 {
-    printf("[cellGifDec] Destroy(handle=%u)\n", mainHandle);
+    ps3_print("[cellGifDec] Destroy(handle=%u)\n", mainHandle);
 
     if (mainHandle >= GIFDEC_MAX_HANDLES || !s_gif_main[mainHandle].in_use)
         return CELL_GIFDEC_ERROR_ARG;
@@ -227,7 +228,7 @@ s32 cellGifDecOpen(CellGifDecMainHandle mainHandle,
                    const CellGifDecSrc* src,
                    CellGifDecOpnInfo* openInfo)
 {
-    printf("[cellGifDec] Open(main=%u, srcSelect=%u)\n", mainHandle,
+    ps3_print("[cellGifDec] Open(main=%u, srcSelect=%u)\n", mainHandle,
            src ? vm_read32(GIF_EA(src)) : 0xFFFFFFFFu);
 
     if (mainHandle >= GIFDEC_MAX_HANDLES || !s_gif_main[mainHandle].in_use)
@@ -247,9 +248,9 @@ s32 cellGifDecOpen(CellGifDecMainHandle mainHandle,
             /* read back from the host copy just loaded */
             const CellGifDecSrc* hsrc = &s_gif_sub[i].src;
             if (hsrc->srcSelect == CELL_GIFDEC_FILE)
-                printf("[cellGifDec]   file: '%s'\n", hsrc->fileName);
+                ps3_log("[cellGifDec]   file: '%s'\n", hsrc->fileName);
             else if (hsrc->srcSelect == CELL_GIFDEC_BUFFER)
-                printf("[cellGifDec]   buffer: guest_addr=0x%08X size=%u\n",
+                ps3_log("[cellGifDec]   buffer: guest_addr=0x%08X size=%u\n",
                        (u32)hsrc->streamPtr, hsrc->streamSize);
 
             return CELL_OK;
@@ -263,7 +264,7 @@ s32 cellGifDecReadHeader(CellGifDecMainHandle mainHandle,
                          CellGifDecInfo* info)
 {
     (void)mainHandle;
-    printf("[cellGifDec] ReadHeader(sub=%u)\n", subHandle);
+    ps3_print("[cellGifDec] ReadHeader(sub=%u)\n", subHandle);
 
     if (subHandle >= GIFDEC_MAX_SUBHANDLES || !s_gif_sub[subHandle].in_use)
         return CELL_GIFDEC_ERROR_SEQ;
@@ -283,7 +284,7 @@ s32 cellGifDecReadHeader(CellGifDecMainHandle mainHandle,
         /* Use stb_image to validate and get dimensions */
         int w, h, comp;
         if (!stbi_info_from_memory(sub->src_data, (int)sub->src_size, &w, &h, &comp)) {
-            printf("[cellGifDec] stbi_info failed: %s\n", stbi_failure_reason());
+            ps3_print("[cellGifDec] stbi_info failed: %s\n", stbi_failure_reason());
             /* Fall through to manual GIF header parse below */
             goto manual_parse;
         }
@@ -307,7 +308,7 @@ s32 cellGifDecReadHeader(CellGifDecMainHandle mainHandle,
             info->SPixelAspectRatio       = lsd[6];
         }
 
-        printf("[cellGifDec]   %ux%u\n", (u32)w, (u32)h);
+        ps3_print("[cellGifDec]   %ux%u\n", (u32)w, (u32)h);
 
         sub->info = *info;
         sub->header_read = 1;
@@ -341,7 +342,7 @@ manual_parse:
     info->SBackGroundColor         = lsd[5];
     info->SPixelAspectRatio        = lsd[6];
 
-    printf("[cellGifDec]   %ux%u (header parse)\n", w, h);
+    ps3_print("[cellGifDec]   %ux%u (header parse)\n", w, h);
 
     sub->info = *info;
     sub->header_read = 1;
@@ -393,7 +394,7 @@ s32 cellGifDecDecodeData(CellGifDecMainHandle mainHandle,
                          CellGifDecDataInfo* dataInfo)
 {
     (void)mainHandle;
-    printf("[cellGifDec] DecodeData(sub=%u)\n", subHandle);
+    ps3_print("[cellGifDec] DecodeData(sub=%u)\n", subHandle);
 
     if (subHandle >= GIFDEC_MAX_SUBHANDLES || !s_gif_sub[subHandle].in_use)
         return CELL_GIFDEC_ERROR_SEQ;
@@ -410,7 +411,7 @@ s32 cellGifDecDecodeData(CellGifDecMainHandle mainHandle,
         u8* pixels = stbi_load_from_memory(sub->src_data, (int)sub->src_size,
                                             &w, &h, &comp, 4);
         if (!pixels) {
-            printf("[cellGifDec] stbi_load failed: %s\n", stbi_failure_reason());
+            ps3_print("[cellGifDec] stbi_load failed: %s\n", stbi_failure_reason());
             vm_write32(GUEST_EA(dataInfo)
                + (u32)offsetof(CellGifDecDataInfo, status),
                CELL_GIFDEC_DEC_STATUS_STOP);
@@ -430,7 +431,7 @@ s32 cellGifDecDecodeData(CellGifDecMainHandle mainHandle,
         memcpy(GUEST_PTR(data, u8*), pixels, total);
         stbi_image_free(pixels);
 
-        printf("[cellGifDec]   decoded %ux%u (%u bytes)\n", (u32)w, (u32)h, total);
+        ps3_log("[cellGifDec]   decoded %ux%u (%u bytes)\n", (u32)w, (u32)h, total);
 
         vm_write32(GUEST_EA(dataInfo)
                + (u32)offsetof(CellGifDecDataInfo, recordType), 0);
@@ -440,7 +441,7 @@ s32 cellGifDecDecodeData(CellGifDecMainHandle mainHandle,
         return CELL_OK;
     }
 #else
-    printf("[cellGifDec] DecodeData: stb_image not available — place stb_image.h in libs/codec/\n");
+    ps3_log("[cellGifDec] DecodeData: stb_image not available — place stb_image.h in libs/codec/\n");
     vm_write32(GUEST_EA(dataInfo)
                + (u32)offsetof(CellGifDecDataInfo, status),
                CELL_GIFDEC_DEC_STATUS_STOP);
@@ -452,7 +453,7 @@ s32 cellGifDecClose(CellGifDecMainHandle mainHandle,
                     CellGifDecSubHandle subHandle)
 {
     (void)mainHandle;
-    printf("[cellGifDec] Close(sub=%u)\n", subHandle);
+    ps3_print("[cellGifDec] Close(sub=%u)\n", subHandle);
 
     if (subHandle >= GIFDEC_MAX_SUBHANDLES || !s_gif_sub[subHandle].in_use)
         return CELL_GIFDEC_ERROR_SEQ;

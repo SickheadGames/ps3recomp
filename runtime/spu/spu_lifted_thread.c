@@ -111,7 +111,7 @@ void spu_lifted_thread_run(spu_context* ctx, spu_lifted_thread_result* out)
     memset(&r, 0, sizeof(r));
     if (!ctx) { if (out) *out = r; return; }
 
-    fprintf(stderr, "[SPU] tid=0x%X RUNNING lifted image entry=0x%05X (image %d)\n",
+    ps3_log("[SPU] tid=0x%X RUNNING lifted image entry=0x%05X (image %d)\n",
             ctx->spu_id, ctx->pc, ctx->image_id);
     fflush(stderr);
 
@@ -143,7 +143,7 @@ void spu_lifted_thread_run(spu_context* ctx, spu_lifted_thread_result* out)
         r.faulted = 1;
     }
 
-    fprintf(stderr, "[SPU] tid=0x%X stopped (status=0x%X pc=0x%05X code=0x%X) "
+    ps3_log("[SPU] tid=0x%X stopped (status=0x%X pc=0x%05X code=0x%X) "
             "-> status=%d%s%s\n",
             ctx->spu_id, ctx->status, ctx->pc, ctx->stop_code, r.exit_status,
             r.group_exit ? " group-exit" : "", r.faulted ? " FAULT" : "");

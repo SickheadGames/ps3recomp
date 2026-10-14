@@ -18,7 +18,7 @@ static u32 s_max_connect = 0;
 
 s32 cellGemInit(const CellGemAttribute* attr)
 {
-    printf("[cellGem] Init()\n");
+    ps3_log("[cellGem] Init()\n");
     if (s_initialized)
         return (s32)CELL_GEM_ERROR_ALREADY_INITIALIZED;
     if (!attr) return (s32)CELL_GEM_ERROR_INVALID_ARGUMENT;
@@ -30,7 +30,7 @@ s32 cellGemInit(const CellGemAttribute* attr)
 
 s32 cellGemEnd(void)
 {
-    printf("[cellGem] End()\n");
+    ps3_log("[cellGem] End()\n");
     s_initialized = 0;
     return CELL_OK;
 }

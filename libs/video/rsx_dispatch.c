@@ -42,6 +42,8 @@
 
 #include "rsx_dispatch.h"
 
+#include "ps3emu/logging.h"
+
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -312,7 +314,7 @@ void rsx_dispatch_method(rsx_dispatch* rsx, u32 method, u32 arg)
     if (idx >= RSX_DSP_NUM_REGS) {
         static int n = 0;
         if (n++ < 8)
-            fprintf(stderr, "[rsx-dispatch] method 0x%05X (arg 0x%08X) out of range -- dropped\n",
+            ps3_log("[rsx-dispatch] method 0x%05X (arg 0x%08X) out of range -- dropped\n",
                     method, arg);
         return;
     }
@@ -350,7 +352,7 @@ void rsx_dispatch_method(rsx_dispatch* rsx, u32 method, u32 arg)
           if (lo == -2) { const char* e = getenv("RSX_CONST_LOG"); lo = -1;
                           if (e) sscanf(e, "%d,%d", &lo, &hi); }
           if (lo >= 0 && (int)slot >= lo && (int)slot <= hi && n < 400) { n++;
-              fprintf(stderr, "[const-load] c[%u].%c = 0x%08X (method 0x%04X id=%u)\n", slot,
+              ps3_log("[const-load] c[%u].%c = 0x%08X (method 0x%04X id=%u)\n", slot,
                       "xyzw"[word & 3], arg, method, rsx->regs[M_VP_UPLOAD_CONST_ID >> 2]); } }
         return;
     }

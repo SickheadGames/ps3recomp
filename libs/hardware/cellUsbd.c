@@ -23,7 +23,7 @@ static int s_ldd_count = 0;
 
 s32 cellUsbdInit(void)
 {
-    printf("[cellUsbd] Init()\n");
+    ps3_log("[cellUsbd] Init()\n");
     if (s_initialized)
         return (s32)CELL_USBD_ERROR_ALREADY_INITIALIZED;
     s_ldd_count = 0;
@@ -34,7 +34,7 @@ s32 cellUsbdInit(void)
 
 s32 cellUsbdEnd(void)
 {
-    printf("[cellUsbd] End()\n");
+    ps3_log("[cellUsbd] End()\n");
     s_initialized = 0;
     return CELL_OK;
 }
@@ -43,7 +43,7 @@ s32 cellUsbdRegisterLdd(const CellUsbdLddOps* ops)
 {
     /* CellUsbdLddOps leads with a char* -- a 4-byte EA to the guest. */
     u32 name_ea = ops ? vm_read32((u32)(uintptr_t)ops) : 0;
-    printf("[cellUsbd] RegisterLdd(%s)\n",
+    ps3_log("[cellUsbd] RegisterLdd(%s)\n",
            name_ea ? (const char*)(vm_base + name_ea) : (ops ? "?" : "null"));
     if (!s_initialized) return (s32)CELL_USBD_ERROR_NOT_INITIALIZED;
     if (!ops) return (s32)CELL_USBD_ERROR_INVALID_ARGUMENT;

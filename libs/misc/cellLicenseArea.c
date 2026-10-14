@@ -12,7 +12,7 @@
 
 s32 cellLicenseAreaCheck(s32* areaCode)
 {
-    printf("[cellLicenseArea] Check()\n");
+    ps3_log("[cellLicenseArea] Check()\n");
     if (!areaCode) return (s32)CELL_LICENSE_AREA_ERROR_INVALID_ARGUMENT;
     vm_write32((u32)(uintptr_t)areaCode, (u32)CELL_LICENSE_AREA_A); /* Americas */
     return CELL_OK;

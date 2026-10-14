@@ -189,7 +189,7 @@ static float font_get_stb_scale(FontSlot* slot)
 s32 cellFontInit(const CellFontConfig* config)
 {
     (void)config;
-    printf("[cellFont] Init()\n");
+    ps3_log("[cellFont] Init()\n");
 
     if (s_font_initialized)
         return CELL_FONT_ERROR_ALREADY_INITIALIZED;
@@ -202,7 +202,7 @@ s32 cellFontInit(const CellFontConfig* config)
 
 s32 cellFontEnd(void)
 {
-    printf("[cellFont] End()\n");
+    ps3_log("[cellFont] End()\n");
 
     if (!s_font_initialized)
         return CELL_FONT_ERROR_UNINITIALIZED;
@@ -222,7 +222,7 @@ s32 cellFontOpenFontFile(CellFont* font, const char* fontPath, u32 subNum, s32 u
     (void)subNum;
     (void)uniqueId;
     fontPath = GUEST_PTR(fontPath, const char*);
-    printf("[cellFont] OpenFontFile(%s)\n", fontPath ? fontPath : "(null)");
+    ps3_log("[cellFont] OpenFontFile(%s)\n", fontPath ? fontPath : "(null)");
 
     if (!s_font_initialized) return CELL_FONT_ERROR_UNINITIALIZED;
     if (!font || !fontPath)  return CELL_FONT_ERROR_INVALID_PARAMETER;
@@ -234,7 +234,7 @@ s32 cellFontOpenFontFile(CellFont* font, const char* fontPath, u32 subNum, s32 u
     FILE* f = fopen(fontPath, "rb");
     if (!f) {
         slot->in_use = 0;
-        printf("[cellFont] Cannot open font file: %s\n", fontPath);
+        ps3_log("[cellFont] Cannot open font file: %s\n", fontPath);
         return CELL_FONT_ERROR_OPEN_FAILED;
     }
 
@@ -258,7 +258,7 @@ s32 cellFontOpenFontFile(CellFont* font, const char* fontPath, u32 subNum, s32 u
                        stbtt_GetFontOffsetForIndex(slot->font_data, 0))) {
         slot->stb_valid = 1;
     } else {
-        printf("[cellFont] stbtt_InitFont failed for: %s\n", fontPath);
+        ps3_log("[cellFont] stbtt_InitFont failed for: %s\n", fontPath);
         slot->stb_valid = 0;
     }
 #endif
@@ -272,7 +272,7 @@ s32 cellFontOpenFontMemory(CellFont* font, const void* data, u32 dataSize, u32 s
 {
     (void)subNum;
     (void)uniqueId;
-    printf("[cellFont] OpenFontMemory(size=%u)\n", dataSize);
+    ps3_log("[cellFont] OpenFontMemory(size=%u)\n", dataSize);
 
     if (!s_font_initialized) return CELL_FONT_ERROR_UNINITIALIZED;
     if (!font || !data || dataSize == 0) return CELL_FONT_ERROR_INVALID_PARAMETER;
@@ -302,7 +302,7 @@ s32 cellFontOpenFontset(CellFontLibrary lib, CellFontType* fontType, CellFont* f
 {
     (void)lib;
     u32 want_type = fontType ? vm_read32(FONT_EA(fontType)) : 0;
-    printf("[cellFont] OpenFontset(type=0x%X)\n", want_type);
+    ps3_log("[cellFont] OpenFontset(type=0x%X)\n", want_type);
 
     if (!s_font_initialized) return CELL_FONT_ERROR_UNINITIALIZED;
     if (!font) return CELL_FONT_ERROR_INVALID_PARAMETER;

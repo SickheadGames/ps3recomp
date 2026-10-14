@@ -97,7 +97,7 @@ void cellOskDialogSetDefaultResponse(const char* text)
 s32 cellOskDialogInit(u32 container)
 {
     (void)container;
-    printf("[cellOskDialog] Init()\n");
+    ps3_log("[cellOskDialog] Init()\n");
 
     if (s_osk_initialized)
         return CELL_OSK_ERROR_ALREADY_INITIALIZED;
@@ -109,7 +109,7 @@ s32 cellOskDialogInit(u32 container)
 
 s32 cellOskDialogEnd(void)
 {
-    printf("[cellOskDialog] End()\n");
+    ps3_log("[cellOskDialog] End()\n");
 
     if (!s_osk_initialized)
         return CELL_OSK_ERROR_NOT_INITIALIZED;
@@ -146,15 +146,15 @@ s32 cellOskDialogLoadAsync(u32 container,
         osk_guest_utf16(message_ea, host_msg, CELL_OSK_MAX_TEXT_LENGTH);
         char prompt[256];
         osk_utf16_to_ascii(host_msg, prompt, sizeof(prompt) - 1);
-        printf("[cellOskDialog] LoadAsync - Prompt: \"%s\"\n", prompt);
+        ps3_log("[cellOskDialog] LoadAsync - Prompt: \"%s\"\n", prompt);
     } else {
-        printf("[cellOskDialog] LoadAsync - (no prompt)\n");
+        ps3_log("[cellOskDialog] LoadAsync - (no prompt)\n");
     }
 
     if (init_ea) {
         char init[256];
         osk_utf16_to_ascii(host_init, init, sizeof(init) - 1);
-        printf("[cellOskDialog] Initial text: \"%s\"\n", init);
+        ps3_log("[cellOskDialog] Initial text: \"%s\"\n", init);
     }
 
     /* Prepare the result: use default response or empty string */
@@ -163,7 +163,7 @@ s32 cellOskDialogLoadAsync(u32 container,
         osk_ascii_to_utf16(s_default_response, s_result_text,
                            CELL_OSK_MAX_TEXT_LENGTH);
         s_result_length = (u32)strlen(s_default_response);
-        printf("[cellOskDialog] Returning default response: \"%s\"\n",
+        ps3_log("[cellOskDialog] Returning default response: \"%s\"\n",
                s_default_response);
     } else if (init_ea) {
         /* Copy initial text as the response */
@@ -185,7 +185,7 @@ s32 cellOskDialogUnloadAsync(CellOskDialogCallbackReturnParam* result)
     if (!s_osk_loaded)
         return CELL_OSK_ERROR_DIALOG_NOT_LOADED;
 
-    printf("[cellOskDialog] UnloadAsync()\n");
+    ps3_log("[cellOskDialog] UnloadAsync()\n");
 
     if (result) {
         u32 res_ea = GUEST_EA(result);
@@ -217,7 +217,7 @@ s32 cellOskDialogGetSize(u32* width, u32* height)
 
 s32 cellOskDialogAbort(void)
 {
-    printf("[cellOskDialog] Abort()\n");
+    ps3_log("[cellOskDialog] Abort()\n");
 
     if (!s_osk_loaded)
         return CELL_OSK_ERROR_DIALOG_NOT_LOADED;
@@ -235,14 +235,14 @@ s32 cellOskDialogSetInitialInputDevice(u32 device)
 s32 cellOskDialogSetInitialKeyLayout(u32 layout)
 {
     (void)layout;
-    printf("[cellOskDialog] SetInitialKeyLayout(%u)\n", layout);
+    ps3_log("[cellOskDialog] SetInitialKeyLayout(%u)\n", layout);
     return CELL_OK;
 }
 
 s32 cellOskDialogSetLayoutMode(u32 mode)
 {
     (void)mode;
-    printf("[cellOskDialog] SetLayoutMode(%u)\n", mode);
+    ps3_log("[cellOskDialog] SetLayoutMode(%u)\n", mode);
     return CELL_OK;
 }
 

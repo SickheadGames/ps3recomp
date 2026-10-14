@@ -7,6 +7,7 @@
  */
 
 #include "cellDmux.h"
+#include "ps3emu/logging.h"
 #include <stdio.h>
 #include <string.h>
 #include "../../runtime/ppu/ppu_memory.h"   /* vm_write*: guest EA -> host, byte-swapped */
@@ -50,7 +51,7 @@ s32 cellDmuxOpen(const CellDmuxType* type, const CellDmuxResource* res,
 {
     (void)res;
 
-    printf("[cellDmux] Open(streamType=%u)\n",
+    ps3_print("[cellDmux] Open(streamType=%u)\n",
            type ? vm_read32(GUEST_EA(type)) : 0);   /* streamType */
 
     if (!type || !handle)
@@ -67,7 +68,7 @@ s32 cellDmuxOpen(const CellDmuxType* type, const CellDmuxResource* res,
             s_dmux[i].userData = 0;
             s_dmux[i].auSeqNo = 0;
             vm_write32((u32)(uintptr_t)handle, (u32)i);
-            printf("[cellDmux] Open -> handle=%u\n", i);
+            ps3_print("[cellDmux] Open -> handle=%u\n", i);
             return CELL_OK;
         }
     }
@@ -76,7 +77,7 @@ s32 cellDmuxOpen(const CellDmuxType* type, const CellDmuxResource* res,
 
 s32 cellDmuxClose(CellDmuxHandle handle)
 {
-    printf("[cellDmux] Close(handle=%u)\n", handle);
+    ps3_print("[cellDmux] Close(handle=%u)\n", handle);
 
     if (handle >= CELL_DMUX_MAX_HANDLES || !s_dmux[handle].in_use)
         return (s32)CELL_DMUX_ERROR_ARG;
@@ -102,7 +103,7 @@ s32 cellDmuxEnableEs(CellDmuxHandle handle, const CellDmuxEsFilterId* esFilterId
 {
     (void)esRes;
 
-    printf("[cellDmux] EnableEs(dmux=%u, major=%u, minor=%u)\n",
+    ps3_print("[cellDmux] EnableEs(dmux=%u, major=%u, minor=%u)\n",
            handle,
            esFilterId ? vm_read32(GUEST_EA(esFilterId)
                         + (u32)offsetof(CellDmuxEsFilterId, filterIdMajor)) : 0,
@@ -133,7 +134,7 @@ s32 cellDmuxEnableEs(CellDmuxHandle handle, const CellDmuxEsFilterId* esFilterId
 
 s32 cellDmuxDisableEs(CellDmuxEsHandle esHandle)
 {
-    printf("[cellDmux] DisableEs(es=%u)\n", esHandle);
+    ps3_print("[cellDmux] DisableEs(es=%u)\n", esHandle);
 
     if (esHandle >= CELL_DMUX_MAX_ES || !s_es[esHandle].in_use)
         return (s32)CELL_DMUX_ERROR_ARG;
@@ -149,7 +150,7 @@ s32 cellDmuxDisableEs(CellDmuxEsHandle esHandle)
 s32 cellDmuxSetStream(CellDmuxHandle handle, u32 streamAddr, u32 streamSize,
                        b8 discontinuity, u64 userData)
 {
-    printf("[cellDmux] SetStream(handle=%u, addr=0x%X, size=%u, discont=%d)\n",
+    ps3_print("[cellDmux] SetStream(handle=%u, addr=0x%X, size=%u, discont=%d)\n",
            handle, streamAddr, streamSize, discontinuity);
 
     if (handle >= CELL_DMUX_MAX_HANDLES || !s_dmux[handle].in_use)
@@ -194,7 +195,7 @@ s32 cellDmuxSetStream(CellDmuxHandle handle, u32 streamAddr, u32 streamSize,
         es->currentAu.reserved = 0;
         es->hasAu = 1;
 
-        printf("[cellDmux] ES %d: AU_FOUND (addr=0x%X, size=%u, pts=%llu)\n",
+        ps3_log("[cellDmux] ES %d: AU_FOUND (addr=0x%X, size=%u, pts=%llu)\n",
                i, streamAddr, streamSize, (unsigned long long)es->currentAu.pts);
 
         /* Fire AU_FOUND callback */
@@ -216,7 +217,7 @@ s32 cellDmuxSetStream(CellDmuxHandle handle, u32 streamAddr, u32 streamSize,
 
 s32 cellDmuxResetStream(CellDmuxHandle handle)
 {
-    printf("[cellDmux] ResetStream(handle=%u)\n", handle);
+    ps3_print("[cellDmux] ResetStream(handle=%u)\n", handle);
 
     if (handle >= CELL_DMUX_MAX_HANDLES || !s_dmux[handle].in_use)
         return (s32)CELL_DMUX_ERROR_ARG;
@@ -274,7 +275,7 @@ s32 cellDmuxReleaseAu(CellDmuxEsHandle esHandle)
 
 s32 cellDmuxFlushEs(CellDmuxEsHandle esHandle)
 {
-    printf("[cellDmux] FlushEs(es=%u)\n", esHandle);
+    ps3_print("[cellDmux] FlushEs(es=%u)\n", esHandle);
 
     if (esHandle >= CELL_DMUX_MAX_ES || !s_es[esHandle].in_use)
         return (s32)CELL_DMUX_ERROR_ARG;

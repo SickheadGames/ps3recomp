@@ -3,6 +3,8 @@
  */
 
 #include "sys_memory.h"
+#include "ps3emu/logging.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -64,7 +66,7 @@ int64_t sys_memory_allocate(ppu_context* ctx)
     uint32_t flags     = LV2_ARG_U32(ctx, 1);
     uint32_t addr_out  = LV2_ARG_PTR(ctx, 2);
 
-    fprintf(stderr, "[sys_memory] allocate(size=0x%X, flags=0x%X)\n",
+    ps3_log("[sys_memory] allocate(size=0x%X, flags=0x%X)\n",
             size, flags);
 
     /* Determine alignment based on page size flags */
@@ -125,7 +127,7 @@ int64_t sys_memory_allocate(ppu_context* ctx)
         return (int64_t)(int32_t)CELL_ENOMEM;
     }
 
-    fprintf(stderr, "[sys_memory] allocate -> 0x%08X\n", alloc_addr);
+    ps3_log("[sys_memory] allocate -> 0x%08X\n", alloc_addr);
 
     if (addr_out != 0) {
         write_be32(addr_out, alloc_addr);
@@ -163,7 +165,7 @@ int64_t sys_memory_get_user_memory_size(ppu_context* ctx)
 {
     uint32_t out_addr = LV2_ARG_PTR(ctx, 0);
 
-    fprintf(stderr, "[sys_memory] get_user_memory_size()\n");
+    ps3_log("[sys_memory] get_user_memory_size()\n");
     if (out_addr != 0) {
         uint32_t total = SYS_MEM_USER_TOTAL;
         uint32_t avail = total - s_total_allocated;
@@ -438,7 +440,7 @@ int64_t sys_mmapper_allocate_memory(ppu_context* ctx)
         write_be32(addr_out, addr);
 
     { static int n = 0; if (n++ < 4)
-        fprintf(stderr, "[sys_memory] mmapper_allocate_memory size=0x%X -> 0x%08X\n",
+        ps3_log("[sys_memory] mmapper_allocate_memory size=0x%X -> 0x%08X\n",
                 size, addr); }
 
     return CELL_OK;

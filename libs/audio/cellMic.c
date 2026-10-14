@@ -17,7 +17,7 @@ static int s_initialized = 0;
 
 s32 cellMicInit(void)
 {
-    printf("[cellMic] Init()\n");
+    ps3_log("[cellMic] Init()\n");
     if (s_initialized)
         return (s32)CELL_MIC_ERROR_ALREADY_INITIALIZED;
     s_initialized = 1;
@@ -26,7 +26,7 @@ s32 cellMicInit(void)
 
 s32 cellMicEnd(void)
 {
-    printf("[cellMic] End()\n");
+    ps3_log("[cellMic] End()\n");
     s_initialized = 0;
     return CELL_OK;
 }
@@ -34,7 +34,7 @@ s32 cellMicEnd(void)
 s32 cellMicOpen(s32 devNum, u32 sampleRate)
 {
     (void)devNum; (void)sampleRate;
-    printf("[cellMic] Open(%d) - no device\n", devNum);
+    ps3_log("[cellMic] Open(%d) - no device\n", devNum);
     return (s32)CELL_MIC_ERROR_DEVICE_NOT_FOUND;
 }
 

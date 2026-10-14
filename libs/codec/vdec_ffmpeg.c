@@ -103,7 +103,7 @@ VdecFf* vdec_ff_open(u32 codec_type)
     if (!ff) return NULL;
     const AVCodec* codec = ff->avcodec_find_decoder(id);
     if (!codec) {
-        printf("[cellVdec] libavcodec has no decoder for codecType %u\n", codec_type);
+        ps3_log("[cellVdec] libavcodec has no decoder for codecType %u\n", codec_type);
         return NULL;
     }
     VdecFf* d = (VdecFf*)calloc(1, sizeof(*d));
@@ -118,7 +118,7 @@ VdecFf* vdec_ff_open(u32 codec_type)
         d->ctx->thread_count = 1;
     }
     if (!d->ctx || !d->pkt || !d->frame || ff->avcodec_open2(d->ctx, codec, NULL) < 0) {
-        printf("[cellVdec] could not open the libavcodec decoder\n");
+        ps3_log("[cellVdec] could not open the libavcodec decoder\n");
         vdec_ff_close(d);
         return NULL;
     }
@@ -145,7 +145,7 @@ static int vdec_ff_receive(VdecFf* d, vdec_ff_emit_fn emit, void* cb_ctx)
             return r;                                  /* EAGAIN / EOF / error */
         if (f->format != AV_PIX_FMT_YUV420P && f->format != AV_PIX_FMT_YUVJ420P) {
             /* The PS3 decoders are 8-bit 4:2:0 only. */
-            printf("[cellVdec] skipping a picture in pixel format %d\n", f->format);
+            ps3_log("[cellVdec] skipping a picture in pixel format %d\n", f->format);
             d->ff->av_frame_unref(f);
             continue;
         }
@@ -199,7 +199,7 @@ int vdec_ff_decode(VdecFf* d, const u8* au, u32 size, u32 token,
     pkt->data = NULL;
     pkt->size = 0;
     if (r < 0) {
-        printf("[cellVdec] AU %u did not decode (%d)\n", token, r);
+        ps3_log("[cellVdec] AU %u did not decode (%d)\n", token, r);
         vdec_ff_receive(d, emit, cb_ctx);
         return r;
     }

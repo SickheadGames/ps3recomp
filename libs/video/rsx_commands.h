@@ -54,6 +54,9 @@ extern "C" {
  * engine cannot match a texture unit against, since it keys surfaces by
  * (location, offset). */
 #define NV4097_SET_CONTEXT_DMA_COLOR_B         0x0000018C
+#define NV4097_SET_CONTEXT_DMA_COLOR_C         0x000001B4
+#define NV4097_SET_CONTEXT_DMA_COLOR_D         0x000001B8
+
 /* ...and the same question for the depth buffer, which a texture unit coming
  * back to sample it has to agree with. */
 #define NV4097_SET_CONTEXT_DMA_ZETA            0x00000198
@@ -93,6 +96,9 @@ extern "C" {
 /* Scissor */
 #define NV4097_SET_SCISSOR_HORIZONTAL          0x000008C0
 #define NV4097_SET_SCISSOR_VERTICAL            0x000008C4
+
+/* Window */
+#define NV4097_SET_WINDOW_OFFSET               0x000002B8
 
 /* Clear */
 #define NV4097_SET_COLOR_CLEAR_VALUE           0x00001D90
@@ -258,6 +264,9 @@ typedef struct rsx_state {
 
     /* Scissor */
     u32 scissor_x, scissor_y, scissor_w, scissor_h;
+
+    /* Window */
+    u32 window_offset_x, window_offset_y;
 
     /* Clear */
     u32 color_clear_value;

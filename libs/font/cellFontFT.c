@@ -72,7 +72,7 @@ static FTFontSlot s_fonts[MAX_FT_FONTS];
 
 s32 cellFontFTInit(const CellFontFTConfig* config, CellFontFTLibrary* lib)
 {
-    printf("[cellFontFT] Init()\n");
+    ps3_log("[cellFontFT] Init()\n");
     (void)config;
 
     if (s_initialized)
@@ -87,7 +87,7 @@ s32 cellFontFTInit(const CellFontFTConfig* config, CellFontFTLibrary* lib)
 
 s32 cellFontFTEnd(CellFontFTLibrary lib)
 {
-    printf("[cellFontFT] End()\n");
+    ps3_log("[cellFontFT] End()\n");
     (void)lib;
 
     memset(s_fonts, 0, sizeof(s_fonts));
@@ -110,7 +110,7 @@ s32 cellFontFTOpenFontFile(CellFontFTLibrary lib, const char* path,
 {
     (void)lib; (void)index;
     path = GUEST_PTR(path, const char*);
-    printf("[cellFontFT] OpenFontFile(%s)\n", path ? path : "(null)");
+    ps3_log("[cellFontFT] OpenFontFile(%s)\n", path ? path : "(null)");
 
     if (!s_initialized) return (s32)CELL_FONTFT_ERROR_NOT_INITIALIZED;
     if (!path || !font) return (s32)CELL_FONTFT_ERROR_INVALID_ARGUMENT;
@@ -133,7 +133,7 @@ s32 cellFontFTOpenFontMemory(CellFontFTLibrary lib, const void* data,
                              u32 dataSize, u32 index, CellFontFT* font)
 {
     (void)lib; (void)data; (void)dataSize; (void)index;
-    printf("[cellFontFT] OpenFontMemory(size=%u)\n", dataSize);
+    ps3_log("[cellFontFT] OpenFontMemory(size=%u)\n", dataSize);
 
     if (!s_initialized) return (s32)CELL_FONTFT_ERROR_NOT_INITIALIZED;
     if (!data || !font) return (s32)CELL_FONTFT_ERROR_INVALID_ARGUMENT;

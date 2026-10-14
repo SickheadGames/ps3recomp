@@ -76,7 +76,7 @@ static void get_resolution_wh(u32 resId, u16* w, u16* h)
 
 s32 cellVideoOutGetState(u32 videoOut, u32 deviceIndex, CellVideoOutState* state)
 {
-    printf("[cellVideoOut] GetState(videoOut=%u, deviceIndex=%u)\n",
+    ps3_log("[cellVideoOut] GetState(videoOut=%u, deviceIndex=%u)\n",
            videoOut, deviceIndex);
 
     if (!state)
@@ -122,7 +122,7 @@ s32 cellVideoOutGetResolution(u32 resolutionId, CellVideoOutResolution* resoluti
     resolution->width  = ps3_bswap16(w);
     resolution->height = ps3_bswap16(h);
 
-    printf("[cellVideoOut] GetResolution(id=%u) -> %ux%u\n", resolutionId, w, h);
+    ps3_log("[cellVideoOut] GetResolution(id=%u) -> %ux%u\n", resolutionId, w, h);
 
     return CELL_OK;
 }
@@ -130,7 +130,7 @@ s32 cellVideoOutGetResolution(u32 resolutionId, CellVideoOutResolution* resoluti
 s32 cellVideoOutConfigure(u32 videoOut, CellVideoOutConfiguration* config,
                             void* option, u32 waitForEvent)
 {
-    printf("[cellVideoOut] Configure(videoOut=%u)\n", videoOut);
+    ps3_log("[cellVideoOut] Configure(videoOut=%u)\n", videoOut);
 
     if (!config)
         return CELL_VIDEO_OUT_ERROR_ILLEGAL_PARAMETER;
@@ -152,7 +152,7 @@ s32 cellVideoOutConfigure(u32 videoOut, CellVideoOutConfiguration* config,
         s_pitch = (u32)w * 4;
     }
 
-    printf("[cellVideoOut] Configure: resId=%u, format=%u, aspect=%u, pitch=%u\n",
+    ps3_log("[cellVideoOut] Configure: resId=%u, format=%u, aspect=%u, pitch=%u\n",
            s_resolution_id, s_color_format, s_aspect, s_pitch);
 
     return CELL_OK;
@@ -161,7 +161,7 @@ s32 cellVideoOutConfigure(u32 videoOut, CellVideoOutConfiguration* config,
 s32 cellVideoOutGetConfiguration(u32 videoOut, CellVideoOutConfiguration* config,
                                    void* option)
 {
-    printf("[cellVideoOut] GetConfiguration(videoOut=%u)\n", videoOut);
+    ps3_log("[cellVideoOut] GetConfiguration(videoOut=%u)\n", videoOut);
 
     if (!config)
         return CELL_VIDEO_OUT_ERROR_ILLEGAL_PARAMETER;
@@ -182,7 +182,7 @@ s32 cellVideoOutGetConfiguration(u32 videoOut, CellVideoOutConfiguration* config
 s32 cellVideoOutGetDeviceInfo(u32 videoOut, u32 deviceIndex,
                                CellVideoOutDeviceInfo* info)
 {
-    printf("[cellVideoOut] GetDeviceInfo(videoOut=%u, deviceIndex=%u)\n",
+    ps3_log("[cellVideoOut] GetDeviceInfo(videoOut=%u, deviceIndex=%u)\n",
            videoOut, deviceIndex);
 
     if (!info)
@@ -234,7 +234,7 @@ s32 cellVideoOutGetDeviceInfo(u32 videoOut, u32 deviceIndex,
 
 s32 cellVideoOutGetNumberOfDevice(u32 videoOut)
 {
-    printf("[cellVideoOut] GetNumberOfDevice(videoOut=%u)\n", videoOut);
+    ps3_log("[cellVideoOut] GetNumberOfDevice(videoOut=%u)\n", videoOut);
 
     if (videoOut == CELL_VIDEO_OUT_PRIMARY)
         return 1;
@@ -249,7 +249,7 @@ s32 cellVideoOutGetResolutionAvailability(u32 videoOut, u32 resolutionId,
                                           u32 aspect, u32 option)
 {
     (void)aspect; (void)option;
-    printf("[cellVideoOut] GetResolutionAvailability(out=%u, res=%u) -> 1\n",
+    ps3_log("[cellVideoOut] GetResolutionAvailability(out=%u, res=%u) -> 1\n",
            videoOut, resolutionId);
     return (videoOut == CELL_VIDEO_OUT_PRIMARY) ? 1 : 0;
 }

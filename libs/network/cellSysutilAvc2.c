@@ -49,7 +49,7 @@ s32 cellSysutilAvc2LoadAsync(u16 ctxId, u32 container, u32 callback, u32 userdat
     (void)ctxId; (void)container; (void)initParam;
     s_cb = callback;
     s_userdata = userdata;
-    printf("[cellSysutilAvc2] LoadAsync: voice chat up, silent\n");
+    ps3_log("[cellSysutilAvc2] LoadAsync: voice chat up, silent\n");
     avc2_event(AVC2_EVENT_LOAD_SUCCEEDED);
     return CELL_OK;
 }

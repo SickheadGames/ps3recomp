@@ -1,4 +1,5 @@
 #include "ps3emu/yz_frontier_trace.h"
+#include "ps3emu/logging.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -210,11 +211,10 @@ int yz_frontier_trace_init(void)
     s_qpc_frequency = 1000000000ull;
     atomic_store_explicit(&s_enabled, 1, memory_order_release);
 #endif
-    fprintf(stderr,
+    ps3_log(
             "[frontier-ring] configured dormant capacity=%u bytes=%zu compact=%d parity=%d\n",
             YZ_FRONTIER_CAPACITY, sizeof(s_records), s_compact,
             s_parity_only);
-    fflush(stderr);
     /* PS3_FRONTIER_RING=2 (2026-08-06 handoff-ordering frontier): arm at init
      * instead of waiting for the semantic Job B selection. The ring is a
      * wrap-around recorder, so an early arm still retains the newest 64k
@@ -225,19 +225,18 @@ int yz_frontier_trace_init(void)
         s_rearm_after_dump = 1;
         if (*enabled == '2') {
             yz_frontier_trace_arm(0xFFFFFFFFu, 0, 0, 0, 0, 0);
-            fprintf(stderr, "[frontier-ring] armed at init "
+            ps3_log("[frontier-ring] armed at init "
                     "(PS3_FRONTIER_RING=2, numbered dumps, re-arm, cap %d, "
                     "stall dumps gated until frame %u, tsv=%d)\n",
                     YZ_FRONTIER_MAX_DUMPS, YZ_FRONTIER_PROGRESS_GATE,
                     s_tsv_enabled);
         } else {
             s_arm_on_progress = 1;
-            fprintf(stderr, "[frontier-ring] dormant until frame %u "
+            ps3_log("[frontier-ring] dormant until frame %u "
                     "(PS3_FRONTIER_RING=3; bootstrap emits disabled — the "
                     "armed-at-init ring correlated 5/5 with the early "
                     "freeze, boots 49-53)\n", YZ_FRONTIER_PROGRESS_GATE);
         }
-        fflush(stderr);
     }
     return 1;
 }
@@ -249,9 +248,8 @@ void yz_frontier_trace_progress(uint32_t frame)
     if (s_arm_on_progress && frame >= YZ_FRONTIER_PROGRESS_GATE &&
         !yz_frontier_trace_is_armed()) {
         yz_frontier_trace_arm(0xFFFFFFFFu, 0, 0, 0, 0, 0);
-        fprintf(stderr, "[frontier-ring] armed at frame %u "
+        ps3_log("[frontier-ring] armed at frame %u "
                 "(mode 3 progress arm)\n", frame);
-        fflush(stderr);
     }
 }
 
@@ -421,11 +419,10 @@ int yz_frontier_trace_dump(uint32_t reason)
         fclose(text_file);
     }
 
-    fprintf(stderr,
+    ps3_log(
             "[frontier-ring] dumped n=%ld reason=%u records=%" PRIu64
             " retained=%" PRIu64 " binary=%s text=%s\n",
             dump_n, reason, end, end - begin, binary_path, text_path);
-    fflush(stderr);
     /* Mode '2': keep recording — the terminal stall must get its dump even
      * when an early-boot quiet phase spent this one. */
     if (s_rearm_after_dump && dump_n < YZ_FRONTIER_MAX_DUMPS) {

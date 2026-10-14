@@ -309,7 +309,7 @@ static int spu_step(spu_context* ctx) {
                    ctx->pc = pc; ctx->stop_code = 0x1000; ctx->status = SPU_STATUS_STOPPED_BY_HALT; return 1; }
         break; }
     default:
-        fprintf(stderr, "[spu_interp] unimplemented op '%s' (0x%08X) at LS 0x%05X\n",
+        ps3_log("[spu_interp] unimplemented op '%s' (0x%08X) at LS 0x%05X\n",
                 d.op < SPU_OP_COUNT ? spu_op_name[d.op] : "?", insn, pc);
         ctx->pc = pc; ctx->status = SPU_STATUS_STOPPED_BY_HALT; return 1;
     }
@@ -331,11 +331,11 @@ void spu_trace_call(uint32_t from, uint32_t to) {
 }
 void spu_trace_dump(uint32_t at) {
     if (!getenv("SPU_CALLTRACE")) return;
-    fprintf(stderr, "[SPU-TRACE] halt at LS 0x%05X; last %d calls (from->to):\n", at, SPU_TRACE_N);
+    ps3_log("[SPU-TRACE] halt at LS 0x%05X; last %d calls (from->to):\n", at, SPU_TRACE_N);
     unsigned n = s_trace_i < SPU_TRACE_N ? s_trace_i : SPU_TRACE_N;
     for (unsigned k = 0; k < n; k++) {
         unsigned idx = (s_trace_i - n + k) % SPU_TRACE_N;
-        fprintf(stderr, "   0x%05X -> 0x%05X\n", s_trace[idx].from, s_trace[idx].to);
+        ps3_log("   0x%05X -> 0x%05X\n", s_trace[idx].from, s_trace[idx].to);
     }
 }
 
@@ -388,7 +388,7 @@ uint32_t spu_interp_run_until(spu_context* ctx, uint32_t start_lsa, uint32_t sto
             else if (_g1in) {
                 _g1in = 0;
                 #define GLB(o) (((uint32_t)ctx->ls[(o)]<<24)|((uint32_t)ctx->ls[(o)+1]<<16)|((uint32_t)ctx->ls[(o)+2]<<8)|ctx->ls[(o)+3])
-                fprintf(stderr,"[gate1] func_00026E80 ret r3=%08X | LS2FB0=%08X LS2FB4=%08X LS2FB8=%08X | LS1E0=%08X LS1E4=%08X LS1E8=%08X | r1=%05X r29=%08X r32=%08X r16=%08X r22=%08X r8=%08X r6=%08X\n",
+                ps3_log("[gate1] func_00026E80 ret r3=%08X | LS2FB0=%08X LS2FB4=%08X LS2FB8=%08X | LS1E0=%08X LS1E4=%08X LS1E8=%08X | r1=%05X r29=%08X r32=%08X r16=%08X r22=%08X r8=%08X r6=%08X\n",
                     ctx->gpr[3]._u32[0], GLB(0x2FB0),GLB(0x2FB4),GLB(0x2FB8), GLB(0x1E0),GLB(0x1E4),GLB(0x1E8),
                     ctx->gpr[1]._u32[0], ctx->gpr[29]._u32[0], ctx->gpr[32]._u32[0],
                     ctx->gpr[16]._u32[0], ctx->gpr[22]._u32[0], ctx->gpr[8]._u32[0], ctx->gpr[6]._u32[0]);
@@ -401,14 +401,14 @@ uint32_t spu_interp_run_until(spu_context* ctx, uint32_t start_lsa, uint32_t sto
         /* SPU_STEPCAP=N: a task that never halts (infinite work/wait loop) never
          * dumps its ring. Force a one-shot dump after N steps to see where it loops. */
         if (_tr>0 && _cap && steps == _cap) {
-            fprintf(stderr,"[spu-trace] STEPCAP pc=0x%05X after %llu steps; last %d PCs:",
+            ps3_log("[spu-trace] STEPCAP pc=0x%05X after %llu steps; last %d PCs:",
                     ctx->pc, (unsigned long long)steps, rn);
-            for(int k=rn;k>0;k--) fprintf(stderr," %05X", ring[(rc-k)&63]);
-            fprintf(stderr,"\n");
+            for(int k=rn;k>0;k--) ps3_log(" %05X", ring[(rc-k)&63]);
+            ps3_log("\n");
             /* dump the LS 0x2700 SpursTasksetContext the poll reads -- compare to the
              * working RPCS3 SPU0 dump (RUNNING/READY/ENABLED=0x80000000, SIGNALLED=0). */
             #define LB(o) (((uint32_t)ctx->ls[(o)]<<24)|((uint32_t)ctx->ls[(o)+1]<<16)|((uint32_t)ctx->ls[(o)+2]<<8)|ctx->ls[(o)+3])
-            fprintf(stderr,"[spu-trace] LS ctx: RUN=%08X READY=%08X PEND=%08X ENA=%08X SIG=%08X WAIT=%08X | 2790=%08X 2794=%08X 27D8=%08X 2FB0=%08X\n",
+            ps3_log("[spu-trace] LS ctx: RUN=%08X READY=%08X PEND=%08X ENA=%08X SIG=%08X WAIT=%08X | 2790=%08X 2794=%08X 27D8=%08X 2FB0=%08X\n",
                 LB(0x2700),LB(0x2710),LB(0x2720),LB(0x2730),LB(0x2740),LB(0x2750),LB(0x2790),LB(0x2794),LB(0x27D8),LB(0x2FB0));
             #undef LB
             fflush(stderr); _tr--; g_spu_interp_steps=steps; return 0x2000u;
@@ -434,10 +434,10 @@ uint32_t spu_interp_run_until(spu_context* ctx, uint32_t start_lsa, uint32_t sto
                 continue;
             }
             g_spu_interp_steps = steps;
-            if (_tr>0) { fprintf(stderr,"[spu-trace] halt stop=0x%X pc=0x%05X after %llu steps; last %d PCs:",
+            if (_tr>0) { ps3_log("[spu-trace] halt stop=0x%X pc=0x%05X after %llu steps; last %d PCs:",
                     ctx->stop_code, ctx->pc, (unsigned long long)steps, rn);
-                for(int k=rn;k>0;k--) fprintf(stderr," %05X", ring[(rc-k)&63]);
-                fprintf(stderr,"\n"); fflush(stderr); _tr--; }
+                for(int k=rn;k>0;k--) ps3_log(" %05X", ring[(rc-k)&63]);
+                ps3_log("\n"); fflush(stderr); _tr--; }
             return ctx->stop_code; }
     }
 }

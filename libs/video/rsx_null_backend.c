@@ -110,14 +110,14 @@ static LRESULT CALLBACK null_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 static int null_init(void* ud, u32 width, u32 height)
 {
     (void)ud;
-    printf("[RSX null] init(%ux%u)\n", width, height);
+    ps3_log("[RSX null] init(%ux%u)\n", width, height);
     return 0;
 }
 
 static void null_shutdown(void* ud)
 {
     (void)ud;
-    printf("[RSX null] shutdown\n");
+    ps3_log("[RSX null] shutdown\n");
 }
 
 static void null_begin_frame(void* ud)
@@ -170,14 +170,14 @@ static void null_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
 static void null_set_render_target(void* ud, const rsx_state* state)
 {
     (void)ud;
-    if (ps3_log_verbose()) printf("[RSX null] set_render_target(format=0x%X, %ux%u)\n",
+    if (ps3_log_verbose()) ps3_log("[RSX null] set_render_target(format=0x%X, %ux%u)\n",
            state->surface_format, state->surface_clip_w, state->surface_clip_h);
 }
 
 static void null_set_viewport(void* ud, const rsx_state* state)
 {
     (void)ud;
-    if (ps3_log_verbose()) printf("[RSX null] set_viewport(%u,%u %ux%u)\n",
+    if (ps3_log_verbose()) ps3_log("[RSX null] set_viewport(%u,%u %ux%u)\n",
            state->viewport_x, state->viewport_y,
            state->viewport_w, state->viewport_h);
 }
@@ -187,7 +187,7 @@ static void null_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
     (void)ud;
     static int s_draw_log_count = 0;
     if (s_draw_log_count < 20) {
-        printf("[RSX null] draw_arrays(prim=%u, first=%u, count=%u)\n",
+        ps3_log("[RSX null] draw_arrays(prim=%u, first=%u, count=%u)\n",
                primitive, first, count);
         s_draw_log_count++;
     }
@@ -198,7 +198,7 @@ static void null_draw_indexed(void* ud, u32 primitive, u32 offset, u32 count)
     (void)ud;
     static int s_draw_log_count = 0;
     if (s_draw_log_count < 20) {
-        printf("[RSX null] draw_indexed(prim=%u, offset=%u, count=%u)\n",
+        ps3_log("[RSX null] draw_indexed(prim=%u, offset=%u, count=%u)\n",
                primitive, offset, count);
         s_draw_log_count++;
     }
@@ -260,7 +260,7 @@ int rsx_null_backend_init(u32 width, u32 height, const char* title)
         NULL, NULL, GetModuleHandle(NULL), NULL);
 
     if (!s_state.hwnd) {
-        printf("[RSX null] ERROR: CreateWindow failed (%lu)\n", GetLastError());
+        ps3_log("[RSX null] ERROR: CreateWindow failed (%lu)\n", GetLastError());
         return -1;
     }
 
@@ -278,7 +278,7 @@ int rsx_null_backend_init(u32 width, u32 height, const char* title)
     /* Register as the active RSX backend */
     rsx_set_backend(&s_null_backend);
 
-    printf("[RSX null] Window created: %ux%u\n", width, height);
+    ps3_log("[RSX null] Window created: %ux%u\n", width, height);
     return 0;
 }
 
@@ -290,7 +290,7 @@ void rsx_null_backend_shutdown(void)
         s_state.hwnd = NULL;
     }
     rsx_set_backend(NULL);
-    printf("[RSX null] Backend shut down after %llu frames\n",
+    ps3_log("[RSX null] Backend shut down after %llu frames\n",
            (unsigned long long)s_state.frame_count);
 }
 
@@ -700,7 +700,7 @@ int rsx_null_backend_init(u32 width, u32 height, const char* title)
     if (!s_soft.depth) { free(s_soft.fb); s_soft.fb = NULL; return -1; }
     for (u32 i = 0; i < s_soft.width * s_soft.height; i++) s_soft.depth[i] = 1.0f;
     rsx_set_backend(&s_nullsw_backend);
-    printf("[RSX null] headless software backend %ux%u (%s)\n",
+    ps3_log("[RSX null] headless software backend %ux%u (%s)\n",
            s_soft.width, s_soft.height, title ? title : "");
     return 0;
 }

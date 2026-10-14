@@ -35,7 +35,7 @@ static int divx_alloc(void)
 
 s32 cellVdecDivxOpen(const CellVdecDivxConfig* config, CellVdecDivxHandle* handle)
 {
-    printf("[cellVdecDivx] Open()\n");
+    ps3_log("[cellVdecDivx] Open()\n");
     if (!handle) return (s32)CELL_VDEC_DIVX_ERROR_INVALID_ARGUMENT;
 
     int slot = divx_alloc();
@@ -53,7 +53,7 @@ s32 cellVdecDivxOpen(const CellVdecDivxConfig* config, CellVdecDivxHandle* handl
 
 s32 cellVdecDivxClose(CellVdecDivxHandle handle)
 {
-    printf("[cellVdecDivx] Close(%u)\n", handle);
+    ps3_log("[cellVdecDivx] Close(%u)\n", handle);
     if (handle >= DIVX_MAX_HANDLES || !s_slots[handle].in_use)
         return (s32)CELL_VDEC_DIVX_ERROR_INVALID_ARGUMENT;
 

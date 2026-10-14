@@ -47,7 +47,7 @@ static ResolverSlot s_resolvers[MAX_RESOLVERS];
 
 s32 cellNetInitialize(void)
 {
-    printf("[cellNet] Initialize()\n");
+    ps3_log("[cellNet] Initialize()\n");
 
     if (s_net_initialized)
         return (s32)CELL_NET_ERROR_ALREADY_INITIALIZED;
@@ -62,7 +62,7 @@ s32 cellNetInitialize(void)
 
 s32 cellNetFinalize(void)
 {
-    printf("[cellNet] Finalize()\n");
+    ps3_log("[cellNet] Finalize()\n");
 
     if (!s_net_initialized)
         return (s32)CELL_NET_ERROR_NOT_INITIALIZED;
@@ -77,7 +77,7 @@ s32 cellNetFinalize(void)
 
 s32 cellNetResolverCreate(u32* resolver_id)
 {
-    printf("[cellNet] ResolverCreate()\n");
+    ps3_log("[cellNet] ResolverCreate()\n");
 
     if (!resolver_id)
         return (s32)CELL_NET_ERROR_INVALID_ARG;
@@ -96,7 +96,7 @@ s32 cellNetResolverCreate(u32* resolver_id)
 
 s32 cellNetResolverDestroy(u32 resolver_id)
 {
-    printf("[cellNet] ResolverDestroy(id=%u)\n", resolver_id);
+    ps3_log("[cellNet] ResolverDestroy(id=%u)\n", resolver_id);
 
     if (resolver_id >= MAX_RESOLVERS || !s_resolvers[resolver_id].in_use)
         return (s32)CELL_NET_ERROR_INVALID_ARG;
@@ -110,7 +110,7 @@ s32 cellNetResolverStartAsynDNS(u32 resolver_id, const char* hostname,
 {
     (void)timeout;
 
-    printf("[cellNet] ResolverStartAsynDNS(id=%u, host=%s)\n",
+    ps3_log("[cellNet] ResolverStartAsynDNS(id=%u, host=%s)\n",
            resolver_id, hostname ? hostname : "(null)");
 
     if (resolver_id >= MAX_RESOLVERS || !s_resolvers[resolver_id].in_use)
@@ -134,11 +134,11 @@ s32 cellNetResolverStartAsynDNS(u32 resolver_id, const char* hostname,
         s_resolvers[resolver_id].done = 1;
         freeaddrinfo(result);
 
-        printf("[cellNet] Resolved %s -> 0x%08X\n", hostname, resolved);
+        ps3_log("[cellNet] Resolved %s -> 0x%08X\n", hostname, resolved);
         return CELL_OK;
     }
 
-    printf("[cellNet] DNS lookup failed for %s\n", hostname);
+    ps3_log("[cellNet] DNS lookup failed for %s\n", hostname);
     s_resolvers[resolver_id].done = 1;
     return (s32)CELL_NET_ERROR_INVALID_ARG;
 }

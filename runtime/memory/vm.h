@@ -253,6 +253,14 @@ static inline int32_t vm_init(void)
         return CELL_ENOMEM;
     }
 
+    if (((uintptr_t)vm_base & 0xFFFu) != 0) {
+        ps3_log("[vm] FATAL: vm_base %p is not page aligned -- every guard page "
+            "and vm_protect range is off by 0x%zX\n",
+            vm_base, (size_t)((uintptr_t)vm_base & 0xFFFu));
+        vm_shutdown();
+        return CELL_ENOMEM;
+    }
+
     /* Zero main memory */
     memset(vm_base + VM_MAIN_MEM_BASE, 0, VM_MAIN_MEM_SIZE);
 

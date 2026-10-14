@@ -8,6 +8,8 @@
  * lifted module must exclude this TU (see root CMakeLists EXCLUDE regex).
  * (Plain definition, not __attribute__((weak)): the runtime lib builds under
  * MSVC, which has no GNU weak attribute.) */
+#include "ps3emu/logging.h"
+
 #include <stdio.h>
 
 struct spu_context;
@@ -15,7 +17,7 @@ struct spu_context;
 void tsp_spu_func_00000A00(struct spu_context* ctx)
 {
     (void)ctx;
-    fprintf(stderr, "[spu] tsp_spu_func_00000A00 stub called -- this port "
+    ps3_log("[spu] tsp_spu_func_00000A00 stub called -- this port "
                     "was built without the ydkj lifted taskset policy module\n");
     fflush(stderr);
 }

@@ -11,6 +11,8 @@
 #define SPU_CONTEXT_H
 
 #include "../../include/ps3emu/ps3types.h"
+#include "../../include/ps3emu/portable_builtins.h"
+#include "ps3emu/logging.h"
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
@@ -47,7 +49,7 @@ void spu_ls_watch_slow(uint32_t lsa, int is_write, const uint8_t* p, uint32_t pc
 unsigned* spu_ls_watch_list(int* out_n);   /* the armed lines (n may be 0) */
 static inline void spu_ls_watch_hit2(uint32_t lsa, int is_write, const uint8_t* p,
                                      uint32_t pc, uint32_t lr) {
-    if (__builtin_expect(g_spu_ls_watch_n == 0, 1)) return;
+    if (PORT_LIKELY(g_spu_ls_watch_n == 0)) return;
     spu_ls_watch_slow(lsa, is_write, p, pc, lr);
 }
 static inline void spu_ls_watch_hit(uint32_t lsa, int is_write, const uint8_t* p) {
@@ -492,7 +494,7 @@ SPU_GATE int g_spu_ls_probe   = -1;  /* spu_ls_read_probe (SPU_LS_LOWREAD)      
 SPU_GATE int g_spu_smc_watch  = -1;  /* spu_ls_write_probe_smc (SPU_SMC_WATCH)  */
 SPU_GATE int g_wws_code_probe = 0;   /* WWS code-buffer resolution, capped      */
 SPU_GATE int g_wws_read_probe = 0;
-static __attribute__((noinline, cold)) void spu_ls_read_probe(const spu_context* ctx, uint32_t lsa)
+static /*__attribute__((noinline, cold))*/ void spu_ls_read_probe(const spu_context* ctx, uint32_t lsa)
 {
     if (g_spu_ls_probe < 0) g_spu_ls_probe = getenv("SPU_LS_LOWREAD") ? 1 : 0;
     /* SPU_LS_LOWREAD=1: a job that reads its OWN first bytes as data is
@@ -507,7 +509,7 @@ static __attribute__((noinline, cold)) void spu_ls_read_probe(const spu_context*
           for (int i = 0; i < n; i++) if (seen[i] == key) { known = 1; break; }
           if (!known && n < 24) {
               seen[n++] = key;
-              fprintf(stderr, "[spu-lowread] img=%d read LS 0x%03X at pc=0x%05X "
+              ps3_log("[spu-lowread] img=%d read LS 0x%03X at pc=0x%05X "
                       "ctx=%p r1=0x%05X r2=0x%08X r3=0x%08X r4=0x%08X\n",
                       ctx->image_id, lsa, (uint32_t)ctx->pc & SPU_LS_MASK,
                       (const void*)ctx,                      ctx->gpr[1]._u32[0], ctx->gpr[2]._u32[0],
@@ -524,7 +526,7 @@ static __attribute__((noinline, cold)) void spu_ls_read_probe(const spu_context*
         if (g_wws_read_probe < 48) {
             g_wws_read_probe++;
             uint32_t off = lsa - 0xDF0;
-            fprintf(stderr, "[wws-res] bufferSetArray read jobNum=%u logBufSet=%u off=0x%X\n",
+            ps3_log("[wws-res] bufferSetArray read jobNum=%u logBufSet=%u off=0x%X\n",
                     off >> 6, (off >> 2) & 0xF, off);
         }
     }
@@ -533,7 +535,7 @@ static __attribute__((noinline, cold)) void spu_ls_read_probe(const spu_context*
 static inline u128 spu_ls_read128(const spu_context* ctx, uint32_t lsa)
 {
     u128 v;
-    if (__builtin_expect(g_spu_ls_probe != 0, 0) || (ctx->image_id == 2 && ctx->policy_mode))
+    if (PORT_UNLIKELY(g_spu_ls_probe != 0) || (ctx->image_id == 2 && ctx->policy_mode))
         spu_ls_read_probe(ctx, lsa);
     lsa &= SPU_LS_MASK & ~0xFu;
     const uint8_t* p = &ctx->ls[lsa];
@@ -556,7 +558,7 @@ static inline u128 spu_ls_read128(const spu_context* ctx, uint32_t lsa)
     return v;
 }
 
-static __attribute__((noinline, cold)) void spu_ls_write_probe_pre(spu_context* ctx, uint32_t lsa, u128 val)
+static /*__attribute__((noinline, cold))*/ void spu_ls_write_probe_pre(spu_context* ctx, uint32_t lsa, u128 val)
 {
     if (lsa == 0x1320 && ctx->image_id == 2 && ctx->policy_mode) {
         extern int g_wws_code_probe;   /* defined in spu_channels.c, capped */
@@ -569,25 +571,25 @@ static __attribute__((noinline, cold)) void spu_ls_write_probe_pre(spu_context* 
             /* GetLogicalBuffer keys the bufferSet on jobNum(=loadJobNum): row at
              * 0xDF0 + jobNum*64. Dump THAT row (and job0's) so we see which set
              * the code resolves from. codeLsa>>10 = the resolved page. */
-            fprintf(stderr, "[wws-code] codeLS=0x%05X (page 0x%X) loadJobNum=0x%X nextLoad=0x%X runJobNum=0x%X\n",
+            ps3_log("[wws-code] codeLS=0x%05X (page 0x%X) loadJobNum=0x%X nextLoad=0x%X runJobNum=0x%X\n",
                     codeLsa & 0x3FFFF, (codeLsa>>10)&0xFF, loadJob, nextLoad, runJob);
             uint32_t row = (loadJob <= 3) ? (0xDF0 + loadJob*64) : 0xDF0;
             const uint8_t* bs = &ctx->ls[row];
-            fprintf(stderr, "  bufferSetArray[job=0x%X @0x%X]:", loadJob, row);
+            ps3_log("  bufferSetArray[job=0x%X @0x%X]:", loadJob, row);
             for (int i = 0; i < 32; i += 4)
-                fprintf(stderr, " %02X%02X%02X%02X", bs[i],bs[i+1],bs[i+2],bs[i+3]);
+                ps3_log(" %02X%02X%02X%02X", bs[i],bs[i+1],bs[i+2],bs[i+3]);
             const uint8_t* lc = &ctx->ls[0xC00];
-            fprintf(stderr, "\n  loadCommands[0xC00]:");
+            ps3_log("\n  loadCommands[0xC00]:");
             for (int i = 0; i < 0x80; i += 4)
-                fprintf(stderr, " %02X%02X%02X%02X", lc[i],lc[i+1],lc[i+2],lc[i+3]);
-            fprintf(stderr, "\n");
+                ps3_log(" %02X%02X%02X%02X", lc[i],lc[i+1],lc[i+2],lc[i+3]);
+            ps3_log("\n");
             #undef _RD32
         }
     }
 }
 /* SPU_SMC_WATCH, out of line: g_spu_smc_watch is -1 until read, then 0/1. */
 extern int g_spu_smc_watch;
-static __attribute__((noinline, cold)) void spu_ls_write_probe_smc(spu_context* ctx, uint32_t lsa, const uint8_t* p)
+static /*__attribute__((noinline, cold))*/ void spu_ls_write_probe_smc(spu_context* ctx, uint32_t lsa, const uint8_t* p)
 {
     if (g_spu_smc_watch < 0) g_spu_smc_watch = getenv("SPU_SMC_WATCH") ? 1 : 0;
     /* SPU_SMC_WATCH=<img>: self-modification detector. Log any store whose
@@ -603,7 +605,7 @@ static __attribute__((noinline, cold)) void spu_ls_write_probe_smc(spu_context* 
       if (s >= 0 && (uint32_t)ctx->image_id == img && lsa >= lo && lsa < hi) {
           static int _n = 0;
           if (_n++ < 48)
-              fprintf(stderr, "[spu-SMC] img=%d WROTE CODE @0x%05X (pc=0x%05X) = %02X%02X%02X%02X\n",
+              ps3_log("[spu-SMC] img=%d WROTE CODE @0x%05X (pc=0x%05X) = %02X%02X%02X%02X\n",
                       ctx->image_id, lsa, (uint32_t)ctx->pc & SPU_LS_MASK,
                       p[0], p[1], p[2], p[3]);
       } }
@@ -637,7 +639,7 @@ static inline void spu_ls_write128(spu_context* ctx, uint32_t lsa, u128 val)
 #endif
     spu_ls_watch_hit2(lsa, 1, p, (uint32_t)ctx->pc & SPU_LS_MASK,
                       ctx->gpr[0]._u32[0] & SPU_LS_MASK);
-    if (__builtin_expect(g_spu_smc_watch != 0, 0))
+    if (PORT_UNLIKELY(g_spu_smc_watch != 0))
         spu_ls_write_probe_smc(ctx, lsa, p);
 }
 
@@ -831,15 +833,15 @@ static inline void spu_pchist_tick(const spu_context* ctx)
     if ((++n % 4000000ull) == 0) {
         static const char* nm[8] = { "other", "BlockClear", "H2L_Body",
             "Host2Local", "Local2Local", "main", "DrawRect", "DrawEdge" };
-        fprintf(stderr, "[pchist] %llu hops\n", n);
+        ps3_log("[pchist] %llu hops\n", n);
         for (unsigned q = 0; q < 8; q++) {
             int any = 0;
             for (int j = 0; j < 8; j++) if (b[q][j]) any = 1;
             if (!any) continue;
-            fprintf(stderr, "   spu%u", q);
+            ps3_log("   spu%u", q);
             for (int j = 0; j < 8; j++)
-                if (b[q][j]) fprintf(stderr, " %s=%llu", nm[j], b[q][j]);
-            fprintf(stderr, "\n");
+                if (b[q][j]) ps3_log(" %s=%llu", nm[j], b[q][j]);
+            ps3_log("\n");
         }
         fflush(stderr);
     }

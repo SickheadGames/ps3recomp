@@ -233,7 +233,7 @@ static void answer(const m2_op* op, s32 err, rb_t* img)
         size = img->len;
         key = store_event(img);
     }
-    printf("[sceNpMatching2] -> request %u event 0x%04X err 0x%08X, %u bytes%s\n",
+    ps3_log("[sceNpMatching2] -> request %u event 0x%04X err 0x%08X, %u bytes%s\n",
            op->req, op->event, (u32)err, size, op->cb ? "" : " (no callback)");
     queue_cb(op->cb, op->ctx, op->req, op->event, key, (u64)(u32)err, size, op->arg, 0);
 }
@@ -250,7 +250,7 @@ static m2_op* op_new(m2_ctx* c, u16 ctx, u16 event, u32 opt, u32 req_id_ea)
     op->req = s_next_req++;
     UNLOCK();
     if (req_id_ea) vm_write32(req_id_ea, op->req);
-    printf("[sceNpMatching2] request %u: event 0x%04X\n", op->req, event);
+    ps3_log("[sceNpMatching2] request %u: event 0x%04X\n", op->req, event);
     return op;
 }
 
@@ -500,14 +500,14 @@ static u32 rb_room_internal(rb_t* r, const m2_room* room)
 
 static void signal_member(m2_ctx* c, u16 member, u16 event)
 {
-    printf("[sceNpMatching2] -> signaling 0x%04X member %u\n", event, member);
+    ps3_log("[sceNpMatching2] -> signaling 0x%04X member %u\n", event, member);
     /* (ctxId, roomId, memberId, event, errorCode, arg) */
     queue_cb(c->sig_cb, ctx_id(c), c->room.id, member, event, 0, c->sig_arg, 0, 0);
 }
 
 static void room_event(m2_ctx* c, u16 event, rb_t* img)
 {
-    printf("[sceNpMatching2] -> room event 0x%04X\n", event);
+    ps3_log("[sceNpMatching2] -> room event 0x%04X\n", event);
     u32 size = img ? img->len : 0, key = img ? store_event(img) : 0;
     /* (ctxId, roomId, event, eventKey, errorCode, dataSize, arg) */
     queue_cb(c->room_cb, ctx_id(c), c->room.id, event, key, 0, size, c->room_arg, 0);
@@ -648,7 +648,7 @@ static void on_push(const psnr_msg* m)
         int owner;
         if (r->n >= MEMBER_MAX || !parse_member(&r->m[r->n], p, end, &owner)) return;
         m2_member* nm = &r->m[r->n++];
-        printf("[sceNpMatching2] room %llu: %s joined as member %u\n",
+        ps3_log("[sceNpMatching2] room %llu: %s joined as member %u\n",
                (unsigned long long)r->id, nm->online_id, nm->id);
         member_event(c, nm, ROOM_EV_MemberJoined, 0);
         establish_later(c, nm->id);
@@ -659,7 +659,7 @@ static void on_push(const psnr_msg* m)
         u16 gone = psnr_get16(p), owner = psnr_get16(p + 2);
         m2_member* gm = room_member(r, gone);
         if (!gm) return;
-        printf("[sceNpMatching2] room %llu: %s left\n", (unsigned long long)r->id, gm->online_id);
+        ps3_log("[sceNpMatching2] room %llu: %s left\n", (unsigned long long)r->id, gm->online_id);
         cancel_signal(ctx_id(c), gone);
         signal_member(c, gone, SIG_EV_Dead);
         member_event(c, gm, ROOM_EV_MemberLeft, CAUSE_LEAVE_ACTION);
@@ -738,7 +738,7 @@ static s32 m2_init(void)
     s_init = 1;
     np_psnr_on_push(on_push);
     np_psnr_on_tick(m2_tick);
-    printf("[sceNpMatching2] Init (%s)\n", np_psnr_enabled() ? "online via psnr" : "offline");
+    ps3_log("[sceNpMatching2] Init (%s)\n", np_psnr_enabled() ? "online via psnr" : "offline");
     return CELL_OK;
 }
 
@@ -781,7 +781,7 @@ s32 sceNpMatching2CreateContext(u32 npId, u32 commId, u32 passPhrase, u32 ctxIdO
         memcpy(data, vm_ptr8(commId), 9);
         snprintf(s_ctx[i].comm_id, sizeof(s_ctx[i].comm_id), "%s_%02u", data, vm_read8(commId + 10));
         vm_write16(ctxIdOut, i);
-        printf("[sceNpMatching2] CreateContext(%s) -> %u\n", s_ctx[i].comm_id, i);
+        ps3_log("[sceNpMatching2] CreateContext(%s) -> %u\n", s_ctx[i].comm_id, i);
         return CELL_OK;
     }
     return (s32)SCE_NP_MATCHING2_ERROR_OUT_OF_MEMORY;
@@ -1045,7 +1045,7 @@ static void on_search(void* user, const psnr_msg* m)
     rb_32(&img, o, op->start);
     rb_32(&img, o + 4, matched);
     rb_32(&img, o + 8, listed);
-    printf("[sceNpMatching2] SearchRoom: %u of %u rooms match, %u listed\n", matched, count, listed);
+    ps3_log("[sceNpMatching2] SearchRoom: %u of %u rooms match, %u listed\n", matched, count, listed);
     answer(op, 0, &img);
     free(op);
 }
@@ -1098,7 +1098,7 @@ static void on_joined(void* user, const psnr_msg* m)
         return;
     }
     m2_room* r = &c->room;
-    printf("[sceNpMatching2] %s room %llu as member %u (%d/%u)\n",
+    ps3_log("[sceNpMatching2] %s room %llu as member %u (%d/%u)\n",
            op->event == EV_CreateJoinRoom ? "created" : "joined",
            (unsigned long long)r->id, r->me, r->n, r->max);
     rb_t img = {0};
@@ -1344,7 +1344,7 @@ s32 sceNpMatching2SignalingGetConnectionStatus(u16 ctxId, u64 roomId, u16 member
     if (connStatus) vm_write32(connStatus, m ? SIG_CONN_ACTIVE : SIG_CONN_INACTIVE);
     if (peerAddr) memcpy(vm_ptr8(peerAddr), m ? m->ip : (const u8*)"\0\0\0\0", 4);
     if (peerPort) vm_write16(peerPort, m ? m->port : 0);
-    if (m) printf("[sceNpMatching2] signaling: member %u (%s) at %u.%u.%u.%u:%u\n", memberId,
+    if (m) ps3_log("[sceNpMatching2] signaling: member %u (%s) at %u.%u.%u.%u:%u\n", memberId,
                   m->online_id, m->ip[0], m->ip[1], m->ip[2], m->ip[3], m->port);
     return CELL_OK;
 }

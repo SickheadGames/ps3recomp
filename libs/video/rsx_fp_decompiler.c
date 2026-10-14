@@ -11,6 +11,7 @@
 
 #include <stdlib.h>
 #include "rsx_fp_decompiler.h"
+#include "ps3emu/logging.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -1144,9 +1145,9 @@ int rsx_fp_extract_consts(const u8* ucode, u32 max_bytes, float* out, int max_ou
     { static int dbg = -1;
       if (dbg < 0) { const char* e = getenv("FP_KDBG"); dbg = e ? atoi(e) : 0; }
       if (dbg) { static int m = 0; if (m++ < 3) {
-        fprintf(stderr, "[FPK] %d consts%c", n, 10);
+        ps3_log("[FPK] %d consts%c", n, 10);
         for (int _q = 0; _q < n; _q++)
-            fprintf(stderr, "   k[%2d] = (%g %g %g %g)%c", _q, out[_q*4+0],
+            ps3_log("   k[%2d] = (%g %g %g %g)%c", _q, out[_q*4+0],
                     out[_q*4+1], out[_q*4+2], out[_q*4+3], 10); } }
     }
     return n;

@@ -189,11 +189,12 @@ static inline uint8_t ppu_xer_get_byte_count(const ppu_context* ctx)
  * PS3/PPC64 ABI: r1 = stack pointer, stack grows downward,
  * 16-byte aligned, with a back-chain word at r1+0.
  * -----------------------------------------------------------------------*/
-static inline void ppu_set_stack(ppu_context* ctx, uint64_t stack_top, uint64_t stack_size)
+static inline void ppu_set_stack(ppu_context* ctx, uint64_t stack_base, uint64_t stack_size)
 {
-    /* Place SP at the top of the allocated region, aligned down to 16 bytes,
-     * leaving room for the minimum stack frame (48 bytes on PPC64). */
-    uint64_t sp = (stack_top + stack_size - 48) & ~(uint64_t)0xF;
+    /* PPC64 ELFv1 minimum frame: 48-byte linkage area + 64-byte parameter
+     * save area. The kernel must leave all 112 above the initial SP, because
+     * the entry function's callees spill r3-r10 into the caller's frame. */
+    uint64_t sp = (stack_base + stack_size - 112) & ~(uint64_t)0xF;
     ctx->gpr[1] = sp;
 }
 

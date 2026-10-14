@@ -33,7 +33,7 @@ static IntThread s_threads[SYS_INTERRUPT_THREAD_MAX];
 s32 sys_interrupt_tag_create(sys_interrupt_tag_t* tag, u32 intrtag, u32 classId)
 {
     (void)intrtag;
-    printf("[sys_interrupt] tag_create(class=%u)\n", classId);
+    ps3_log("[sys_interrupt] tag_create(class=%u)\n", classId);
 
     if (!tag) return (s32)CELL_INTERRUPT_ERROR_INVAL;
 
@@ -50,7 +50,7 @@ s32 sys_interrupt_tag_create(sys_interrupt_tag_t* tag, u32 intrtag, u32 classId)
 
 s32 sys_interrupt_tag_destroy(sys_interrupt_tag_t tag)
 {
-    printf("[sys_interrupt] tag_destroy(%u)\n", tag);
+    ps3_log("[sys_interrupt] tag_destroy(%u)\n", tag);
     if (tag >= SYS_INTERRUPT_TAG_MAX || !s_tags[tag].in_use)
         return (s32)CELL_INTERRUPT_ERROR_NOT_FOUND;
     s_tags[tag].in_use = 0;
@@ -63,7 +63,7 @@ s32 sys_interrupt_thread_establish(sys_interrupt_thread_handle_t* handle,
                                      sys_interrupt_tag_t tag,
                                      u64 intrthread, u64 arg)
 {
-    printf("[sys_interrupt] thread_establish(tag=%u)\n", tag);
+    ps3_log("[sys_interrupt] thread_establish(tag=%u)\n", tag);
 
     if (!handle) return (s32)CELL_INTERRUPT_ERROR_INVAL;
     if (tag >= SYS_INTERRUPT_TAG_MAX || !s_tags[tag].in_use)
@@ -84,7 +84,7 @@ s32 sys_interrupt_thread_establish(sys_interrupt_thread_handle_t* handle,
 
 s32 sys_interrupt_thread_disestablish(sys_interrupt_thread_handle_t handle)
 {
-    printf("[sys_interrupt] thread_disestablish(%u)\n", handle);
+    ps3_log("[sys_interrupt] thread_disestablish(%u)\n", handle);
     if (handle >= SYS_INTERRUPT_THREAD_MAX || !s_threads[handle].in_use)
         return (s32)CELL_INTERRUPT_ERROR_NOT_FOUND;
     s_threads[handle].in_use = 0;

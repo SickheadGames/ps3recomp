@@ -18,6 +18,7 @@
 #include <math.h>
 #include "../../runtime/platform/win32_compat.h"   /* GetTickCount64 on POSIX */
 #include "../../runtime/ppu/ppu_memory.h"   /* GUEST_PTR, vm_write*: guest EA -> host */
+#include "ps3emu/logging.h"
 
 /* ---------------------------------------------------------------------------
  * Backend selection
@@ -183,8 +184,8 @@ static void pad_poll_keyboard(void)
 
     { static int said = 0;
       if (!said && btns) { said = 1;
-          printf("[cellPad] keyboard fallback active on port 0 (no XInput device)\n");
-          fflush(stdout); } }
+          ps3_log("[cellPad] keyboard fallback active on port 0 (no XInput device)\n");
+      } }
 }
 #endif
 
@@ -450,7 +451,7 @@ static void pad_poll_backend(void)
 
 s32 cellPadInit(u32 max_connect)
 {
-    printf("[cellPad] Init(max_connect=%u)\n", max_connect);
+    ps3_log("[cellPad] Init(max_connect=%u)\n", max_connect);
 
     if (s_pad_initialized)
         return CELL_PAD_ERROR_ALREADY_OPENED;
@@ -477,7 +478,7 @@ s32 cellPadInit(u32 max_connect)
 
 s32 cellPadEnd(void)
 {
-    printf("[cellPad] End()\n");
+    ps3_log("[cellPad] End()\n");
 
     if (!s_pad_initialized)
         return CELL_PAD_ERROR_NOT_OPENED;
@@ -505,7 +506,7 @@ void cellPad_poll(void)
 s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
 {
     { static int _once = 0;
-      if (!_once++) printf("[cellPad] GetData polling begins (port %u)\n", port_no); }
+      if (!_once++) ps3_log("[cellPad] GetData polling begins (port %u)\n", port_no); }
     if (!s_pad_initialized)
         return CELL_PAD_ERROR_NOT_OPENED;
 
@@ -633,7 +634,7 @@ skip_inject: ;
                   ev[n_ev].t = t; ev[n_ev].mask = m; n_ev++;
                   while (*p == ',' || *p == ' ') p++;
               }
-              printf("[cellPad] PAD_SCRIPT: %d event(s)\n", n_ev);
+              ps3_log("[cellPad] PAD_SCRIPT: %d event(s)\n", n_ev);
           }
       }
       if (s_sc && port_no == 0) {
@@ -653,7 +654,7 @@ skip_inject: ;
                   data->button[CELL_PAD_BTN_OFFSET_DIGITAL2] |= (u16)((ev[i].mask >> 8) & 0xFF);
                   static int said[32];
                   if (!said[i]) { said[i] = 1;
-                      printf("[cellPad] PAD_SCRIPT t=%.1fs press 0x%04X\n", ev[i].t, ev[i].mask); }
+                      ps3_log("[cellPad] PAD_SCRIPT t=%.1fs press 0x%04X\n", ev[i].t, ev[i].mask); }
               }
           }
       } }
@@ -685,7 +686,7 @@ skip_inject: ;
                       unsigned m = (unsigned)strtoul(buf, &rest, 0);
                       int n = (int)strtol(rest, 0, 0);
                       if (m) { held_mask = m; held_n = n > 0 ? n : 40;
-                               printf("[cellPad] PAD_FILE press 0x%04X\n", m); fflush(stdout); }
+                               ps3_print("[cellPad] PAD_FILE press 0x%04X\n", m); }
                   }
                   fclose(f);
                   if (held_n > 0) { FILE* w = fopen(pf_path, "wb"); if (w) fclose(w); }
@@ -741,7 +742,7 @@ skip_inject: ;
             hs->connected = 1;
             { static int lastk = -1;
               if (k != lastk) { lastk = k;
-                fprintf(stderr, "[PADSWEEP] step %d: l=(%u,%u) r=(%u,%u)%c", k,
+                ps3_log("[PADSWEEP] step %d: l=(%u,%u) r=(%u,%u)%c", k,
                         steps[k][0], steps[k][1], steps[k][2], steps[k][3], 10); } }
         } } }
     data->button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_X] = hs->analog_rx;
@@ -986,14 +987,14 @@ s32 cellPadPeriphGetInfo(CellPadPeriphInfo* info_guest)
 
     { static int _n = 0;
       if (_n++ < 2)
-          printf("[cellPad] PeriphGetInfo(max=%u now=%u) -> STANDARD class\n",
+          ps3_log("[cellPad] PeriphGetInfo(max=%u now=%u) -> STANDARD class\n",
                  info->max_connect, connected); }
     return CELL_OK;
 }
 
 s32 cellPadSetPortSetting(u32 port_no, u32 port_setting)
 {
-    printf("[cellPad] SetPortSetting(port=%u, setting=0x%X)\n",
+    ps3_log("[cellPad] SetPortSetting(port=%u, setting=0x%X)\n",
            port_no, port_setting);
 
     if (!s_pad_initialized)

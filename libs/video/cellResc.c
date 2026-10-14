@@ -40,7 +40,7 @@ static float s_pal_ratio = 0.5f;
 
 s32 cellRescInit(const CellRescInitConfig* initConfig)
 {
-    printf("[cellResc] Init()\n");
+    ps3_log("[cellResc] Init()\n");
 
     if (s_initialized)
         return (s32)CELL_RESC_ERROR_REINITIALIZED;
@@ -64,13 +64,13 @@ s32 cellRescInit(const CellRescInitConfig* initConfig)
 
 void cellRescExit(void)
 {
-    printf("[cellResc] Exit()\n");
+    ps3_log("[cellResc] Exit()\n");
     s_initialized = 0;
 }
 
 s32 cellRescSetDisplayMode(u32 displayMode)
 {
-    printf("[cellResc] SetDisplayMode(0x%x)\n", displayMode);
+    ps3_log("[cellResc] SetDisplayMode(0x%x)\n", displayMode);
 
     if (!s_initialized)
         return (s32)CELL_RESC_ERROR_NOT_INITIALIZED;
@@ -122,7 +122,7 @@ s32 cellRescSetBufferAddress(void* colorBuf, void* vertexBuf, void* fragmentBuf)
     (void)vertexBuf;
     (void)fragmentBuf;
 
-    printf("[cellResc] SetBufferAddress()\n");
+    ps3_log("[cellResc] SetBufferAddress()\n");
 
     if (!s_initialized)
         return (s32)CELL_RESC_ERROR_NOT_INITIALIZED;
@@ -133,7 +133,7 @@ s32 cellRescSetBufferAddress(void* colorBuf, void* vertexBuf, void* fragmentBuf)
 
 s32 cellRescSetSrc(s32 index, const CellRescSrc* src)
 {
-    printf("[cellResc] SetSrc(index=%d)\n", index);
+    ps3_log("[cellResc] SetSrc(index=%d)\n", index);
 
     if (!s_initialized)
         return (s32)CELL_RESC_ERROR_NOT_INITIALIZED;
@@ -148,7 +148,7 @@ s32 cellRescSetSrc(s32 index, const CellRescSrc* src)
     s_src[index].width  = vm_read16(ea + 8);
     s_src[index].height = vm_read16(ea + 10);
     s_src[index].offset = vm_read32(ea + 12);
-    printf("[cellResc] SetSrc(%d): offset=0x%X pitch=%u %ux%u fmt=%u\n", index,
+    ps3_log("[cellResc] SetSrc(%d): offset=0x%X pitch=%u %ux%u fmt=%u\n", index,
            s_src[index].offset, s_src[index].pitch, s_src[index].width,
            s_src[index].height, s_src[index].format);
     return CELL_OK;
@@ -156,7 +156,7 @@ s32 cellRescSetSrc(s32 index, const CellRescSrc* src)
 
 s32 cellRescSetDsts(u32 displayMode, const CellRescDsts* dsts)
 {
-    printf("[cellResc] SetDsts(mode=0x%x)\n", displayMode);
+    ps3_log("[cellResc] SetDsts(mode=0x%x)\n", displayMode);
 
     if (!s_initialized)
         return (s32)CELL_RESC_ERROR_NOT_INITIALIZED;
@@ -205,7 +205,7 @@ s32 cellRescSetConvertAndFlip(s32 index)
 
     { static int n = 0;
       if (n++ < 4)
-          printf("[cellResc] SetConvertAndFlip(src=%d) -> flip, %u display buffer(s)\n",
+          ps3_log("[cellResc] SetConvertAndFlip(src=%d) -> flip, %u display buffer(s)\n",
                  index, nbuf); }
 
     if (s_flip_handler_opd)
@@ -217,14 +217,14 @@ s32 cellRescSetConvertAndFlip(s32 index)
 s32 cellRescSetFlipHandler(void (*handler)(u32))
 {
     s_flip_handler_opd = (u32)(uintptr_t)handler;
-    printf("[cellResc] SetFlipHandler(opd=0x%08X)\n", s_flip_handler_opd);
+    ps3_log("[cellResc] SetFlipHandler(opd=0x%08X)\n", s_flip_handler_opd);
     return CELL_OK;
 }
 
 s32 cellRescSetVBlankHandler(void (*handler)(u32))
 {
     s_vblank_handler_opd = (u32)(uintptr_t)handler;
-    printf("[cellResc] SetVBlankHandler(opd=0x%08X)\n", s_vblank_handler_opd);
+    ps3_log("[cellResc] SetVBlankHandler(opd=0x%08X)\n", s_vblank_handler_opd);
     return CELL_OK;
 }
 
@@ -268,7 +268,7 @@ s32 cellRescGetFlipStatus(void)
 
 s32 cellRescSetPalInterpolateDropFlexRatio(float ratio)
 {
-    printf("[cellResc] SetPalInterpolateDropFlexRatio(%.2f)\n", ratio);
+    ps3_log("[cellResc] SetPalInterpolateDropFlexRatio(%.2f)\n", ratio);
     s_pal_ratio = ratio;
     return CELL_OK;
 }
@@ -278,7 +278,7 @@ s32 cellRescCreateInterlaceTable(void* buf, float ea, u32 tableLen, s32 depth)
     (void)ea;
     (void)depth;
 
-    printf("[cellResc] CreateInterlaceTable(len=%u, depth=%d)\n", tableLen, depth);
+    ps3_log("[cellResc] CreateInterlaceTable(len=%u, depth=%d)\n", tableLen, depth);
 
     if (!buf)
         return (s32)CELL_RESC_ERROR_BAD_ARGUMENT;
@@ -293,7 +293,7 @@ s32 cellRescCreateInterlaceTable(void* buf, float ea, u32 tableLen, s32 depth)
 
 s32 cellRescAdjustAspectRatio(float horizontal, float vertical)
 {
-    printf("[cellResc] AdjustAspectRatio(h=%.2f, v=%.2f)\n", horizontal, vertical);
+    ps3_log("[cellResc] AdjustAspectRatio(h=%.2f, v=%.2f)\n", horizontal, vertical);
 
     if (!s_initialized)
         return (s32)CELL_RESC_ERROR_NOT_INITIALIZED;

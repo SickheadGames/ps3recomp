@@ -165,7 +165,7 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
     if (n_cache > 4) n_cache = 4;                    /* jm2 caps at 4 */
     if (!size_stk) size_stk = JOB_STACK_DEFAULT;
     if (!size_bin || size_bin > SPU_LS_SIZE) {
-        fprintf(stderr, "[spurs-job] job 0x%08X: bad sizeBinary=%u -- not run\n",
+        ps3_log("[spurs-job] job 0x%08X: bad sizeBinary=%u -- not run\n",
                 job_ea, size_bin);
         return -1;
     }
@@ -235,7 +235,7 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
     uint32_t dsz     = job_desc_size ? job_desc_size : 256u;
     if (dsz > 0x400) dsz = 0x400;
     if (p > ctx_ls)
-        fprintf(stderr, "[spurs-job] job 0x%08X: WARNING regions reach 0x%X, "
+        ps3_log("[spurs-job] job 0x%08X: WARNING regions reach 0x%X, "
                         "past the context at 0x%X\n", job_ea, p, ctx_ls);
     memcpy(ls + desc_ls, vm_base + job_ea, dsz);
 
@@ -256,7 +256,7 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
 
     { static int _n = 0;
       if (_n++ < 4)
-          fprintf(stderr,
+          ps3_log(
               "[spurs-job] job 0x%08X: bin 0x%08X+%u -> LS 0 | io=0x%05X(%u, %u dma, %u used)"
               " out=0x%05X(%u) scratch=0x%05X(%u) stack_top=0x%05X(%u) cache=%u"
               " ctx=0x%05X desc=0x%05X(%u)\n",
@@ -269,12 +269,12 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
      * lock-line address that is not backed, this is what to read first. */
     { static int _d = 0;
       if (getenv("SPURS_JOB_DESCDUMP") && _d++ < 4) {
-          fprintf(stderr, "[spurs-job] desc @0x%08X (%u bytes):", job_ea, dsz);
+          ps3_log("[spurs-job] desc @0x%08X (%u bytes):", job_ea, dsz);
           for (uint32_t o = 0; o < dsz && o < 128; o += 4) {
-              if ((o & 31) == 0) fprintf(stderr, "\n    +%02X:", o);
-              fprintf(stderr, " %08X", g32(job_ea + o));
+              if ((o & 31) == 0) ps3_log("\n    +%02X:", o);
+              ps3_log(" %08X", g32(job_ea + o));
           }
-          fprintf(stderr, "\n");
+          ps3_log("\n");
           /* SPURS_JOB_DESCDUMP=2: follow plausible guest EAs in the job user
            * data (past JH_SIZE) and dump what they point at. The job reads its
            * parameters from there, so a wild DMA/atomic address usually
@@ -283,10 +283,10 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
               for (uint32_t o = JH_SIZE; o < dsz && o < 128; o += 4) {
                   uint32_t v = g32(job_ea + o);
                   if (v < 0x10000u || v >= 0xD0000000u) continue;
-                  fprintf(stderr, "[spurs-job]   user+0x%02X -> 0x%08X:", o, v);
+                  ps3_log("[spurs-job]   user+0x%02X -> 0x%08X:", o, v);
                   for (uint32_t q = 0; q < 8; q++)
-                      fprintf(stderr, " %08X", g32(v + q * 4));
-                  fprintf(stderr, "\n");
+                      ps3_log(" %08X", g32(v + q * 4));
+                  ps3_log("\n");
               }
           }
       } }
@@ -301,19 +301,19 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
     if (getenv("SPURS_JOB_DUMP")) {
         uint64_t ud  = g64(job_ea + JH_SIZE);        /* desc+0x30 */
         uint32_t cmd = (uint32_t)ud;                 /* low word = EA */
-        fprintf(stderr, "[spurs-job] job 0x%08X userdata: %016llX %016llX %016llX %016llX\n",
+        ps3_log("[spurs-job] job 0x%08X userdata: %016llX %016llX %016llX %016llX\n",
                 job_ea, (unsigned long long)ud,
                 (unsigned long long)g64(job_ea + JH_SIZE + 8),
                 (unsigned long long)g64(job_ea + JH_SIZE + 16),
                 (unsigned long long)g64(job_ea + JH_SIZE + 24));
         if (cmd && cmd < 0x50000000u) {
             dump_cmd = cmd;
-            fprintf(stderr, "[spurs-job]   cmdblock @0x%08X:", cmd);
+            ps3_log("[spurs-job]   cmdblock @0x%08X:", cmd);
             for (int o = 0; o < 64; o += 4) {
-                if ((o & 15) == 0) fprintf(stderr, "\n      +%02X:", o);
-                fprintf(stderr, " %08X", g32(cmd + o));
+                if ((o & 15) == 0) ps3_log("\n      +%02X:", o);
+                ps3_log(" %08X", g32(cmd + o));
             }
-            fprintf(stderr, "\n");
+            ps3_log("\n");
             /* cmdblock+0x1C points at a 2048-byte WORK-ITEM table the type-0/1
              * handler GETs (pc=0x1A78) before entering its per-item worker with
              * count = cmdblock+0x24. Dump its head: all-zero means the game
@@ -321,12 +321,12 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
              * SPU worker mishandles them. */
             uint32_t tbl = g32(cmd + 0x1C);
             if (tbl && tbl < 0x50000000u) {
-                fprintf(stderr, "[spurs-job]   worktable @0x%08X (n=%u):", tbl, g32(cmd + 0x24));
+                ps3_log("[spurs-job]   worktable @0x%08X (n=%u):", tbl, g32(cmd + 0x24));
                 for (int o = 0; o < 96; o += 4) {
-                    if ((o & 15) == 0) fprintf(stderr, "\n      +%02X:", o);
-                    fprintf(stderr, " %08X", g32(tbl + o));
+                    if ((o & 15) == 0) ps3_log("\n      +%02X:", o);
+                    ps3_log(" %08X", g32(tbl + o));
                 }
-                fprintf(stderr, "\n");
+                ps3_log("\n");
             }
         }
         fflush(stderr);
@@ -347,7 +347,7 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
 
     { static int _n = 0;
       if (_n++ < 4)
-          fprintf(stderr, "[spurs-job] ENTER r3=%08X r4=%08X r1=%08X entry-fn image=%d\n",
+          ps3_log("[spurs-job] ENTER r3=%08X r4=%08X r1=%08X entry-fn image=%d\n",
                   ctx.gpr[3]._u32[0], ctx.gpr[4]._u32[0], ctx.gpr[1]._u32[0],
                   image_id); }
     /* NOTE: after its work the job's runtime jumps to LS 0 ("return to the
@@ -377,22 +377,22 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
     { static int s_t = -1; if (s_t < 0) s_t = getenv("SPURS_JOB_MBOX") ? 1 : 0;
       static int n = 0;
       if (s_t && n++ < 16 && g_spurs_job_mbox_valid)
-          fprintf(stderr, "[spurs-job] job 0x%08X posted mbox=0x%08X intr=0x%08X\n",
+          ps3_log("[spurs-job] job 0x%08X posted mbox=0x%08X intr=0x%08X\n",
                   job_ea, g_spurs_job_mbox, g_spurs_job_mbox_intr); }
 
     if (getenv("SPURS_JOB_DUMP")) {
-        fprintf(stderr, "[spurs-job] job 0x%08X exit: status=0x%X stop=0x%X pc=0x%05X\n",
+        ps3_log("[spurs-job] job 0x%08X exit: status=0x%X stop=0x%X pc=0x%05X\n",
                 job_ea, ctx.status, ctx.stop_code, ctx.pc);
         /* Post-run view of the same command block: the game polls result/status
          * fields the job writes back -- a before/after diff shows whether the
          * handler delivered its completion or the PPU waits on stale state. */
         if (dump_cmd) {
-            fprintf(stderr, "[spurs-job]   cmdblock @0x%08X AFTER:", dump_cmd);
+            ps3_log("[spurs-job]   cmdblock @0x%08X AFTER:", dump_cmd);
             for (int o = 0; o < 64; o += 4) {
-                if ((o & 15) == 0) fprintf(stderr, "\n      +%02X:", o);
-                fprintf(stderr, " %08X", g32(dump_cmd + o));
+                if ((o & 15) == 0) ps3_log("\n      +%02X:", o);
+                ps3_log(" %08X", g32(dump_cmd + o));
             }
-            fprintf(stderr, "\n");
+            ps3_log("\n");
         }
         fflush(stderr);
     }

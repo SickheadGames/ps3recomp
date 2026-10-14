@@ -98,7 +98,7 @@ static void adec_notify(CellAdecHandle handle, u32 msg_type, s32 msg_data)
     const AdecSlot* a = &s_adec[handle];
     { static int _n = 0;
       if (_n++ < 4)
-          printf("[cellAdec] notify h=%u msg=%u data=0x%X cb=0x%08X arg=0x%08X caller=%d\n",
+          ps3_log("[cellAdec] notify h=%u msg=%u data=0x%X cb=0x%08X arg=0x%08X caller=%d\n",
                  handle, msg_type, (unsigned)msg_data, a->cbFunc, a->cbArg,
                  g_ps3_guest_caller ? 1 : 0); }
     if (!a->cbFunc || !g_ps3_guest_caller) return;
@@ -143,7 +143,7 @@ s32 cellAdecOpen(const CellAdecType* type, const CellAdecResource* res,
     u32 codec_type = type ? vm_read32(GUEST_EA(type)) : 0;   /* audioCodecType */
     u32 cb_ea      = (u32)(uintptr_t)cb;
     u32 handle_ea  = (u32)(uintptr_t)handle;
-    printf("[cellAdec] Open(codecType=%u, cb=0x%08X, handle=0x%08X)\n",
+    ps3_log("[cellAdec] Open(codecType=%u, cb=0x%08X, handle=0x%08X)\n",
            codec_type, cb_ea, handle_ea);
 
     if (!type || !handle_ea)
@@ -164,7 +164,7 @@ s32 cellAdecOpen(const CellAdecType* type, const CellAdecResource* res,
             s_adec[i].itemEa = ADEC_ITEM_EA(i);
             s_adec[i].pcmEa  = ADEC_PCM_EA(i);
             vm_write32(handle_ea, (u32)i);
-            printf("[cellAdec] Open -> handle=%u item=0x%08X pcm=0x%08X\n",
+            ps3_log("[cellAdec] Open -> handle=%u item=0x%08X pcm=0x%08X\n",
                    i, s_adec[i].itemEa, s_adec[i].pcmEa);
             return CELL_OK;
         }
@@ -174,7 +174,7 @@ s32 cellAdecOpen(const CellAdecType* type, const CellAdecResource* res,
 
 s32 cellAdecClose(CellAdecHandle handle)
 {
-    printf("[cellAdec] Close(handle=%u)\n", handle);
+    ps3_log("[cellAdec] Close(handle=%u)\n", handle);
 
     if (handle >= MAX_ADEC || !s_adec[handle].in_use)
         return (s32)CELL_ADEC_ERROR_ARG;
@@ -186,7 +186,7 @@ s32 cellAdecClose(CellAdecHandle handle)
 s32 cellAdecStartSeq(CellAdecHandle handle, void* param)
 {
     (void)param;
-    printf("[cellAdec] StartSeq(handle=%u)\n", handle);
+    ps3_log("[cellAdec] StartSeq(handle=%u)\n", handle);
 
     if (handle >= MAX_ADEC || !s_adec[handle].in_use)
         return (s32)CELL_ADEC_ERROR_ARG;
@@ -209,10 +209,10 @@ s32 cellAdecEndSeq(CellAdecHandle handle)
            * lr is written by the `bl` to the import stub, so it is exactly
            * (call site + 4) for a call like this one. */
           extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
-          printf("[cellAdec] EndSeq from guest lr=0x%08X tid=%llu\n",
+          ps3_log("[cellAdec] EndSeq from guest lr=0x%08X tid=%llu\n",
                  g_active_ctx ? (u32)g_active_ctx->lr : 0u,
                  g_active_ctx ? (unsigned long long)g_active_ctx->thread_id : 0ull); } }
-    printf("[cellAdec] EndSeq(handle=%u)\n", handle);
+    ps3_log("[cellAdec] EndSeq(handle=%u)\n", handle);
 
     if (handle >= MAX_ADEC || !s_adec[handle].in_use)
         return (s32)CELL_ADEC_ERROR_ARG;
@@ -233,7 +233,7 @@ s32 cellAdecDecodeAu(CellAdecHandle handle, const CellAdecAuInfo* auInfo)
 
     AdecSlot* a = &s_adec[handle];
 
-    printf("[cellAdec] DecodeAu(handle=%u, addr=0x%X, size=%u)\n",
+    ps3_log("[cellAdec] DecodeAu(handle=%u, addr=0x%X, size=%u)\n",
            handle, vm_read32(GUEST_EA(auInfo) + (u32)offsetof(CellAdecAuInfo, startAddr)),
            vm_read32(GUEST_EA(auInfo) + (u32)offsetof(CellAdecAuInfo, size)));
 
@@ -286,7 +286,7 @@ s32 cellAdecDecodeAu(CellAdecHandle handle, const CellAdecAuInfo* auInfo)
 s32 cellAdecGetPcm(CellAdecHandle handle, void* outBuffer)
 {
     { static int _n = 0; if (_n++ < 6)
-        printf("[cellAdec] GetPcm(handle=%u out=0x%08X)\n",
+        ps3_log("[cellAdec] GetPcm(handle=%u out=0x%08X)\n",
                handle, GUEST_EA(outBuffer)); }
     if (handle >= MAX_ADEC || !s_adec[handle].in_use)
         return (s32)CELL_ADEC_ERROR_ARG;
@@ -306,7 +306,7 @@ s32 cellAdecGetPcm(CellAdecHandle handle, void* outBuffer)
 s32 cellAdecGetPcmItem(CellAdecHandle handle, const CellAdecPcmItem** pcmItem)
 {
     { static int _n = 0; if (_n++ < 6)
-        printf("[cellAdec] GetPcmItem(handle=%u out=0x%08X hasPcm=%d)\n",
+        ps3_log("[cellAdec] GetPcmItem(handle=%u out=0x%08X hasPcm=%d)\n",
                handle, GUEST_EA(pcmItem),
                handle < MAX_ADEC ? s_adec[handle].hasPcm : -1); }
     if (handle >= MAX_ADEC || !s_adec[handle].in_use)

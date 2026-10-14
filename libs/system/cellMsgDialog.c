@@ -113,11 +113,11 @@ s32 cellMsgDialogOpen2(CellMsgDialogType type, const char* msgString,
                         CellMsgDialogCallback callback, void* userdata,
                         void* extParam)
 {
-    printf("[cellMsgDialog] Open2(type=0x%08X, msg='%s')\n",
+    ps3_log("[cellMsgDialog] Open2(type=0x%08X, msg='%s')\n",
            type, guest_str(msgString));
 
     if (s_dialog_open) {
-        printf("[cellMsgDialog] WARNING: dialog already open, closing previous\n");
+        ps3_log("[cellMsgDialog] WARNING: dialog already open, closing previous\n");
     }
 
     s_dialog_open = 1;
@@ -128,9 +128,9 @@ s32 cellMsgDialogOpen2(CellMsgDialogType type, const char* msgString,
 
     /* Print the message so developers can see it */
     if (msgString) {
-        printf("========================================\n");
-        printf("[DIALOG] %s\n", guest_str(msgString));
-        printf("========================================\n");
+        ps3_log("========================================\n");
+        ps3_log("[DIALOG] %s\n", guest_str(msgString));
+        ps3_log("========================================\n");
     }
 
     /* Determine button type and auto-respond */
@@ -223,14 +223,14 @@ s32 cellMsgDialogOpen2(CellMsgDialogType type, const char* msgString,
             int auto_no = (forced == 2) ? msg_offers_to_abort(guest_str(msgString)) : 0;
             int no_ = (forced == 2) ? auto_no : forced;
             result = no_ ? CELL_MSGDIALOG_BUTTON_NO : CELL_MSGDIALOG_BUTTON_YES;
-            printf("[cellMsgDialog] Auto-responding: %s%s\n", no_ ? "NO" : "YES",
+            ps3_log("[cellMsgDialog] Auto-responding: %s%s\n", no_ ? "NO" : "YES",
                    auto_no ? " (prompt offers to abort)" : "");
         } else if (button_type == CELL_MSGDIALOG_TYPE_BUTTON_TYPE_OK) {
             result = CELL_MSGDIALOG_BUTTON_OK;
-            printf("[cellMsgDialog] Auto-responding: OK\n");
+            ps3_log("[cellMsgDialog] Auto-responding: OK\n");
         } else {
             result = CELL_MSGDIALOG_BUTTON_NONE;
-            printf("[cellMsgDialog] Auto-responding: NONE (no buttons)\n");
+            ps3_log("[cellMsgDialog] Auto-responding: NONE (no buttons)\n");
         }
 
         /* Close and queue the callback; never enter guest code here. */
@@ -241,7 +241,7 @@ s32 cellMsgDialogOpen2(CellMsgDialogType type, const char* msgString,
             return queue_dialog_callback(cb, result, s_userdata);
         }
     } else {
-        printf("[cellMsgDialog] %s dialog opened (waits for Close/Abort)\n",
+        ps3_log("[cellMsgDialog] %s dialog opened (waits for Close/Abort)\n",
                has_progress ? "Progress bar" : "No-button");
         s_nobutton_deadline = (!has_progress && nobutton_grace_ms())
             ? GetTickCount64() + nobutton_grace_ms() : 0;
@@ -264,7 +264,7 @@ s32 cellMsgDialogOpen(CellMsgDialogType type, const char* msgString,
 
 s32 cellMsgDialogClose(float delayMs)
 {
-    printf("[cellMsgDialog] Close(delay=%.1f ms)\n", delayMs);
+    ps3_log("[cellMsgDialog] Close(delay=%.1f ms)\n", delayMs);
 
     if (!s_dialog_open) {
         return CELL_MSGDIALOG_ERROR_DIALOG_NOT_OPENED;
@@ -284,7 +284,7 @@ s32 cellMsgDialogClose(float delayMs)
 
 s32 cellMsgDialogAbort(void)
 {
-    printf("[cellMsgDialog] Abort()\n");
+    ps3_log("[cellMsgDialog] Abort()\n");
 
     if (!s_dialog_open) {
         return CELL_MSGDIALOG_ERROR_DIALOG_NOT_OPENED;
@@ -314,7 +314,7 @@ s32 cellMsgDialogProgressBarSetMsg(u32 progressBarIndex, const char* msgString)
         strncpy(s_progress[progressBarIndex].message, GUEST_PTR(msgString, const char*),
                 sizeof(s_progress[progressBarIndex].message) - 1);
         s_progress[progressBarIndex].message[sizeof(s_progress[progressBarIndex].message) - 1] = '\0';
-        printf("[cellMsgDialog] ProgressBar[%u] msg='%s'\n", progressBarIndex, guest_str(msgString));
+        ps3_log("[cellMsgDialog] ProgressBar[%u] msg='%s'\n", progressBarIndex, guest_str(msgString));
     }
 
     return CELL_OK;
@@ -329,7 +329,7 @@ s32 cellMsgDialogProgressBarReset(u32 progressBarIndex)
         return CELL_MSGDIALOG_ERROR_DIALOG_NOT_OPENED;
 
     s_progress[progressBarIndex].value = 0;
-    printf("[cellMsgDialog] ProgressBar[%u] reset to 0%%\n", progressBarIndex);
+    ps3_log("[cellMsgDialog] ProgressBar[%u] reset to 0%%\n", progressBarIndex);
 
     return CELL_OK;
 }
@@ -346,7 +346,7 @@ s32 cellMsgDialogProgressBarInc(u32 progressBarIndex, u32 delta)
     if (s_progress[progressBarIndex].value > 100)
         s_progress[progressBarIndex].value = 100;
 
-    printf("[cellMsgDialog] ProgressBar[%u] = %u%%\n",
+    ps3_log("[cellMsgDialog] ProgressBar[%u] = %u%%\n",
            progressBarIndex, s_progress[progressBarIndex].value);
 
     return CELL_OK;
@@ -362,7 +362,7 @@ void cellMsgDialog_tick(void)
     if (GetTickCount64() < s_nobutton_deadline) return;
     s_nobutton_deadline = 0;
     s_dialog_open = 0;
-    printf("[cellMsgDialog] no-button dialog auto-dismissed after %u ms\n",
+    ps3_log("[cellMsgDialog] no-button dialog auto-dismissed after %u ms\n",
            nobutton_grace_ms());
     if (s_callback) {
         CellMsgDialogCallback cb = s_callback;

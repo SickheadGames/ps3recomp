@@ -122,7 +122,7 @@ static u16 kb_raw_to_ascii(u16 raw, u32 mkey)
 
 s32 cellKbInit(u32 max_connect)
 {
-    printf("[cellKb] Init(max_connect=%u)\n", max_connect);
+    ps3_log("[cellKb] Init(max_connect=%u)\n", max_connect);
 
     if (s_kb_initialized)
         return CELL_KB_ERROR_ALREADY_INITIALIZED;
@@ -144,7 +144,7 @@ s32 cellKbInit(u32 max_connect)
 
 s32 cellKbEnd(void)
 {
-    printf("[cellKb] End()\n");
+    ps3_log("[cellKb] End()\n");
 
     if (!s_kb_initialized)
         return CELL_KB_ERROR_UNINITIALIZED;
@@ -235,7 +235,7 @@ s32 cellKbGetInfo(CellKbInfo* info)
 
 s32 cellKbSetReadMode(u32 port_no, u32 rmode)
 {
-    printf("[cellKb] SetReadMode(port=%u, rmode=%u)\n", port_no, rmode);
+    ps3_log("[cellKb] SetReadMode(port=%u, rmode=%u)\n", port_no, rmode);
 
     if (!s_kb_initialized)
         return CELL_KB_ERROR_UNINITIALIZED;
@@ -252,7 +252,7 @@ s32 cellKbSetReadMode(u32 port_no, u32 rmode)
 
 s32 cellKbSetCodeType(u32 port_no, u32 codetype)
 {
-    printf("[cellKb] SetCodeType(port=%u, codetype=%u)\n", port_no, codetype);
+    ps3_log("[cellKb] SetCodeType(port=%u, codetype=%u)\n", port_no, codetype);
 
     if (!s_kb_initialized)
         return CELL_KB_ERROR_UNINITIALIZED;

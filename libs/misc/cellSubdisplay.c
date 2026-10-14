@@ -21,7 +21,7 @@ static int s_started = 0;
 s32 cellSubdisplayInit(const CellSubdisplayConfig* config)
 {
     (void)config;
-    printf("[cellSubdisplay] Init()\n");
+    ps3_log("[cellSubdisplay] Init()\n");
     if (s_initialized)
         return (s32)CELL_SUBDISPLAY_ERROR_ALREADY_INITIALIZED;
     s_initialized = 1;
@@ -31,7 +31,7 @@ s32 cellSubdisplayInit(const CellSubdisplayConfig* config)
 
 s32 cellSubdisplayEnd(void)
 {
-    printf("[cellSubdisplay] End()\n");
+    ps3_log("[cellSubdisplay] End()\n");
     s_initialized = 0;
     s_started = 0;
     return CELL_OK;
@@ -39,7 +39,7 @@ s32 cellSubdisplayEnd(void)
 
 s32 cellSubdisplayStart(void)
 {
-    printf("[cellSubdisplay] Start()\n");
+    ps3_log("[cellSubdisplay] Start()\n");
     if (!s_initialized)
         return (s32)CELL_SUBDISPLAY_ERROR_NOT_INITIALIZED;
     s_started = 1;
@@ -48,7 +48,7 @@ s32 cellSubdisplayStart(void)
 
 s32 cellSubdisplayStop(void)
 {
-    printf("[cellSubdisplay] Stop()\n");
+    ps3_log("[cellSubdisplay] Stop()\n");
     if (!s_initialized)
         return (s32)CELL_SUBDISPLAY_ERROR_NOT_INITIALIZED;
     s_started = 0;

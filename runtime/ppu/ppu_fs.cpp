@@ -18,6 +18,7 @@
 #include "ps3emu/nid.h"      /* ps3_compute_nid */
 #include "ps3emu/guest_call.h" /* ps3_invoke_guest: AIO completion is a guest OPD */
 #include "sdata_decrypt.h"   /* SDATA/EDAT (NPD) decryption for cellFsSdataOpen */
+#include "ps3emu/logging.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -208,7 +209,7 @@ static void cellFsOpen(ppu_context* ctx)
     }
     int hfd = open(hpath, oflags | O_BINARY, 0666);
     if (hfd < 0) {
-        fprintf(stderr, "[fs] open FAIL '%s' -> '%s'\n", gpath, hpath);
+        ps3_log("[fs] open FAIL '%s' -> '%s'\n", gpath, hpath);
         ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_ENOENT; return;
     }
     const char* fmode = (acc == CELL_FS_O_RDWR)
@@ -232,19 +233,19 @@ static void cellFsOpen(ppu_context* ctx)
     if (fd >= 0 && fd < FS_MAX) { strncpy(g_fd_path[fd], gpath, sizeof g_fd_path[fd]-1); g_fd_path[fd][sizeof g_fd_path[fd]-1]=0; }
     { char who[64] = "?";
       if (getenv("FS_CALLER")) { ppu_guest_caller(who, sizeof who);
-          fprintf(stderr, "[fs] open '%s' -> fd %d  (opened by %s)\n", gpath, fd, who);
+          ps3_log("[fs] open '%s' -> fd %d  (opened by %s)\n", gpath, fd, who);
           /* FS_STACK=<substr>: every open funnels through one guest wrapper, so
            * one caller level says nothing about WHICH subsystem wanted the file.
            * Dump the guest call chain for the opens that matter. */
           { const char* want = getenv("FS_STACK");
             if (want && *want && strstr(gpath, want)) ydkj_host_bt("fs-open");
           } }
-      else fprintf(stderr, "[fs] open '%s' -> fd %d\n", gpath, fd); }
+      else ps3_log("[fs] open '%s' -> fd %d\n", gpath, fd); }
     if (getenv("PS3_FSLOG_BT") && strstr(gpath, ".usm")) {
         /* Resolve to GUEST functions (raw host RVAs are useless here): this tells us
          * which criMv/criFs function opened the movie, so the reader-attach path
          * (stream+0x10, never wired => movie opened but never read) can be found. */
-        fprintf(stderr,"[USMBT] open '%s' -> fd %d\n", gpath, fd); fflush(stderr);
+        ps3_log("[USMBT] open '%s' -> fd %d\n", gpath, fd);
         ydkj_host_bt("usm-open");
     }
     ctx->gpr[3] = CELL_OK;
@@ -283,7 +284,7 @@ static void cellFsSdataOpen(ppu_context* ctx)
 
     int hfd = open(hpath, O_RDONLY | O_BINARY, 0666);
     if (hfd < 0) {
-        fprintf(stderr, "[fs] SdataOpen FAIL '%s' -> '%s'\n", gpath, hpath);
+        ps3_log("[fs] SdataOpen FAIL '%s' -> '%s'\n", gpath, hpath);
         ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_ENOENT; return;
     }
     FILE* f = fdopen(hfd, "rb");
@@ -306,7 +307,7 @@ static void cellFsSdataOpen(ppu_context* ctx)
         uint8_t* dec = (enc && rd == (size_t)enc_sz) ? sdata_decrypt(enc, rd, &dec_sz) : nullptr;
         free(enc);
         if (!dec) {
-            fprintf(stderr, "[fs] SdataOpen '%s' NPD decrypt FAILED (unsupported "
+            ps3_log("[fs] SdataOpen '%s' NPD decrypt FAILED (unsupported "
                     "EDAT/needs license); returning success without a handle\n", gpath);
             ctx->gpr[3] = CELL_OK; return;   /* don't feed the title ciphertext */
         }
@@ -322,7 +323,7 @@ static void cellFsSdataOpen(ppu_context* ctx)
         int fd = fd_alloc_file(tf);
         if (fd < 0) { fclose(tf); ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return; }
         if (fd_ptr) vm_write32(fd_ptr, (uint32_t)fd);
-        fprintf(stderr, "[fs] SdataOpen '%s' -> fd %d (NPD decrypted, 0x%zX bytes, magic '%c%c%c%c')\n",
+        ps3_log("[fs] SdataOpen '%s' -> fd %d (NPD decrypted, 0x%zX bytes, magic '%c%c%c%c')\n",
                 gpath, fd, dec_sz,
                 dmagic[0]?dmagic[0]:'?', dmagic[1]?dmagic[1]:'?',
                 dmagic[2]?dmagic[2]:'?', dmagic[3]?dmagic[3]:'?');
@@ -332,7 +333,7 @@ static void cellFsSdataOpen(ppu_context* ctx)
     int fd = fd_alloc_file(f);
     if (fd < 0) { fclose(f); ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return; }
     if (fd_ptr) vm_write32(fd_ptr, (uint32_t)fd);
-    fprintf(stderr, "[fs] SdataOpen '%s' -> fd %d (magic %c%c%c%c)\n", gpath, fd,
+    ps3_log("[fs] SdataOpen '%s' -> fd %d (magic %c%c%c%c)\n", gpath, fd,
             magic[0]?magic[0]:'?', magic[1]?magic[1]:'?', magic[2]?magic[2]:'?', magic[3]?magic[3]:'?');
     ctx->gpr[3] = CELL_OK;
 }
@@ -341,12 +342,12 @@ static void cellFsClose(ppu_context* ctx)
 {
     int fd = (int)(uint32_t)ctx->gpr[3];
     if (getenv("FS_CALLER")) { char w[64]="?"; ppu_guest_caller(w,sizeof w);
-        fprintf(stderr, "[fs] close fd=%d  (by %s)\n", fd, w); }
+        ps3_log("[fs] close fd=%d  (by %s)\n", fd, w); }
     else
-        fprintf(stderr, "[fs] close fd=%d\n", fd);
+        ps3_log("[fs] close fd=%d\n", fd);
 
     if (fd >= 0 && fd < FS_MAX && g_files[fd]) {
-        if (g_fd_usm[fd] && getenv("PS3_FSLOG_READS")) fprintf(stderr, "[USMRD] CLOSE usm fd=%d\n", fd);
+        if (g_fd_usm[fd] && getenv("PS3_FSLOG_READS")) ps3_log("[USMRD] CLOSE usm fd=%d\n", fd);
         fclose(g_files[fd]); g_files[fd] = nullptr; g_fd_usm[fd] = 0;
     }
     ctx->gpr[3] = CELL_OK;
@@ -397,21 +398,21 @@ static void cellFsRead(ppu_context* ctx)
           else efd = -1; }
       if (efd >= 0 && fd == efd && elim > 0 && fpos_before >= elim) {
           static int once = 0;
-          if (!once++) fprintf(stderr, "[fs] PS3_FSLOG_EOF: fd=%d truncated at %ld bytes\n", fd, elim);
+          if (!once++) ps3_log("[fs] PS3_FSLOG_EOF: fd=%d truncated at %ld bytes\n", fd, elim);
           n = 0;
       } }
-    if (g_fd_usm[fd] && getenv("PS3_FSLOG_READS")) fprintf(stderr, "[USMRD] READ usm fd=%d nbytes=%llu -> %zu magic=%02X%02X%02X%02X pos=%ld lr=0x%08X\n", fd, (unsigned long long)nbytes, n, vm_base[buf], vm_base[buf+1], vm_base[buf+2], vm_base[buf+3], fpos_before, (uint32_t)ctx->lr);
+    if (g_fd_usm[fd] && getenv("PS3_FSLOG_READS")) ps3_log("[USMRD] READ usm fd=%d nbytes=%llu -> %zu magic=%02X%02X%02X%02X pos=%ld lr=0x%08X\n", fd, (unsigned long long)nbytes, n, vm_base[buf], vm_base[buf+1], vm_base[buf+2], vm_base[buf+3], fpos_before, (uint32_t)ctx->lr);
     /* PS3_FSLOG_READS=<fd>: log every read on one descriptor. PS3_FSLOG caps at 20
      * lines and they are all spent before a movie ever opens, so it cannot
      * answer "is the streamer reading the .avi". */
     { static int wfd = -2;
       if (wfd == -2) { const char* e = getenv("PS3_FSLOG_READS"); wfd = e ? atoi(e) : -1; }
       if (wfd >= 0 && fd == wfd)
-          fprintf(stderr, "[fsread] fd=%d want=%llu got=%zu pos=%ld\n",
+          ps3_log("[fsread] fd=%d want=%llu got=%zu pos=%ld\n",
                   fd, (unsigned long long)nbytes, n, fpos_before); }
-    if (getenv("PS3_FSLOG")) { static int _fd=0; if(_fd++<20) fprintf(stderr,"[FSDBG] fd=%d raw_nbytes=0x%llX clamped=0x%llX buf=0x%08X fpos_before=%ld n=%zu eof=%d err=%d\n", fd,(unsigned long long)raw_nbytes,(unsigned long long)nbytes,buf,fpos_before,n,feof(g_files[fd]),ferror(g_files[fd])); }
+    if (getenv("PS3_FSLOG")) { static int _fd=0; if(_fd++<20) ps3_log("[FSDBG] fd=%d raw_nbytes=0x%llX clamped=0x%llX buf=0x%08X fpos_before=%ld n=%zu eof=%d err=%d\n", fd,(unsigned long long)raw_nbytes,(unsigned long long)nbytes,buf,fpos_before,n,feof(g_files[fd]),ferror(g_files[fd])); }
 #ifdef _WIN32
-    if (getenv("PS3_FSLOG") && buf==0 && raw_nbytes>0x10000) { static int _b=0; if(_b++<2){ void* fr[30]; unsigned short nn=RtlCaptureStackBackTrace(0,30,fr,0); uintptr_t mb=(uintptr_t)GetModuleHandleA(0); fprintf(stderr,"[FSBT] null-buf read caller rvas:"); for(unsigned short i=0;i<nn&&i<16;i++) fprintf(stderr," %llX",(unsigned long long)((uintptr_t)fr[i]-mb)); fprintf(stderr,"\n"); } }
+    if (getenv("PS3_FSLOG") && buf==0 && raw_nbytes>0x10000) { static int _b=0; if(_b++<2){ void* fr[30]; unsigned short nn=RtlCaptureStackBackTrace(0,30,fr,0); uintptr_t mb=(uintptr_t)GetModuleHandleA(0); ps3_log("[FSBT] null-buf read caller rvas:"); for(unsigned short i=0;i<nn&&i<16;i++) ps3_log(" %llX",(unsigned long long)((uintptr_t)fr[i]-mb)); ps3_log("\n"); } }
 #endif
     /* Per-fd totals, not just the first 50 lines. The flat cap made "this file is
      * opened and never read" unfalsifiable: reads on a later-opened fd fall off
@@ -424,20 +425,20 @@ static void cellFsRead(ppu_context* ctx)
       if (fd>=0 && fd<64) { per_fd[fd]+=n; cnt_fd[fd]++; }
       int first_for_fd = (fd>=0 && fd<64 && cnt_fd[fd]==1);
       if(_n++<50 || first_for_fd || getenv("FS_READ_ALL"))
-        fprintf(stderr,"[fs] read fd=%d nbytes=%llu -> %zu (magic=%02X%02X%02X%02X, total=%llu)%s\n",
+        ps3_log("[fs] read fd=%d nbytes=%llu -> %zu (magic=%02X%02X%02X%02X, total=%llu)%s\n",
                 fd,(unsigned long long)nbytes,n,vm_base[buf],vm_base[buf+1],vm_base[buf+2],vm_base[buf+3],
                 (unsigned long long)tot, first_for_fd?"  <= FIRST READ ON THIS FD":"");
       if (getenv("FS_READ_PATH") && fd>=0 && fd<64 && g_fd_path[fd][0])
-          fprintf(stderr, "        from %s\n", g_fd_path[fd]);
-      if ((_n % 2000)==0) { fprintf(stderr,"[fs] read summary after %d reads:",_n);
-          for (int i=0;i<64;i++) if (cnt_fd[i]) fprintf(stderr," fd%d=%ux/%lluB",i,cnt_fd[i],(unsigned long long)per_fd[i]);
-          fprintf(stderr,"\n"); } }
+          ps3_log("        from %s\n", g_fd_path[fd]);
+      if ((_n % 2000)==0) { ps3_log("[fs] read summary after %d reads:",_n);
+          for (int i=0;i<64;i++) if (cnt_fd[i]) ps3_log(" fd%d=%ux/%lluB",i,cnt_fd[i],(unsigned long long)per_fd[i]);
+          ps3_log("\n"); } }
     if (getenv("PS3_FSLOG_TOC") && nbytes >= 50000) {  /* data.toc read -> who parses it? */
-        fprintf(stderr, "[TOC] data.toc read into buf=0x%08X n=%zu; lr=0x%08llX; guest-stack RAs:\n", buf, n, (unsigned long long)ctx->lr);
+        ps3_log("[TOC] data.toc read into buf=0x%08X n=%zu; lr=0x%08llX; guest-stack RAs:\n", buf, n, (unsigned long long)ctx->lr);
         uint32_t sp = (uint32_t)ctx->gpr[1];
         for (uint32_t i = 0; i < 128 && sp + i*4 + 4 <= ppu_vm_size; i++) {
             uint32_t a = sp + i*4; uint32_t w = (vm_base[a]<<24)|(vm_base[a+1]<<16)|(vm_base[a+2]<<8)|vm_base[a+3];
-            if (w >= 0x10000u && w < 0x600000u) fprintf(stderr, "[TOC]   ra 0x%08X (@sp+0x%X)\n", w, i*4);
+            if (w >= 0x10000u && w < 0x600000u) ps3_log("[TOC]   ra 0x%08X (@sp+0x%X)\n", w, i*4);
         }
     }
     if (nread_ptr) vm_write64(nread_ptr, n);
@@ -461,17 +462,16 @@ static void cellFsWrite(ppu_context* ctx)
         if (strstr(tmp,"config") || strstr(tmp,"Config") || strstr(tmp,"Mystery") ||
             strstr(tmp,"downsample") || strstr(tmp,"RenderTarget")) {
             uint32_t sp = (uint32_t)ctx->gpr[1];
-            fprintf(stderr, "[cfgbt] write \"%.60s\" lr=0x%08X sp=0x%08X\n", tmp, (uint32_t)ctx->lr, sp);
+            ps3_log("[cfgbt] write \"%.60s\" lr=0x%08X sp=0x%08X\n", tmp, (uint32_t)ctx->lr, sp);
             for (int i = 0; i < 24 && sp && sp < 0x10000000u; i++) {
                 uint32_t nsp; memcpy(&nsp, vm_base + sp, 4);
                 nsp = ((nsp>>24)&0xFF)|((nsp>>8)&0xFF00)|((nsp<<8)&0xFF0000)|((nsp<<24)&0xFF000000);
                 if (nsp <= sp || nsp >= 0x10000000u) break;
                 uint32_t lr; memcpy(&lr, vm_base + nsp + 0x10, 4);
                 lr = ((lr>>24)&0xFF)|((lr>>8)&0xFF00)|((lr<<8)&0xFF0000)|((lr<<24)&0xFF000000);
-                fprintf(stderr, "[cfgbt]   #%d lr=0x%08X\n", i, lr);
+                ps3_log("[cfgbt]   #%d lr=0x%08X\n", i, lr);
                 sp = nsp;
             }
-            fflush(stderr);
         }
     }
     if (nwr_ptr) vm_write64(nwr_ptr, n);
@@ -532,7 +532,7 @@ static void cellFsLseek(ppu_context* ctx)
     uint32_t pos_ptr = (uint32_t)ctx->gpr[6];
     if (fd < 0 || fd >= FS_MAX || !g_files[fd]) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return; }
     if (getenv("FS_CALLER")) { char w[64]="?"; ppu_guest_caller(w,sizeof w);
-        fprintf(stderr, "[fs] lseek fd=%d off=%lld whence=%u  (by %s)\n", fd, (long long)off, wh, w); }
+        ps3_log("[fs] lseek fd=%d off=%lld whence=%u  (by %s)\n", fd, (long long)off, wh, w); }
     int worigin = (wh == CELL_FS_SEEK_END) ? SEEK_END : (wh == CELL_FS_SEEK_CUR) ? SEEK_CUR : SEEK_SET;
     fseek(g_files[fd], (long)off, worigin);
     long p = ftell(g_files[fd]);
@@ -568,7 +568,7 @@ static void cellFsStat(ppu_context* ctx)
     host_path(hpath, sizeof hpath, gpath);
     struct stat st;
     if (stat(hpath, &st) != 0) {
-        if (getenv("PS3_FSLOG")) fprintf(stderr, "[fs] stat '%s' -> ENOENT\n", gpath);
+        if (getenv("PS3_FSLOG")) ps3_log("[fs] stat '%s' -> ENOENT\n", gpath);
         ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_ENOENT; return;
     }
     uint32_t mode = (st.st_mode & S_IFDIR) ? (CELL_FS_S_IFDIR | 0x1FF)
@@ -577,9 +577,9 @@ static void cellFsStat(ppu_context* ctx)
     // Directories get the drive block size.
     uint64_t size = (st.st_mode & S_IFDIR) ? 4096 : st.st_size;
 
-    if (getenv("PS3_FSLOG")) fprintf(stderr, "[fs] stat '%s' -> OK (size=%lld mode=%d)\n", gpath, size, mode);
+    if (getenv("PS3_FSLOG")) ps3_log("[fs] stat '%s' -> OK (size=%lld mode=%d)\n", gpath, size, mode);
     if (sb) write_stat(sb, mode, size);
-    if (getenv("PS3_FSLOG") && strstr(gpath,".toc")) fprintf(stderr,"[FSDBG] cellFsStat('%s') -> size=0x%llX\n",gpath,(unsigned long long)st.st_size);
+    if (getenv("PS3_FSLOG") && strstr(gpath,".toc")) ps3_log("[FSDBG] cellFsStat('%s') -> size=0x%llX\n",gpath,(unsigned long long)st.st_size);
     ctx->gpr[3] = CELL_OK;
 }
 
@@ -589,7 +589,7 @@ static void cellFsFstat(ppu_context* ctx)
     uint32_t sb = (uint32_t)ctx->gpr[4];
     if (fd < 0 || fd >= FS_MAX || !g_files[fd]) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return; }
     if (getenv("FS_CALLER")) { char w[64]="?"; ppu_guest_caller(w,sizeof w);
-        fprintf(stderr, "[fs] fstat fd=%d  (by %s)\n", fd, w); }
+        ps3_log("[fs] fstat fd=%d  (by %s)\n", fd, w); }
     long cur = ftell(g_files[fd]);
     fseek(g_files[fd], 0, SEEK_END);
     long sz = ftell(g_files[fd]);
@@ -604,10 +604,10 @@ static void cellFsFstat(ppu_context* ctx)
       if (cap && only && *only && !(g_fd_path[fd][0] && strstr(g_fd_path[fd], only))) cap = 0;
       if (cap) { long c = strtol(cap, 0, 0);
           if (c > 0 && sz > c) {
-              fprintf(stderr, "[fs] fstat fd=%d size %ld -> capped %ld (FS_FSTAT_CAP)\n", fd, sz, c);
+              ps3_log("[fs] fstat fd=%d size %ld -> capped %ld (FS_FSTAT_CAP)\n", fd, sz, c);
               sz = c; } } }
     if (sb) write_stat(sb, CELL_FS_S_IFREG | 0x1B6, (uint64_t)sz);
-    if (getenv("PS3_FSLOG")) { static int _n=0; if(_n++<12) fprintf(stderr,"[FSDBG] cellFsFstat(fd=%d) -> size=0x%lX\n",fd,sz); }
+    if (getenv("PS3_FSLOG")) { static int _n=0; if(_n++<12) ps3_log("[FSDBG] cellFsFstat(fd=%d) -> size=0x%lX\n",fd,sz); }
     ctx->gpr[3] = CELL_OK;
 }
 
@@ -618,7 +618,7 @@ static void cellFsOpendir(ppu_context* ctx)
     uint32_t fd_ptr = (uint32_t)ctx->gpr[4];
     host_path(hpath, sizeof hpath, gpath);
     DIR* d = opendir(hpath);
-    if (getenv("PS3_FSLOG")) fprintf(stderr, "[fs] opendir '%s' -> %s\n", gpath, d ? "OK" : "ENOENT");
+    if (getenv("PS3_FSLOG")) ps3_log("[fs] opendir '%s' -> %s\n", gpath, d ? "OK" : "ENOENT");
     if (!d) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_ENOENT; return; }
     int fd = fd_alloc_dir(d);
     if (fd < 0) { closedir(d); ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return; }
@@ -688,7 +688,7 @@ static void cellFsMkdir(ppu_context* ctx)
     guest_strcpy(gpath, (uint32_t)ctx->gpr[3], sizeof gpath);
     host_path(hpath, sizeof hpath, gpath);
     int r = host_mkdir_p(hpath);
-    if (getenv("PS3_FSLOG")) fprintf(stderr, "[fs] mkdir '%s' -> '%s' (%s)\n", gpath, hpath, r == 0 ? "OK" : "FAIL");
+    if (getenv("PS3_FSLOG")) ps3_log("[fs] mkdir '%s' -> '%s' (%s)\n", gpath, hpath, r == 0 ? "OK" : "FAIL");
     ctx->gpr[3] = CELL_OK;   /* existing dir is benign for boot */
 }
 static void cellFsRmdir(ppu_context* ctx)  { ctx->gpr[3] = CELL_OK; }
@@ -770,7 +770,7 @@ static void cellFsAioRead(ppu_context* ctx)
         err = CELL_OK;
     }
     if (getenv("PS3_FSLOG"))
-        fprintf(stderr, "[fs] aio read id=%d fd=%d off=%llu size=%llu -> %zu\n",
+        ps3_log("[fs] aio read id=%d fd=%d off=%llu size=%llu -> %zu\n",
                 id, fd, (unsigned long long)offset, (unsigned long long)size, n);
 
     ctx->gpr[3] = CELL_OK;

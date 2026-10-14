@@ -18,7 +18,7 @@ static int s_recording = 0;
 s32 cellGameRecordingInit(const CellGameRecordingParam* param)
 {
     (void)param;
-    printf("[cellGameRecording] Init()\n");
+    ps3_log("[cellGameRecording] Init()\n");
     if (s_initialized)
         return (s32)CELL_GAME_REC_ERROR_ALREADY_INITIALIZED;
     s_initialized = 1;
@@ -28,7 +28,7 @@ s32 cellGameRecordingInit(const CellGameRecordingParam* param)
 
 s32 cellGameRecordingEnd(void)
 {
-    printf("[cellGameRecording] End()\n");
+    ps3_log("[cellGameRecording] End()\n");
     s_initialized = 0;
     s_recording = 0;
     return CELL_OK;
@@ -36,7 +36,7 @@ s32 cellGameRecordingEnd(void)
 
 s32 cellGameRecordingStart(void)
 {
-    printf("[cellGameRecording] Start()\n");
+    ps3_log("[cellGameRecording] Start()\n");
     if (!s_initialized)
         return (s32)CELL_GAME_REC_ERROR_NOT_INITIALIZED;
     s_recording = 1;
@@ -45,7 +45,7 @@ s32 cellGameRecordingStart(void)
 
 s32 cellGameRecordingStop(void)
 {
-    printf("[cellGameRecording] Stop()\n");
+    ps3_log("[cellGameRecording] Stop()\n");
     if (!s_initialized)
         return (s32)CELL_GAME_REC_ERROR_NOT_INITIALIZED;
     s_recording = 0;

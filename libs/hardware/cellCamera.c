@@ -67,7 +67,7 @@ static int cam_present(void)
 
 s32 cellCameraInit(void)
 {
-    printf("[cellCamera] Init (virtual EyeToy2, RAW8 %ux%u @ guest 0x%08X)\n",
+    ps3_log("[cellCamera] Init (virtual EyeToy2, RAW8 %ux%u @ guest 0x%08X)\n",
            CAM_W, CAM_H, CAM_BUFFER_GUEST_EA);
     s_initialized = 1;
     return CELL_OK;
@@ -96,7 +96,7 @@ s32 cellCameraOpenEx(s32 devNum, void* info)
     vm_write32(ea + 48, CAM_BUFFER_GUEST_EA);       /* pbuf[0]  */
     vm_write32(ea + 52, CAM_BUFFER_GUEST_EA);       /* pbuf[1]  */
     s_open = 1;
-    printf("[cellCamera] OpenEx -> virtual frames at 0x%08X\n", CAM_BUFFER_GUEST_EA);
+    ps3_log("[cellCamera] OpenEx -> virtual frames at 0x%08X\n", CAM_BUFFER_GUEST_EA);
     return CELL_OK;
 }
 
@@ -171,7 +171,7 @@ s32 cellCameraRead(s32 devNum, u32* frame_num, u32* bytes_read)
     if (!s_started) return (s32)CELL_CAMERA_ERROR_NOT_STARTED;
     s_frame++;
     { static int _once = 0;
-      if (!_once++) printf("[cellCamera] frame reads begin\n"); }
+      if (!_once++) ps3_log("[cellCamera] frame reads begin\n"); }
     cam_fill_frame();
     u32 fea = (u32)(uintptr_t)frame_num;
     u32 bea = (u32)(uintptr_t)bytes_read;

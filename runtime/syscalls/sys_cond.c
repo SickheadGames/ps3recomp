@@ -7,6 +7,8 @@
  */
 #include "sys_cond.h"
 #include "../memory/vm.h"
+#include "ps3emu/logging.h"
+
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -92,7 +94,7 @@ int64_t sys_cond_create(ppu_context* ctx)
         }
         if (getenv("PS3_SYNCLOG") || getenv("YDKJ_SYNCLOG")) {
             char name[9]; memcpy(name, c->name, 8); name[8] = 0;
-            fprintf(stderr, "[SYNC] cond_create id=%u name='%s' mutex=%u id_at=0x%08X lr=0x%08X\n",
+            ps3_log("[SYNC] cond_create id=%u name='%s' mutex=%u id_at=0x%08X lr=0x%08X\n",
                     i + 1, name, mid, out, (uint32_t)ctx->lr);
         }
         table_unlock();
@@ -129,7 +131,7 @@ int64_t sys_cond_wait(ppu_context* ctx)
             const uint8_t* p = vm_to_host(ea);
             uint32_t value = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
                              ((uint32_t)p[2] << 8) | p[3];
-            fprintf(stderr, "[PEEK] [0x%08X]=%u (0x%08X) at cond_wait(cond=%u)\n",
+            ps3_log("[PEEK] [0x%08X]=%u (0x%08X) at cond_wait(cond=%u)\n",
                     ea, value, value, LV2_ARG_U32(ctx, 0));
         }
     }

@@ -36,7 +36,7 @@ s32 cellVpostInit(const CellVpostCfgParam* cfgParam,
                     CellVpostHandle* handle)
 {
     (void)resource;
-    printf("[cellVpost] Init()\n");
+    ps3_log("[cellVpost] Init()\n");
 
     if (!cfgParam || !handle)
         return (s32)CELL_VPOST_ERROR_INVALID_ARGUMENT;
@@ -56,7 +56,7 @@ s32 cellVpostInit(const CellVpostCfgParam* cfgParam,
 
 s32 cellVpostEnd(CellVpostHandle handle)
 {
-    printf("[cellVpost] End(%u)\n", handle);
+    ps3_log("[cellVpost] End(%u)\n", handle);
     if (handle >= CELL_VPOST_HANDLE_MAX || !s_handles[handle].in_use)
         return (s32)CELL_VPOST_ERROR_HANDLE_NOT_FOUND;
     s_handles[handle].in_use = 0;

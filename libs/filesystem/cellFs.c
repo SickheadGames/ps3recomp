@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include "../../runtime/ppu/ppu_memory.h"   /* GUEST_PTR, vm_write*: guest EA -> host */
+#include "ps3emu/logging.h"
 
 /* glibc's <sys/stat.h> exposes st_atime/st_mtime/st_ctime as macros that expand
  * to st_atim.tv_sec etc.  They collide with the identically named members of the
@@ -407,8 +408,8 @@ static void ensure_parent_dirs(const char* path)
 /* NID: 0x718BF5F8 */
 s32 cellFsOpen(const char* path, s32 flags, CellFsFd* fd, const void* arg, u64 size)
 {
-    printf("[cellFs] Open(path='%s', flags=0x%X)\n", gpath(path) ? gpath(path) : "<null>", flags);
-    { extern char* getenv(const char*); static int _bt=-1; if(_bt<0){ const char* e=getenv("PS3_FSLOG_BT"); _bt=(e&&*e&&*e!='0')?1:0; } if(_bt){ extern unsigned int ppu_prof_resolve_host(void*); void* fr[24]; unsigned short n=RtlCaptureStackBackTrace(0,24,fr,0); char ln[600]; int p=snprintf(ln,sizeof ln,"[FSBT]"); unsigned int prev=0; for(unsigned short i=0;i<n;i++){ unsigned int g=ppu_prof_resolve_host(fr[i]); if(g&&g!=prev){ prev=g; p+=snprintf(ln+p,sizeof(ln)-p," %08X",g); } } fprintf(stderr,"%s%c",ln,10); } }
+    ps3_print("[cellFs] Open(path='%s', flags=0x%X)\n", gpath(path) ? gpath(path) : "<null>", flags);
+    { extern char* getenv(const char*); static int _bt=-1; if(_bt<0){ const char* e=getenv("PS3_FSLOG_BT"); _bt=(e&&*e&&*e!='0')?1:0; } if(_bt){ extern unsigned int ppu_prof_resolve_host(void*); void* fr[24]; unsigned short n=RtlCaptureStackBackTrace(0,24,fr,0); char ln[600]; int p=snprintf(ln,sizeof ln,"[FSBT]"); unsigned int prev=0; for(unsigned short i=0;i<n;i++){ unsigned int g=ppu_prof_resolve_host(fr[i]); if(g&&g!=prev){ prev=g; p+=snprintf(ln+p,sizeof(ln)-p," %08X",g); } } ps3_log("%s%c",ln,10); } }
 
     if (!path || !fd)
         return CELL_EFAULT;
@@ -418,7 +419,7 @@ s32 cellFsOpen(const char* path, s32 flags, CellFsFd* fd, const void* arg, u64 s
         /* gpath(), not the raw parameter: `path` is a GUEST address, and
          * printing it as a host string faults. The failure path was
          * crashing the moment any lookup missed. */
-        printf("[cellFs] Open: no path mapping for '%s'\n", gpath(path));
+        ps3_print("[cellFs] Open: no path mapping for '%s'\n", gpath(path));
         return (s32)CELL_ENOENT;
     }
 
@@ -436,7 +437,7 @@ s32 cellFsOpen(const char* path, s32 flags, CellFsFd* fd, const void* arg, u64 s
     }
 
     if (!fp) {
-        printf("[cellFs] Open: fopen('%s', '%s') failed: %s\n", host_path, mode, strerror(errno));
+        ps3_log("[cellFs] Open: fopen('%s', '%s') failed: %s\n", host_path, mode, strerror(errno));
         if (errno == ENOENT) return (s32)CELL_ENOENT;
         if (errno == EACCES) return (s32)CELL_EPERM;
         return (s32)CELL_ENOENT;
@@ -458,14 +459,14 @@ s32 cellFsOpen(const char* path, s32 flags, CellFsFd* fd, const void* arg, u64 s
     s_files[slot].host_fp = fp;
 
     *(CellFsFd*)gptr(fd) = (CellFsFd)ps3_bswap32((u32)slot);   /* guest reads the fd big-endian */
-    printf("[cellFs] Open: fd=%d -> '%s'\n", slot, host_path);
+    ps3_log("[cellFs] Open: fd=%d -> '%s'\n", slot, host_path);
     return CELL_OK;
 }
 
 /* NID: 0x4D5FF8E2 */
 s32 cellFsClose(CellFsFd fd)
 {
-    printf("[cellFs] Close(fd=%d)\n", fd);
+    ps3_log("[cellFs] Close(fd=%d)\n", fd);
 
     if (fd < 0 || fd >= MAX_OPEN_FILES || !s_files[fd].in_use)
         return CELL_FS_ERROR_EBADF;
@@ -501,7 +502,7 @@ s32 cellFsRead(CellFsFd fd, void* buf, u64 nbytes, u64* nread)
 
     { static int _n = 0;
       if (_n++ < 32)
-          { printf("[cellFs] Read(fd=%d, buf=0x%08X, %llu bytes) -> %llu", fd,
+          { ps3_log("[cellFs] Read(fd=%d, buf=0x%08X, %llu bytes) -> %llu", fd,
                    (uint32_t)(uintptr_t)buf,
                    (unsigned long long)nbytes, (unsigned long long)bytes_read);
             /* First bytes as they landed in GUEST memory. Confirms the data
@@ -509,11 +510,11 @@ s32 cellFsRead(CellFsFd fd, void* buf, u64 nbytes, u64* nread)
              * same question as whether fread returned the right count. */
             const unsigned char* g = (const unsigned char*)gptr(buf);
             if (g && bytes_read) {
-                printf("  guest[0..15]:");
+                ps3_log("  guest[0..15]:");
                 for (int k = 0; k < 16 && (u64)k < bytes_read; k++)
-                    printf(" %02X", g[k]);
+                    ps3_log(" %02X", g[k]);
             }
-            printf("\n"); } }
+            ps3_log("\n"); } }
 
     if (nread)
         *(u64*)gptr(nread) = ps3_bswap64(bytes_read);
@@ -574,7 +575,7 @@ s32 cellFsLseek(CellFsFd fd, s64 offset, s32 whence, u64* pos)
 /* NID: 0xEF3BBD5A */
 s32 cellFsFstat(CellFsFd fd, CellFsStat* sb)
 {
-    printf("[cellFs] Fstat(fd=%d)\n", fd);
+    ps3_log("[cellFs] Fstat(fd=%d)\n", fd);
 
     if (fd < 0 || fd >= MAX_OPEN_FILES || !s_files[fd].in_use)
         return CELL_FS_ERROR_EBADF;
@@ -614,7 +615,7 @@ s32 cellFsFstat(CellFsFd fd, CellFsStat* sb)
 /* NID: 0x2CB51F0D */
 s32 cellFsStat(const char* path, CellFsStat* sb)
 {
-    printf("[cellFs] Stat(path='%s')\n", gpath(path) ? gpath(path) : "<null>");
+    ps3_log("[cellFs] Stat(path='%s')\n", gpath(path) ? gpath(path) : "<null>");
 
     if (!path || !sb)
         return CELL_EFAULT;
@@ -625,7 +626,7 @@ s32 cellFsStat(const char* path, CellFsStat* sb)
 
     HOST_STAT_T hst;
     if (HOST_STAT(host_path, &hst) != 0) {
-        printf("[cellFs] Stat: host stat('%s') failed: %s\n", host_path, strerror(errno));
+        ps3_log("[cellFs] Stat: host stat('%s') failed: %s\n", host_path, strerror(errno));
         return (s32)CELL_ENOENT;
     }
 
@@ -645,7 +646,7 @@ s32 cellFsStat(const char* path, CellFsStat* sb)
 /* NID: 0x6D3BB15B */
 s32 cellFsTruncate(const char* path, u64 size)
 {
-    printf("[cellFs] Truncate(path='%s', size=%llu)\n", gpath(path) ? gpath(path) : "<null>",
+    ps3_log("[cellFs] Truncate(path='%s', size=%llu)\n", gpath(path) ? gpath(path) : "<null>",
            (unsigned long long)size);
 
     if (!path)
@@ -677,7 +678,7 @@ s32 cellFsTruncate(const char* path, u64 size)
 /* NID: 0x82D3AB53 */
 s32 cellFsFtruncate(CellFsFd fd, u64 size)
 {
-    printf("[cellFs] Ftruncate(fd=%d, size=%llu)\n", fd, (unsigned long long)size);
+    ps3_log("[cellFs] Ftruncate(fd=%d, size=%llu)\n", fd, (unsigned long long)size);
 
     if (fd < 0 || fd >= MAX_OPEN_FILES || !s_files[fd].in_use)
         return CELL_FS_ERROR_EBADF;
@@ -699,7 +700,7 @@ s32 cellFsFtruncate(CellFsFd fd, u64 size)
 /* NID: 0xC1C507E7 */
 s32 cellFsGetBlockSize(const char* path, u64* sector_size, u64* block_size)
 {
-    printf("[cellFs] GetBlockSize(path='%s')\n", gpath(path) ? gpath(path) : "<null>");
+    ps3_log("[cellFs] GetBlockSize(path='%s')\n", gpath(path) ? gpath(path) : "<null>");
 
     if (!path)
         return CELL_EFAULT;
@@ -713,7 +714,7 @@ s32 cellFsGetBlockSize(const char* path, u64* sector_size, u64* block_size)
 /* NID: 0x2C2C5F71 */
 s32 cellFsGetFreeSize(const char* path, u32* block_size, u64* free_block_count)
 {
-    printf("[cellFs] GetFreeSize(path='%s')\n", gpath(path) ? gpath(path) : "<null>");
+    ps3_log("[cellFs] GetFreeSize(path='%s')\n", gpath(path) ? gpath(path) : "<null>");
 
     if (!path)
         return CELL_EFAULT;
@@ -743,7 +744,7 @@ s32 cellFsGetFreeSize(const char* path, u32* block_size, u64* free_block_count)
 /* NID: 0x3F61245C */
 s32 cellFsChmod(const char* path, s32 mode)
 {
-    printf("[cellFs] Chmod(path='%s', mode=0%o)\n", gpath(path) ? gpath(path) : "<null>", mode);
+    ps3_log("[cellFs] Chmod(path='%s', mode=0%o)\n", gpath(path) ? gpath(path) : "<null>", mode);
 
     if (!path)
         return CELL_EFAULT;
@@ -759,7 +760,7 @@ s32 cellFsChmod(const char* path, s32 mode)
 /* NID: 0x5C74903D */
 s32 cellFsOpendir(const char* path, CellFsDir* fd)
 {
-    printf("[cellFs] Opendir(path='%s')\n", gpath(path) ? gpath(path) : "<null>");
+    ps3_log("[cellFs] Opendir(path='%s')\n", gpath(path) ? gpath(path) : "<null>");
 
     if (!path || !fd)
         return CELL_EFAULT;
@@ -782,7 +783,7 @@ s32 cellFsOpendir(const char* path, CellFsDir* fd)
         s_dirs[slot].find_handle = FindFirstFileA(search_path, &s_dirs[slot].find_data);
         if (s_dirs[slot].find_handle == INVALID_HANDLE_VALUE) {
             s_dirs[slot].in_use = 0;
-            printf("[cellFs] Opendir: FindFirstFile('%s') failed\n", search_path);
+            ps3_log("[cellFs] Opendir: FindFirstFile('%s') failed\n", search_path);
             return (s32)CELL_ENOENT;
         }
         s_dirs[slot].first_read = 1;
@@ -792,13 +793,13 @@ s32 cellFsOpendir(const char* path, CellFsDir* fd)
     s_dirs[slot].host_dir = opendir(host_path);
     if (!s_dirs[slot].host_dir) {
         s_dirs[slot].in_use = 0;
-        printf("[cellFs] Opendir: opendir('%s') failed: %s\n", host_path, strerror(errno));
+        ps3_log("[cellFs] Opendir: opendir('%s') failed: %s\n", host_path, strerror(errno));
         return (s32)CELL_ENOENT;
     }
 #endif
 
     *(CellFsDir*)gptr(fd) = (CellFsDir)ps3_bswap32((u32)slot);   /* guest reads the dir fd big-endian */
-    printf("[cellFs] Opendir: dir_fd=%d -> '%s'\n", slot, host_path);
+    ps3_log("[cellFs] Opendir: dir_fd=%d -> '%s'\n", slot, host_path);
     return CELL_OK;
 }
 
@@ -867,7 +868,7 @@ s32 cellFsReaddir(CellFsDir fd, CellFsDirent* entry, u64* nread)
 /* NID: 0xFF42DCC3 */
 s32 cellFsClosedir(CellFsDir fd)
 {
-    printf("[cellFs] Closedir(fd=%d)\n", fd);
+    ps3_log("[cellFs] Closedir(fd=%d)\n", fd);
 
     if (fd < 0 || fd >= MAX_OPEN_DIRS || !s_dirs[fd].in_use)
         return CELL_FS_ERROR_EBADF;
@@ -891,7 +892,7 @@ s32 cellFsClosedir(CellFsDir fd)
 /* NID: 0x7C1B2FCC */
 s32 cellFsMkdir(const char* path, s32 mode)
 {
-    printf("[cellFs] Mkdir(path='%s', mode=0%o)\n", gpath(path) ? gpath(path) : "<null>", mode);
+    ps3_log("[cellFs] Mkdir(path='%s', mode=0%o)\n", gpath(path) ? gpath(path) : "<null>", mode);
 
     if (!path)
         return CELL_EFAULT;
@@ -904,7 +905,7 @@ s32 cellFsMkdir(const char* path, s32 mode)
 
     int ret = HOST_MKDIR(host_path);
     if (ret != 0 && errno != EEXIST) {
-        printf("[cellFs] Mkdir: mkdir('%s') failed: %s\n", host_path, strerror(errno));
+        ps3_log("[cellFs] Mkdir: mkdir('%s') failed: %s\n", host_path, strerror(errno));
         return (s32)CELL_ENOENT;
     }
     if (ret != 0 && errno == EEXIST) {
@@ -917,7 +918,7 @@ s32 cellFsMkdir(const char* path, s32 mode)
 /* NID: 0xE3F6F665 */
 s32 cellFsRename(const char* from, const char* to)
 {
-    printf("[cellFs] Rename(from='%s', to='%s')\n",
+    ps3_log("[cellFs] Rename(from='%s', to='%s')\n",
            gpath(from) ? gpath(from) : "<null>", gpath(to) ? gpath(to) : "<null>");
 
     if (!from || !to)
@@ -934,7 +935,7 @@ s32 cellFsRename(const char* from, const char* to)
     ensure_parent_dirs(host_to);
 
     if (rename(host_from, host_to) != 0) {
-        printf("[cellFs] Rename: rename('%s', '%s') failed: %s\n",
+        ps3_log("[cellFs] Rename: rename('%s', '%s') failed: %s\n",
                host_from, host_to, strerror(errno));
         return (s32)CELL_ENOENT;
     }
@@ -945,7 +946,7 @@ s32 cellFsRename(const char* from, const char* to)
 /* NID: 0x196CE171 */
 s32 cellFsUnlink(const char* path)
 {
-    printf("[cellFs] Unlink(path='%s')\n", gpath(path) ? gpath(path) : "<null>");
+    ps3_log("[cellFs] Unlink(path='%s')\n", gpath(path) ? gpath(path) : "<null>");
 
     if (!path)
         return CELL_EFAULT;
@@ -955,7 +956,7 @@ s32 cellFsUnlink(const char* path)
         return (s32)CELL_ENOENT;
 
     if (remove(host_path) != 0) {
-        printf("[cellFs] Unlink: remove('%s') failed: %s\n", host_path, strerror(errno));
+        ps3_log("[cellFs] Unlink: remove('%s') failed: %s\n", host_path, strerror(errno));
         return (s32)CELL_ENOENT;
     }
 

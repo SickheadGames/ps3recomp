@@ -92,7 +92,7 @@ static void ls_arm_now(void)
         uint64_t q = (qs && *qs) ? strtoull(qs, NULL, 10) : YZ_LOCKSTEP_DEFAULT_QUANTUM;
         if (q < 1) q = 1;
         s_quantum = q;
-        fprintf(stderr, "[lockstep] ARMED quantum=%llu (SPU_LOCKSTEP=1; unset to disable)\n",
+        ps3_log("[lockstep] ARMED quantum=%llu (SPU_LOCKSTEP=1; unset to disable)\n",
                 (unsigned long long)q);
         fflush(stderr);
     }
@@ -160,7 +160,7 @@ static int ls_release_locked(spu_context* ctx, int keep_runnable)
         uint64_t held = now - s_holder_acquired_ns;
         if (held > YZ_LOCKSTEP_STARVE_NS && s_watchdog_prints < YZ_LOCKSTEP_STARVE_PRINTS) {
             s_watchdog_prints++;
-            fprintf(stderr, "[lockstep] STARVATION token held >5s by spu=%X pc=0x%05X (pass #%llu)\n",
+            ps3_log("[lockstep] STARVATION token held >5s by spu=%X pc=0x%05X (pass #%llu)\n",
                     ctx->spu_id, ctx->pc & SPU_LS_MASK, (unsigned long long)s_pass_count);
             fflush(stderr);
         }
@@ -195,7 +195,7 @@ void yz_lockstep_register(spu_context* ctx)
     if (idx < 0) {
         if (s_ring_count >= YZ_LOCKSTEP_MAX_SPUS) {
             static int wn = 0; if (wn < 4) { wn++;
-                fprintf(stderr, "[lockstep] WARNING ring full -- spu=%X runs UNGATED\n", ctx->spu_id);
+                ps3_log("[lockstep] WARNING ring full -- spu=%X runs UNGATED\n", ctx->spu_id);
                 fflush(stderr); }
             LS_UNLOCK();
             return;   /* fail-open */

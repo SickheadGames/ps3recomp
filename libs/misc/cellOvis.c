@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include "../../runtime/ppu/ppu_memory.h"   /* vm_write*: guest EA -> host, byte-swapped */
 
+#include "ps3emu/logging.h"
+
 /* Internal state */
 
 static int s_initialized = 0;
@@ -17,7 +19,7 @@ static u32 s_next_handle = 1;
 
 s32 cellOvisInit(void)
 {
-    printf("[cellOvis] Init()\n");
+    ps3_log("[cellOvis] Init()\n");
     if (s_initialized)
         return (s32)CELL_OVIS_ERROR_ALREADY_INITIALIZED;
     s_initialized = 1;
@@ -27,7 +29,7 @@ s32 cellOvisInit(void)
 
 s32 cellOvisTerm(void)
 {
-    printf("[cellOvis] Term()\n");
+    ps3_log("[cellOvis] Term()\n");
     s_initialized = 0;
     return CELL_OK;
 }

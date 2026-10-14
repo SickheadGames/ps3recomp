@@ -51,7 +51,7 @@ static TusDataSlot s_data[SCE_NP_TUS_MAX_SLOT_NUM];
 s32 sceNpTusInit(s32 prio, s32 stackSize, void* option)
 {
     (void)prio; (void)stackSize; (void)option;
-    printf("[sceNpTus] Init()\n");
+    ps3_log("[sceNpTus] Init()\n");
 
     if (s_initialized)
         return (s32)SCE_NP_TUS_ERROR_ALREADY_INITIALIZED;
@@ -65,7 +65,7 @@ s32 sceNpTusInit(s32 prio, s32 stackSize, void* option)
 
 s32 sceNpTusTerm(void)
 {
-    printf("[sceNpTus] Term()\n");
+    ps3_log("[sceNpTus] Term()\n");
 
     if (!s_initialized)
         return (s32)SCE_NP_TUS_ERROR_NOT_INITIALIZED;
@@ -88,7 +88,7 @@ s32 sceNpTusTerm(void)
 
 s32 sceNpTusCreateCtx(SceNpTusCtx* ctx)
 {
-    printf("[sceNpTus] CreateCtx()\n");
+    ps3_log("[sceNpTus] CreateCtx()\n");
 
     if (!s_initialized)
         return (s32)SCE_NP_TUS_ERROR_NOT_INITIALIZED;
@@ -107,7 +107,7 @@ s32 sceNpTusCreateCtx(SceNpTusCtx* ctx)
 
 s32 sceNpTusDestroyCtx(SceNpTusCtx ctx)
 {
-    printf("[sceNpTus] DestroyCtx(ctx=%u)\n", ctx);
+    ps3_log("[sceNpTus] DestroyCtx(ctx=%u)\n", ctx);
 
     if (ctx >= SCE_NP_TUS_MAX_CTX || !s_ctx[ctx].in_use)
         return (s32)SCE_NP_TUS_ERROR_INVALID_ARGUMENT;
@@ -125,7 +125,7 @@ s32 sceNpTusSetVariable(SceNpTusCtx ctx, u32 slotId, s64 variable,
 {
     (void)ctx; (void)option;
 
-    printf("[sceNpTus] SetVariable(slot=%u, val=%lld)\n",
+    ps3_log("[sceNpTus] SetVariable(slot=%u, val=%lld)\n",
            slotId, (long long)variable);
 
     if (!s_initialized)
@@ -228,7 +228,7 @@ s32 sceNpTusSetData(SceNpTusCtx ctx, u32 slotId,
 {
     (void)ctx; (void)option;
 
-    printf("[sceNpTus] SetData(slot=%u, size=%u)\n", slotId, dataSize);
+    ps3_log("[sceNpTus] SetData(slot=%u, size=%u)\n", slotId, dataSize);
 
     if (!s_initialized)
         return (s32)SCE_NP_TUS_ERROR_NOT_INITIALIZED;

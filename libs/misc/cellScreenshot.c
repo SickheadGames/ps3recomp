@@ -33,21 +33,21 @@ static OverlaySlot s_overlays[CELL_SCREENSHOT_MAX_OVERLAY];
 
 s32 cellScreenShotEnable(void)
 {
-    printf("[cellScreenshot] Enable()\n");
+    ps3_log("[cellScreenshot] Enable()\n");
     s_screenshot_enabled = 1;
     return CELL_OK;
 }
 
 s32 cellScreenShotDisable(void)
 {
-    printf("[cellScreenshot] Disable()\n");
+    ps3_log("[cellScreenshot] Disable()\n");
     s_screenshot_enabled = 0;
     return CELL_OK;
 }
 
 s32 cellScreenShotSetParameter(const CellScreenShotSetParam* param)
 {
-    printf("[cellScreenshot] SetParameter()\n");
+    ps3_log("[cellScreenshot] SetParameter()\n");
 
     if (!param)
         return CELL_EINVAL;
@@ -61,7 +61,7 @@ s32 cellScreenShotSetOverlayImage(const char* srcDir, const char* srcFile,
 {
     srcDir  = GUEST_PTR(srcDir, const char*);
     srcFile = GUEST_PTR(srcFile, const char*);
-    printf("[cellScreenshot] SetOverlayImage(dir=%s, file=%s, x=%d, y=%d)\n",
+    ps3_log("[cellScreenshot] SetOverlayImage(dir=%s, file=%s, x=%d, y=%d)\n",
            srcDir ? srcDir : "(null)",
            srcFile ? srcFile : "(null)",
            offsetX, offsetY);

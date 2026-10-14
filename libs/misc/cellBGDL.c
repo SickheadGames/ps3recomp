@@ -17,7 +17,7 @@ static int s_initialized = 0;
 
 s32 cellBgdlInit(void)
 {
-    printf("[cellBGDL] Init()\n");
+    ps3_log("[cellBGDL] Init()\n");
     if (s_initialized)
         return (s32)CELL_BGDL_ERROR_ALREADY_INITIALIZED;
     s_initialized = 1;
@@ -26,7 +26,7 @@ s32 cellBgdlInit(void)
 
 s32 cellBgdlTerm(void)
 {
-    printf("[cellBGDL] Term()\n");
+    ps3_log("[cellBGDL] Term()\n");
     s_initialized = 0;
     return CELL_OK;
 }
@@ -51,7 +51,7 @@ s32 cellBgdlStartDownload(const char* url, const char* contentId,
                             CellBgdlId* id)
 {
     (void)url; (void)contentId; (void)id;
-    printf("[cellBGDL] StartDownload() - stub\n");
+    ps3_log("[cellBGDL] StartDownload() - stub\n");
     if (!s_initialized) return (s32)CELL_BGDL_ERROR_NOT_INITIALIZED;
     return (s32)CELL_BGDL_ERROR_BUSY;
 }

@@ -23,6 +23,7 @@
 #include "cellAtrac.h"
 #include "../../runtime/ppu/ppu_memory.h"
 #include "../../third_party/at3_standalone/at3_bridge.h"
+#include "ps3emu/logging.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -150,11 +151,11 @@ s32 cellAtracSetDataAndGetMemSize(u32 pHandle, u32 pucBufferAddr, u32 uiReadByte
     const u8* file = vm_base + pucBufferAddr;
     int rc = atrac_parse_riff(file, uiReadByte, &t);
     if (rc) {
-        fprintf(stderr, "[cellAtrac] SetData: not an ATRAC3plus file (0x%08X)\n", (u32)rc);
+        ps3_log("[cellAtrac] SetData: not an ATRAC3plus file (0x%08X)\n", (u32)rc);
         return rc;
     }
     if (uiReadByte < t.data_off + t.data_bytes)
-        fprintf(stderr, "[cellAtrac] SetData: %u of %u bytes on memory -- STREAMING is "
+        ps3_log("[cellAtrac] SetData: %u of %u bytes on memory -- STREAMING is "
                         "not implemented; this track will decode garbage\n",
                 uiReadByte, t.data_off + t.data_bytes);
     if (s->dec) at3p_close(s->dec);
@@ -167,7 +168,7 @@ s32 cellAtracSetDataAndGetMemSize(u32 pHandle, u32 pucBufferAddr, u32 uiReadByte
     s->pcm_frame = -1;
     (void)uiBufferByte;
     if (puiWorkMemByte) vm_write32(puiWorkMemByte, 0x1000);
-    fprintf(stderr, "[cellAtrac] SetData handle=0x%08X ch=%u frames=%u first=%d end=%d loop=[%d,%d)\n",
+    ps3_log("[cellAtrac] SetData handle=0x%08X ch=%u frames=%u first=%d end=%d loop=[%d,%d)\n",
             pHandle, t.channels, t.data_bytes / t.block_align, t.first, t.end,
             t.loop_start, t.loop_end);
     return CELL_OK;

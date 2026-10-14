@@ -34,7 +34,7 @@ static int celp8_alloc(void)
 
 s32 cellAdecCelp8Open(const CellAdecCelp8Config* config, CellAdecCelp8Handle* handle)
 {
-    printf("[cellAdecCelp8] Open()\n");
+    ps3_log("[cellAdecCelp8] Open()\n");
     if (!handle) return (s32)CELL_ADEC_CELP8_ERROR_INVALID_ARGUMENT;
 
     int slot = celp8_alloc();
@@ -50,7 +50,7 @@ s32 cellAdecCelp8Open(const CellAdecCelp8Config* config, CellAdecCelp8Handle* ha
 
 s32 cellAdecCelp8Close(CellAdecCelp8Handle handle)
 {
-    printf("[cellAdecCelp8] Close(%u)\n", handle);
+    ps3_log("[cellAdecCelp8] Close(%u)\n", handle);
     if (handle >= CELP8_MAX_HANDLES || !s_slots[handle].in_use)
         return (s32)CELL_ADEC_CELP8_ERROR_INVALID_ARGUMENT;
 

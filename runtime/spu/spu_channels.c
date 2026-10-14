@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <setjmp.h>
+#include <assert.h>
 #ifndef _WIN32
 #include <sched.h>   /* sched_yield */
 #endif
@@ -96,7 +97,7 @@ void spu_ls_watch_slow(uint32_t lsa, int is_write, const uint8_t* p, uint32_t pc
     uint32_t a = lsa & (SPU_LS_MASK & ~0xFu);
     for (int i = 0; i < g_spu_ls_watch_n; i++) {
         if (s_spu_ls_watch[i] == a) {
-            fprintf(stderr, "[spu-watch %s 0x%05X pc=0x%05X lr=0x%05X] "
+            ps3_log("[spu-watch %s 0x%05X pc=0x%05X lr=0x%05X] "
                 "%02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X\n",
                 is_write ? "WR" : "rd", a, pc, lr,
                 p[0],p[1],p[2],p[3], p[4],p[5],p[6],p[7],
@@ -116,7 +117,7 @@ void spu_restart_dispatch(spu_context* ctx)
 {
     g_spu_trampoline_fn = 0;
     if (s_spu_halt_armed) longjmp(s_spu_halt_env, 2);
-    fprintf(stderr, "[spu] non-local return outside execution driver at 0x%05X\n", ctx->pc);
+    ps3_log("[spu] non-local return outside execution driver at 0x%05X\n", ctx->pc);
     ctx->status = SPU_STATUS_STOPPED_BY_HALT;
 }
 
@@ -145,11 +146,11 @@ void spu_halt(spu_context* ctx)
      * names exactly which input is wrong. */
     { static int _n = 0;
       if (_n < 6 && ctx->status == SPU_STATUS_STOPPED_BY_HALT) { _n++;
-        fprintf(stderr, "[spu-halt] img=%d pc=0x%05X regs:", ctx->image_id,
+        ps3_log("[spu-halt] img=%d pc=0x%05X regs:", ctx->image_id,
                 ctx->pc & SPU_LS_MASK);
         for (int r = 3; r <= 16; r++)
-            fprintf(stderr, " r%d=%08X", r, ctx->gpr[r]._u32[0]);
-        fprintf(stderr, " r80=%08X r85=%08X\n",
+            ps3_log(" r%d=%08X", r, ctx->gpr[r]._u32[0]);
+        ps3_log(" r80=%08X r85=%08X\n",
                 ctx->gpr[80]._u32[0], ctx->gpr[85]._u32[0]);
         fflush(stderr);
       } }
@@ -166,7 +167,7 @@ void spu_dbg_e60(spu_context* ctx)
     static int _d = 0; if (_d++ >= 6) return;
     const uint8_t* L = ctx->ls;
     #define RD(o) (((uint32_t)L[(o)]<<24)|((uint32_t)L[(o)+1]<<16)|((uint32_t)L[(o)+2]<<8)|L[(o)+3])
-    fprintf(stderr, "[E60] r20=%08X r24=%08X | run2700=%08X ready2710=%08X pend2720=%08X en2730=%08X sig2740=%08X wait2750=%08X x2770=%08X\n",
+    ps3_log("[E60] r20=%08X r24=%08X | run2700=%08X ready2710=%08X pend2720=%08X en2730=%08X sig2740=%08X wait2750=%08X x2770=%08X\n",
             ctx->gpr[20]._u32[0], ctx->gpr[24]._u32[0],
             RD(0x2700), RD(0x2710), RD(0x2720), RD(0x2730), RD(0x2740), RD(0x2750), RD(0x2770));
     #undef RD
@@ -207,7 +208,7 @@ int spu_run_with_halt(void (*entry)(spu_context*), spu_context* ctx)
     if (ctx->image_id == 1) {
         static int _n = 0;
         if (_n < 12) { _n++;
-            fprintf(stderr, "[rwh] #%d img=1 ctx=%p r3=%08X r4=%08X entry=%p\n",
+            ps3_log("[rwh] #%d img=1 ctx=%p r3=%08X r4=%08X entry=%p\n",
                     _n, (void*)ctx, ctx->gpr[3]._u32[0], ctx->gpr[4]._u32[0],
                     (void*)entry);
             fflush(stderr); }
@@ -262,7 +263,7 @@ int spu_run_with_halt(void (*entry)(spu_context*), spu_context* ctx)
         entry(ctx);
         { static int _e = 0;
           if (getenv("SPU_ARGWATCH") && _e < 8) { _e++;
-              fprintf(stderr, "[argwatch] after entry(): img=%d pc=0x%05X "
+              ps3_log("[argwatch] after entry(): img=%d pc=0x%05X "
                       "r2=0x%08X r3=0x%08X r4=0x%08X\n", ctx->image_id,
                       (uint32_t)ctx->pc & SPU_LS_MASK, ctx->gpr[2]._u32[0],
                       ctx->gpr[3]._u32[0], ctx->gpr[4]._u32[0]);
@@ -333,7 +334,7 @@ static mfc_engine* mfc_for(spu_context* ctx)
         if (!fallback_init) {
             mfc_engine_init(&fallback);
             fallback_init = 1;
-            fprintf(stderr, "[SPU] more than %d contexts hold an MFC engine at "
+            ps3_log("[SPU] more than %d contexts hold an MFC engine at "
                     "once; the rest share one\n", SPU_MAX_CONTEXTS);
             fflush(stderr);
         }
@@ -422,7 +423,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
       if (s_t) { static uint64_t s_n = 0; static uint32_t s_lastea = 0;
         if ((++s_n % 2000000) == 0 || ea != s_lastea) {
           if ((s_n % 2000000) == 0)
-            fprintf(stderr, "[atomcnt] %llu atomic ops; last cmd=0x%X ea=0x%08X\n",
+            ps3_log("[atomcnt] %llu atomic ops; last cmd=0x%X ea=0x%08X\n",
                     (unsigned long long)s_n, cmd, ea);
           s_lastea = ea; } } }
     /* SPU_ATOMTRACE=1 keeps the old 40-line cap; =<N> raises it. A busy image
@@ -432,7 +433,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
       if (s_at < 0) { const char* e = getenv("SPU_ATOMTRACE");
                       int v = e ? atoi(e) : 0; s_at = e ? (v > 1 ? v : 40) : 0; }
       if (s_at) { static int _a=0; if (_a++ < s_at)
-        fprintf(stderr, "[atom] cmd=0x%02X ea=0x%08X (img=%d)\n", cmd, ea, ctx->image_id); } }
+        ps3_log("[atom] cmd=0x%02X ea=0x%08X (img=%d)\n", cmd, ea, ctx->image_id); } }
     /* cri task (img22) atomic on the taskset: dump the loaded bitset line so we can
      * see if the task reads MY taskset (0x4005E000) with my READY bit, or elsewhere. */
     { static int s_ct=-1; if(s_ct<0) s_ct=getenv("SPU_ATOMTRACE")?1:0;
@@ -440,7 +441,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
         static int _c=0; if(_c++<24){
           uint8_t* m=vm_base+ea;
           #define BW(o) (((uint32_t)m[o]<<24)|((uint32_t)m[o+1]<<16)|((uint32_t)m[o+2]<<8)|m[o+3])
-          fprintf(stderr,"[cri-atom] GETLLAR ea=0x%08X line[0..0x30]: %08X %08X %08X %08X | %08X %08X %08X %08X | %08X %08X %08X %08X\n",
+          ps3_log("[cri-atom] GETLLAR ea=0x%08X line[0..0x30]: %08X %08X %08X %08X | %08X %08X %08X %08X | %08X %08X %08X %08X\n",
             ea, BW(0),BW(4),BW(8),BW(0xC), BW(0x10),BW(0x14),BW(0x18),BW(0x1C), BW(0x20),BW(0x24),BW(0x28),BW(0x2C));
           #undef BW
         } } }
@@ -454,7 +455,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
         static int _t=0; if (vm_base && _t++ < 24) {
             uint8_t* t = vm_base + 0x0F000000u;
             #define TW(o) (((uint32_t)t[o]<<24)|((uint32_t)t[o+1]<<16)|((uint32_t)t[o+2]<<8)|t[o+3])
-            fprintf(stderr, "[tset] %s run=%08X rdy=%08X pnd=%08X ena=%08X sig=%08X wait=%08X | wid=%08X last=%02X\n",
+            ps3_log("[tset] %s run=%08X rdy=%08X pnd=%08X ena=%08X sig=%08X wait=%08X | wid=%08X last=%02X\n",
                     cmd==0xD0?"GET":cmd==0xB4?"PUT":"?", TW(0x00), TW(0x10), TW(0x20), TW(0x30), TW(0x40), TW(0x50), TW(0x74), t[0x73]);
             #undef TW
         }
@@ -467,7 +468,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
     if (!mfc_ea_range_committed(ea, MFC_ATOMIC_LINE)) {
         static int s_w = 0;
         if (s_w++ < 16)
-            fprintf(stderr, "[spu-atomic] cmd=0x%X ea=0x%08X pc=0x%05X img=%d uncommitted -- skipped\n",
+            ps3_log("[spu-atomic] cmd=0x%X ea=0x%08X pc=0x%05X img=%d uncommitted -- skipped\n",
                     cmd, ea, (uint32_t)ctx->pc & SPU_LS_MASK, ctx->image_id);
         if (cmd == MFC_GETLLAR_CMD) {
             memset(ls, 0, MFC_ATOMIC_LINE);
@@ -516,7 +517,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
                       p += snprintf(buf + p, sizeof buf - p, "%02X%s", ls[i],
                                     (i % 4 == 3) ? " " : "");
               }
-              fprintf(stderr, "%s\n", buf); fflush(stderr);
+              ps3_log("%s\n", buf); fflush(stderr);
           }
       } }
     /* Bink sync-line atomic trace (armed by the PPU-side producer probe). */
@@ -525,7 +526,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
       if (b && ea >= (b & ~127u) && ea < ((b + 0xC0 + 127) & ~127u)) {
           static int _n = 0;
           if (_n++ < 64)
-              fprintf(stderr, "[sync-atomic] %s img=%d pc=0x%05X ea=0x%08X\n",
+              ps3_log("[sync-atomic] %s img=%d pc=0x%05X ea=0x%08X\n",
                       cmd == MFC_GETLLAR_CMD ? "GETLLAR" :
                       cmd == MFC_PUTLLC_CMD ? "PUTLLC" : "PUTLLUC",
                       ctx->image_id, (uint32_t)ctx->pc, ea);
@@ -586,7 +587,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
           if (ea != t_ea) { t_ea = ea; t_n = 0; }
           else if (++t_n == 4000000) {
               const uint8_t* m = vm_base + ea;
-              fprintf(stderr, "[spu-spin] img=%d pc=0x%05X lr=0x%05X GETLLAR ea=0x%08X x4M; line:"
+              ps3_log("[spu-spin] img=%d pc=0x%05X lr=0x%05X GETLLAR ea=0x%08X x4M; line:"
                               " %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X\n",
                       ctx->image_id, (unsigned)(ctx->pc & SPU_LS_MASK), ctx->gpr[0]._u32[0] & SPU_LS_MASK, ea,
                       m[0],m[1],m[2],m[3], m[4],m[5],m[6],m[7], m[8],m[9],m[10],m[11], m[12],m[13],m[14],m[15]);
@@ -623,10 +624,10 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
                 if (f < 0 && ns < 8) { f = ns; seen[ns] = lsa; cnt[ns] = 0; ns++; }
                 if (f >= 0) cnt[f]++;
                 if ((ln % 4096) == 0) {
-                    fprintf(stderr, "[llar-lsa] %lu GETLLARs on 0x%08X;", ln, ea);
+                    ps3_log("[llar-lsa] %lu GETLLARs on 0x%08X;", ln, ea);
                     for (int z = 0; z < ns; z++)
-                        fprintf(stderr, " lsa=0x%05X x%lu", seen[z], cnt[z]);
-                    fprintf(stderr, "\n"); fflush(stderr);
+                        ps3_log(" lsa=0x%05X x%lu", seen[z], cnt[z]);
+                    ps3_log("\n"); fflush(stderr);
                 } }
               if (++ln <= 8 || (ln % 256) == 0) {
                   const uint8_t* q = (const uint8_t*)ls;
@@ -638,7 +639,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
                   const uint8_t* mir = ctx->ls + 0x10800u;
                   const uint32_t mirw = ((uint32_t)mir[0] << 24) | ((uint32_t)mir[1] << 16)
                                       | ((uint32_t)mir[2] << 8) | mir[3];
-                  fprintf(stderr, "[llar] n=%lu spu%u pc=0x%05X lsa=0x%05X"
+                  ps3_log("[llar] n=%lu spu%u pc=0x%05X lsa=0x%05X"
                                   " ea=0x%08X mem=0x%08X landed=0x%08X"
                                   " mirror[0x10800]=0x%08X r90=0x%08X\n",
                           ln, (unsigned)(ctx->spu_id & 7u),
@@ -685,9 +686,9 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
                         for (int _i = 0; _i < 8; _i++) {
                             uint32_t t = 0;
                             memcpy(&t, (const unsigned char*)ctx->ls + ((lsa + _i*4) & SPU_LS_MASK), 4);
-                            w[_i] = __builtin_bswap32(t);
+                            w[_i] = PORT_BSWAP32(t);
                         }
-                        fprintf(stderr, "[putllc-ok] %llu: img=%d ctx=%p ea=0x%08X"
+                        ps3_log("[putllc-ok] %llu: img=%d ctx=%p ea=0x%08X"
                                         " line=%08X %08X %08X %08X %08X %08X %08X %08X\n",
                                 n, ctx->image_id, (void*)ctx, ea,
                                 w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]); } } }
@@ -708,7 +709,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
                   else                             n_line++;
                   static unsigned long long total;
                   if ((++total % 500000) == 0) {
-                      fprintf(stderr, "[putllc-why] %llu fails: no-reservation=%llu"
+                      ps3_log("[putllc-why] %llu fails: no-reservation=%llu"
                                       " ea-mismatch=%llu line-changed=%llu"
                                       " (last ea=0x%08X img=%d resv_ea=0x%08X"
                                       " getllar=%llu)\n",
@@ -727,7 +728,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
                                 ((uint32_t)ctx->ls[0x1CA]<<8)|ctx->ls[0x1CB];
                   extern uint8_t* vm_base;
                   const uint8_t* r = vm_base + b + 0x70;   /* row 3 (sync+0x40+16*3) */
-                  fprintf(stderr, "[sync-atomic] PUTLLC-OK spuNum=%u ea=+0x%X lanes@row3={%u %u %u %u %u %u %u}\n",
+                  ps3_log("[sync-atomic] PUTLLC-OK spuNum=%u ea=+0x%X lanes@row3={%u %u %u %u %u %u %u}\n",
                           sn, ea - b,
                           (r[2]<<8)|r[3],(r[4]<<8)|r[5],(r[6]<<8)|r[7],(r[8]<<8)|r[9],
                           (r[10]<<8)|r[11],(r[12]<<8)|r[13],(r[14]<<8)|r[15]);
@@ -740,7 +741,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
           if (s_v < 0) { const char* e = getenv("SPU_ATOM_EA");
                          s_vl = e ? (uint32_t)strtoul(e, 0, 16) & ~127u : 0; s_v = s_vl ? 1 : 0; }
           if (s_v && (ea & ~127u) == s_vl)
-              fprintf(stderr, "[atom-ea] PUTLLC %s lr=0x%05X ea=0x%08X\n",
+              ps3_log("[atom-ea] PUTLLC %s lr=0x%05X ea=0x%08X\n",
                       ctx->atomic_stat ? "FAIL" : "OK",
                       ctx->gpr[0]._u32[0] & SPU_LS_MASK, ea); }
         ctx->resv_valid = 0;                           /* reservation consumed */
@@ -800,9 +801,9 @@ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value)
     { static int s_c = -1; if (s_c < 0) { const char* e = getenv("SPU_CHHIST"); s_c = e ? (atoi(e) > 0 ? atoi(e) : 2000) : 0; }
       if (s_c) { static unsigned long long w[128]; static unsigned long long n;
           w[channel & 127]++;
-          if ((++n % (unsigned long long)s_c) == 0) { fprintf(stderr, "[chw] %llu writes:%c", n, 10);
+          if ((++n % (unsigned long long)s_c) == 0) { ps3_log("[chw] %llu writes:%c", n, 10);
               for (int i = 0; i < 128; i++) if (w[i])
-                  fprintf(stderr, "   wrch ch%-3d %llu%c", i, w[i], 10); } } }
+                  ps3_log("   wrch ch%-3d %llu%c", i, w[i], 10); } } }
     uint32_t v = value._u32[0];  /* channel writes use the preferred slot */
 
     if (channel_is_mfc(channel)) {
@@ -849,16 +850,16 @@ void spu_wrch(spu_context* ctx, uint32_t channel, u128 value)
          * looks", which no other probe here distinguishes. */
         { static int _d = -1; if (_d < 0) _d = getenv("SPU_DBG_MBOX") ? 1 : 0;
           if (_d) { static unsigned long _n = 0; if (++_n <= 24)
-            fprintf(stderr, "[spu-outmbox] spu=%X wrote 0x%08X depth=%u\n",
+            ps3_log("[spu-outmbox] spu=%X wrote 0x%08X depth=%u\n",
                     ctx->spu_id, v, (unsigned)ctx->ch_out_mbox.count); } }
         { static int s_t = -1; if (s_t < 0) s_t = getenv("SPU_MBOXTRACE") ? 1 : 0;
-          if (s_t) fprintf(stderr, "[spu-mbox] OUT  grp=0x%X spu=0x%X val=0x%08X\n",
+          if (s_t) ps3_log("[spu-mbox] OUT  grp=0x%X spu=0x%X val=0x%08X\n",
                            ctx->spu_group_id, ctx->spu_id, v); }
         /* Plain mailbox data is consumed by the following interrupt request. */
         break;
     case SPU_WrOutIntrMbox:
         { static int s_t = -1; if (s_t < 0) s_t = getenv("SPU_MBOXTRACE") ? 1 : 0;
-          if (s_t) fprintf(stderr, "[spu-mbox] INTR grp=0x%X spu=0x%X val=0x%08X\n",
+          if (s_t) ps3_log("[spu-mbox] INTR grp=0x%X spu=0x%X val=0x%08X\n",
                            ctx->spu_group_id, ctx->spu_id, v); }
         if (g_spu_user_event_hook && g_spu_user_event_hook(ctx, v)) break;
         spu_channel_write(&ctx->ch_out_intr_mbox, v);
@@ -969,7 +970,7 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
 
     { static unsigned long bn = 0; unsigned long n = ++bn;
       if (n <= 50 || (n % 512) == 0)
-        fprintf(stderr, "[ch-block] spu=%X pc=0x%05X op=%s ch=%u evstat=0x%X evmask=0x%X\n",
+        ps3_log("[ch-block] spu=%X pc=0x%05X op=%s ch=%u evstat=0x%X evmask=0x%X\n",
                 ctx->spu_id, ctx->pc & SPU_LS_MASK, op, channel,
                 ctx->event_status, ctx->event_mask); }
 
@@ -985,7 +986,7 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
             ReleaseSRWLockExclusive((SRWLOCK*)&ctx->ch_wait_lock);
             unsigned long long waited = GetTickCount64() - start;
             if (waited >= next_hb) {
-                fprintf(stderr, "[ch-wait] spu=%X pc=0x%05X ch=%u waited=%llums evstat=0x%X evmask=0x%X resv[valid=%d ea=0x%08X]\n",
+                ps3_log("[ch-wait] spu=%X pc=0x%05X ch=%u waited=%llums evstat=0x%X evmask=0x%X resv[valid=%d ea=0x%08X]\n",
                         ctx->spu_id, ctx->pc & SPU_LS_MASK, channel, waited,
                         ctx->event_status, ctx->event_mask,
                         ctx->resv_valid, ctx->resv_ea);
@@ -1006,9 +1007,9 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel)
     { static int s_c = -1; if (s_c < 0) { const char* e = getenv("SPU_CHHIST"); s_c = e ? (atoi(e) > 0 ? atoi(e) : 2000) : 0; }
       if (s_c) { static unsigned long long r[128]; static unsigned long long n;
           r[channel & 127]++;
-          if ((++n % (unsigned long long)s_c) == 0) { fprintf(stderr, "[chr] %llu reads:%c", n, 10);
+          if ((++n % (unsigned long long)s_c) == 0) { ps3_log("[chr] %llu reads:%c", n, 10);
               for (int i = 0; i < 128; i++) if (r[i])
-                  fprintf(stderr, "   rdch ch%-3d %llu%c", i, r[i], 10); } } }
+                  ps3_log("   rdch ch%-3d %llu%c", i, r[i], 10); } } }
     /* Block (never fabricate) on an empty producer-fed read channel (opt-in
      * SPU_CH_BLOCK). RdEventStat now has a producer (the MFC tag-status event
      * raise above), but only block it when the SPU has actually enabled events
@@ -1028,7 +1029,7 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel)
                 (channel==MFC_RdTagStat)?6:(channel==MFC_RdAtomicStat)?7:(channel==SPU_RdMachStat)?8:9;
         s_c[b]++;
         if ((++s_tot % 2000000) == 0)
-          fprintf(stderr, "[rdch] InMbox=%llu Sig1=%llu Sig2=%llu Dec=%llu EvStat=%llu EvMask=%llu TagStat=%llu AtomStat=%llu MachStat=%llu other=%llu\n",
+          ps3_log("[rdch] InMbox=%llu Sig1=%llu Sig2=%llu Dec=%llu EvStat=%llu EvMask=%llu TagStat=%llu AtomStat=%llu MachStat=%llu other=%llu\n",
             (unsigned long long)s_c[0],(unsigned long long)s_c[1],(unsigned long long)s_c[2],(unsigned long long)s_c[3],
             (unsigned long long)s_c[4],(unsigned long long)s_c[5],(unsigned long long)s_c[6],(unsigned long long)s_c[7],
             (unsigned long long)s_c[8],(unsigned long long)s_c[9]); } }
@@ -1135,7 +1136,7 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
                               | ((uint32_t)b8[2] << 8) | b8[3];
           }
           if ((++n % (unsigned long long)s_w) == 0) {
-              fprintf(stderr, "[whopolls] %llu rchcnt calls\n", n);
+              ps3_log("[whopolls] %llu rchcnt calls\n", n);
               for (unsigned q = 0; q < 8; q++) {
                   int any = 0;
                   for (unsigned k = 0; k < 40; k++) if (c[q][k]) any = 1;
@@ -1144,7 +1145,7 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
                    * alone cannot say whether a poll returns 0 or 1, and that is
                    * the difference between "the SPU is not being told" and "the
                    * SPU is told and ignores it". */
-                  fprintf(stderr, "   spu%u pc=0x%05X ev[st=%08X mask=%08X]"
+                  ps3_log("   spu%u pc=0x%05X ev[st=%08X mask=%08X]"
                                   " sig[%u %u] inmbox=%u", q, lastpc[q],
                           lastst[q], lastmask[q], lastsig[q][0], lastsig[q][1],
                           lastmb[q]);
@@ -1161,7 +1162,7 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
                    * -- and the SPU computes both that LSA and the address its
                    * compare reads from r90. Printing the two together is what
                    * decides it. */
-                  fprintf(stderr, " resv[v=%d ea=0x%08X diff=%d]"
+                  ps3_log(" resv[v=%d ea=0x%08X diff=%d]"
                                   " mfc_lsa=0x%05X r90=0x%08X",
                           lastrv[q], lastrea[q], lastrd[q],
                           lastlsa[q], lastr90[q]);
@@ -1179,20 +1180,20 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
                                       s_ld = e4 ? 1 : 0;
                                       s_lo = e4 ? (uint32_t)strtoul(e4,0,16) : 0u; }
                     if (s_ld) {
-                        fprintf(stderr, " ls[0x%05X:", s_lo);
+                        ps3_log(" ls[0x%05X:", s_lo);
                         for (int z = 0; z < 8; z++)
-                            fprintf(stderr, " %08X", lastls[q][z]);
-                        fprintf(stderr, "]");
+                            ps3_log(" %08X", lastls[q][z]);
+                        ps3_log("]");
                     } }
                   if (lastrv[q]) {
-                      fprintf(stderr, " line[");
+                      ps3_log(" line[");
                       for (int z = 0; z < 8; z++)
-                          fprintf(stderr, "%s%08X", z ? " " : "", lastline[q][z]);
-                      fprintf(stderr, "]");
+                          ps3_log("%s%08X", z ? " " : "", lastline[q][z]);
+                      ps3_log("]");
                   }
                   for (unsigned k = 0; k < 40; k++) if (c[q][k])
-                      fprintf(stderr, " ch%u=%llu", k, c[q][k]);
-                  fprintf(stderr, "\n");
+                      ps3_log(" ch%u=%llu", k, c[q][k]);
+                  ps3_log("\n");
               }
               fflush(stderr);
           } } }
@@ -1207,9 +1208,9 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
       if (s_c) { static unsigned long long c[128]; static unsigned long long n;
           c[channel & 127]++;
           if ((++n % (unsigned long long)s_c) == 0) {
-              fprintf(stderr, "[chc] %llu rchcnt:%c", n, 10);
+              ps3_log("[chc] %llu rchcnt:%c", n, 10);
               for (int i = 0; i < 128; i++) if (c[i])
-                  fprintf(stderr, "   rchcnt ch%-3d %llu%c", i, c[i], 10);
+                  ps3_log("   rchcnt ch%-3d %llu%c", i, c[i], 10);
               fflush(stderr); } } }
     { static int s_t = -1; if (s_t < 0) s_t = getenv("SPU_POLLTRACE") ? 1 : 0;
       if (s_t) { static uint64_t s_cnt[8] = {0}; static uint64_t s_total = 0;
@@ -1218,7 +1219,7 @@ uint32_t spu_rchcnt(spu_context* ctx, uint32_t channel)
                 (channel==SPU_WrOutIntrMbox)?6:7;
         s_cnt[b]++;
         if ((++s_total % 2000000) == 0)
-          fprintf(stderr, "[pollcnt] InMbox=%llu EvStat=%llu Sig1=%llu Sig2=%llu TagStat=%llu OutMbox=%llu OutIntr=%llu other=%llu (ch last=%u)\n",
+          ps3_log("[pollcnt] InMbox=%llu EvStat=%llu Sig1=%llu Sig2=%llu TagStat=%llu OutMbox=%llu OutIntr=%llu other=%llu (ch last=%u)\n",
                   (unsigned long long)s_cnt[0],(unsigned long long)s_cnt[1],(unsigned long long)s_cnt[2],
                   (unsigned long long)s_cnt[3],(unsigned long long)s_cnt[4],(unsigned long long)s_cnt[5],
                   (unsigned long long)s_cnt[6],(unsigned long long)s_cnt[7], channel); } }
@@ -1353,7 +1354,7 @@ void spu_register_function(uint32_t addr, spu_fn fn)
         static int warned = 0;
         if (!warned) {
             warned = 1;
-            fprintf(stderr,
+            ps3_log(
                     "[spu] FATAL: SPU function registry full at %u entries "
                     "(SPU_FN_REGISTRY_MAX=%u) -- image %d function 0x%05X and all "
                     "later registrations DROPPED. Raise SPU_FN_REGISTRY_MAX.\n",
@@ -1367,6 +1368,40 @@ void spu_register_function(uint32_t addr, spu_fn fn)
     s_registry[i].addr = addr;
     s_registry[i].fn = fn;
     s_registry[i].image_id = s_reg_image;
+    s_registry_count = i + 1;
+    uint32_t h = spu_fn_hash(addr);
+    s_hash_next[i] = 0;
+    if (s_hash_head[h] == 0)
+        s_hash_head[h] = i + 1;
+    else
+        s_hash_next[s_hash_tail[h] - 1] = i + 1;
+    s_hash_tail[h] = i + 1;
+}
+
+void spu_register_function_img(int32_t image, uint32_t addr, spu_fn fn)
+{
+    if (s_registry_count >= SPU_FN_REGISTRY_MAX) {
+        /* Silent truncation here dropped whole late-registered SPU images and
+         * cost a multi-round hunt (the branch-to-0 looked like a lifter/overlay
+         * bug). Never again: say so, once, loudly, with the number to raise the
+         * cap to. */
+        static int warned = 0;
+        if (!warned) {
+            warned = 1;
+            ps3_log(
+                "[spu] FATAL: SPU function registry full at %u entries "
+                "(SPU_FN_REGISTRY_MAX=%u) -- image %d function 0x%05X and all "
+                "later registrations DROPPED. Raise SPU_FN_REGISTRY_MAX.\n",
+                s_registry_count, (unsigned)SPU_FN_REGISTRY_MAX,
+                s_reg_image, addr);
+            fflush(stderr);
+        }
+        return;
+    }
+    uint32_t i = s_registry_count;
+    s_registry[i].addr = addr;
+    s_registry[i].fn = fn;
+    s_registry[i].image_id = image;
     s_registry_count = i + 1;
     uint32_t h = spu_fn_hash(addr);
     s_hash_next[i] = 0;
@@ -1409,7 +1444,7 @@ static void spu_report_cross_image(uint32_t addr, int want, int got)
         seen[n_seen].addr = addr; seen[n_seen].want = want; seen[n_seen].got = got;
         n_seen++;
     }
-    fprintf(stderr,
+    ps3_log(
             "[spu] CROSS-IMAGE dispatch: LS 0x%05X requested by image %d, served "
             "by image %d's function (id-0 wildcard). If this job was loaded at a "
             "runtime-chosen base, it may be running the WRONG program -- see "
@@ -1613,7 +1648,7 @@ static void spu_ovl_dump(spu_context* ctx, uint32_t ea, uint32_t lsa, const uint
         t_src = ea;
         snprintf(path, sizeof path, "%s/ovl_%08X.bin", s_dir, ea);
         f = fopen(path, "wb");
-        fprintf(stderr, "[spu-ovl-dump] img=%d body ea=0x%08X size=%u -> %s\n", ctx->image_id, ea, size, path);
+        ps3_log("[spu-ovl-dump] img=%d body ea=0x%08X size=%u -> %s\n", ctx->image_id, ea, size, path);
     } else if (t_src && ea == t_next_ea && lsa == t_next_lsa) {
         snprintf(path, sizeof path, "%s/ovl_%08X.bin", s_dir, t_src);
         f = fopen(path, "ab");
@@ -1638,7 +1673,7 @@ void spu_lockguard_check(spu_context* ctx, uint32_t ea, const uint8_t* src, uint
     unsigned ns = (n[0] << 8) | n[1], nn = (n[2] << 8) | n[3];
     int bad = !(ns == os || ns == ((os + 1) & 0xFFFF)) || !(nn == on || nn == ((on + 1) & 0xFFFF));
     if (bad) { static int c; if (c++ < 32)
-        fprintf(stderr, "[lockguard] %s img=%d pc=0x%05X ea=0x%08X size=%u: %04X/%04X -> %04X/%04X\n",
+        ps3_log("[lockguard] %s img=%d pc=0x%05X ea=0x%08X size=%u: %04X/%04X -> %04X/%04X\n",
                 what, ctx ? ctx->image_id : -1, ctx ? (unsigned)(ctx->pc & SPU_LS_MASK) : 0u,
                 ea, size, os, on, ns, nn); }
 }
@@ -1671,13 +1706,13 @@ void spu_overlay_note_get(spu_context* ctx, uint32_t ea, const uint8_t* ls, uint
                     ctx->resident_code[slot].image_id = o->image_id;
                     return;
                 }
-                fprintf(stderr, "[spu-ovl] no free resident code span for image %d\n", o->image_id);
+                ps3_log("[spu-ovl] no free resident code span for image %d\n", o->image_id);
                 return;
             }
             if (ctx->resident_ovl != o->image_id) {
                 ctx->resident_ovl = o->image_id;
                 { static int _n = 0; if (_n++ < 32)
-                    fprintf(stderr, "[spu-ovl] img=%d streamed overlay src=0x%08X "
+                    ps3_log("[spu-ovl] img=%d streamed overlay src=0x%08X "
                             "-> LS 0x%05X size=%u -> resident ovl image %d%s\n",
                             ctx->image_id, ea, (uint32_t)(ls - ctx->ls), size,
                             ctx->resident_ovl, o->has_sig ? " (sig match)" : ""); }
@@ -1736,7 +1771,7 @@ static void spu_ef_deliver_owed(spu_context* ctx, uint32_t wobj)
         m[0x30 + 2*s + 1] = (uint8_t)bits;
     }
     { static int _n = 0; if (_n++ < 8)
-        fprintf(stderr, "[spu] delivered owed bits=0x%04X to object 0x%08X \n",
+        ps3_log("[spu] delivered owed bits=0x%04X to object 0x%08X \n",
                 (unsigned)bits, wobj); }
 }
 
@@ -1749,7 +1784,7 @@ void spu_spurs_taskset_syscall(spu_context* ctx)   /* non-static: also called by
     static int s_si = -2;
     if (s_si == -2) { const char* e = getenv("SPU_SYSCALL_IMG"); s_si = e ? atoi(e) : -1; }
     { static int _n = 0; if (_n++ < 24 || ctx->image_id == s_si)
-        fprintf(stderr, "[spu] SPURS taskset syscall num=%u (raw=0x%X args=0x%08X) image=%d link/r0=0x%05X wobj@2FDC=0x%02X%02X%02X%02X\n",
+        ps3_log("[spu] SPURS taskset syscall num=%u (raw=0x%X args=0x%08X) image=%d link/r0=0x%05X wobj@2FDC=0x%02X%02X%02X%02X\n",
                 num, raw, ctx->gpr[4]._u32[0], ctx->image_id, ctx->gpr[0]._u32[0] & SPU_LS_MASK,
                 ctx->ls[0x2FDC], ctx->ls[0x2FDD], ctx->ls[0x2FDE], ctx->ls[0x2FDF]); }
     /* The task-API argument is passed in LOCAL STORE at 0x2FD0, not in r4: the
@@ -1759,11 +1794,11 @@ void spu_spurs_taskset_syscall(spu_context* ctx)   /* non-static: also called by
     { static int s_sa = -1; if (s_sa < 0) s_sa = getenv("YDKJ_SYSCALL_ARG") ? 1 : 0;
       if (s_sa) { static int _n = 0; if (_n++ < 40) {
         const uint8_t* a = &ctx->ls[0x2FD0];
-        fprintf(stderr, "[spu] syscall num=%u LS[0x2FD0]=%02X%02X%02X%02X %02X%02X%02X%02X"
+        ps3_log("[spu] syscall num=%u LS[0x2FD0]=%02X%02X%02X%02X %02X%02X%02X%02X"
                         " %02X%02X%02X%02X %02X%02X%02X%02X img=%d\n",
                 num, a[0],a[1],a[2],a[3], a[4],a[5],a[6],a[7],
                 a[8],a[9],a[10],a[11], a[12],a[13],a[14],a[15], ctx->image_id);
-        fflush(stderr); } } }
+        } } }
     /* NOTE (YDKJ cri_mpv): the cri task's BOOTSTRAP (func_00003040) calls the
      * task-API syscall and EXPECTS IT TO RETURN, then branches to the real task
      * entry (0x3050). Halting on num=0 here kills the task at bootstrap before it
@@ -1782,7 +1817,7 @@ void spu_spurs_taskset_syscall(spu_context* ctx)   /* non-static: also called by
     if (num == 0 && ctx->image_id == 22 && !getenv("YDKJ_CRI_EXIT_HALT")) {
         if (s_exit_seen++ == 0) { ctx->gpr[3]._u32[0] = 0; return; }   /* bootstrap */
         { static int _n = 0; if (_n++ < 8)
-            fprintf(stderr, "[spu] cri task EXIT #%d -- halting (was spinning)\n",
+            ps3_log("[spu] cri task EXIT #%d -- halting (was spinning)\n",
                     s_exit_seen); }
         ctx->status = SPU_STATUS_STOPPED_BY_STOP;
         spu_halt(ctx);
@@ -1841,7 +1876,7 @@ void spu_spurs_taskset_syscall(spu_context* ctx)   /* non-static: also called by
                   spurs_ef_set_from_spu(wobj + 0x100u, 1);
                   static int _n = 0;
                   if (_n++ < 8)
-                      fprintf(stderr, "[spu] SPU-REPLY: set flag 0x%08X for object "
+                      ps3_log("[spu] SPU-REPLY: set flag 0x%08X for object "
                                       "0x%08X (cycle complete)\n", wobj + 0x100u, wobj);
               }
           } }
@@ -2034,7 +2069,7 @@ static int spu_smc_microstep(spu_context* ctx)
          * decompression job it was running never completes. */
         { static int _n = 0;
           if (_n++ < 8)
-              fprintf(stderr, "[spu-smc] microstep img=%d pc=0x%05X word 0x%08X not in the"
+              ps3_log("[spu-smc] microstep img=%d pc=0x%05X word 0x%08X not in the"
                       " microstep set -- handing to the interpreter (steps=%d)\n",
                       ctx->image_id, pc, w, steps); }
         ctx->pc = pc;
@@ -2044,7 +2079,7 @@ static int spu_smc_microstep(spu_context* ctx)
         return spu_interp_run_until(ctx, pc, ctx->drain_ret_pc) ? 1 : 0;
     }
     { static int _n = 0; if (_n++ < 4)
-        fprintf(stderr, "[spu-smc] microstep img=%d runaway (4096 steps from 0x%05X)\n",
+        ps3_log("[spu-smc] microstep img=%d runaway (4096 steps from 0x%05X)\n",
                 ctx->image_id, ctx->pc & SPU_LS_MASK); }
     return 0;
 }
@@ -2066,7 +2101,7 @@ void spu_indirect_branch(spu_context* ctx)
           static int s_it = -1; if (s_it < 0) s_it = getenv("SPU_IRQTRACE") ? 1 : 0;
           static int _r = 0;
           if (s_it && _r++ < 200)
-              fprintf(stderr, "[irq] IRET restore at srr0=0x%05X\n", ctx->pc & SPU_LS_MASK);
+              ps3_log("[irq] IRET restore at srr0=0x%05X\n", ctx->pc & SPU_LS_MASK);
       } }
     /* SPURS kernel services (policy-module runs only): the HLE kernel plants
      * these two reserved addresses as exitToKernelAddr / selectWorkloadAddr in
@@ -2080,7 +2115,7 @@ void spu_indirect_branch(spu_context* ctx)
             { static int s_t = -1; if (s_t < 0) s_t = getenv("SPURS_PM_TRACE") ? 1 : 0;
               if (s_t) { static unsigned long _n = 0; unsigned long n = ++_n;
                 if (n <= 64 || (n & 0xFFF) == 0)
-                    fprintf(stderr, "[spurs-pm] exit-to-kernel#%lu (r3=0x%08X polls=%u)\n",
+                    ps3_log("[spurs-pm] exit-to-kernel#%lu (r3=0x%08X polls=%u)\n",
                             n, ctx->gpr[3]._u32[0], g_spurs_pm_polls); } }
             ctx->status = SPU_STATUS_STOPPED_BY_STOP;
             spu_halt(ctx);
@@ -2091,7 +2126,7 @@ void spu_indirect_branch(spu_context* ctx)
              * (One virtual SPU per workload here, so nothing ever preempts.) */
             unsigned n = ++g_spurs_pm_polls;
             if (n <= 4 || (n % 4096) == 0)
-                fprintf(stderr, "[spurs-pm] poll #%u (r3=0x%08X) -> continue\n",
+                ps3_log("[spurs-pm] poll #%u (r3=0x%08X) -> continue\n",
                         n, ctx->gpr[3]._u32[0]);
             ctx->gpr[3] = spu_make_preferred_u32(0);
             ctx->pc = ctx->gpr[0]._u32[0] & SPU_LS_MASK;
@@ -2142,7 +2177,7 @@ void spu_indirect_branch(spu_context* ctx)
             ctx->ls[0x27B8]=0x00; ctx->ls[0x27B9]=0x00; ctx->ls[0x27BA]=0x00; ctx->ls[0x27BB]=0x00;
             ctx->ls[0x27BC]=(uint8_t)(ts>>24); ctx->ls[0x27BD]=(uint8_t)(ts>>16); ctx->ls[0x27BE]=(uint8_t)(ts>>8); ctx->ls[0x27BF]=(uint8_t)ts;
             if (ctx->pc == 0xA00u) { static int _n=0; if (_n++ < 4)
-                fprintf(stderr, "[cri-r4] policy entry pc=0xA00: forced ctxt->taskset LS[0x27B8]=0x0F000000\n"); }
+                ps3_log("[cri-r4] policy entry pc=0xA00: forced ctxt->taskset LS[0x27B8]=0x0F000000\n"); }
         }
     }
     /* SPU_IBCOV: image-3 (Bink SPU) PC-page coverage. Track which 0x1000-byte LS
@@ -2160,13 +2195,13 @@ void spu_indirect_branch(spu_context* ctx)
         if (newp || (hits % 200000) == 0) {
             char line[400]; int p = snprintf(line, sizeof line, "[ibcov3] hits=%llu tgt=0x%05X pages:", (unsigned long long)hits, ctx->pc & 0x3FFFF);
             for (int i = 0; i < 64; i++) if (pages[i]) p += snprintf(line+p, sizeof(line)-p, " 0x%X", i<<12);
-            fprintf(stderr, "%s\n", line); }
+            ps3_log("%s\n", line); }
       } }
     { static int s_t = -1; if (s_t < 0) s_t = getenv("SPU_POLLTRACE") ? 1 : 0;
       if (s_t) { static uint64_t s_n = 0; static uint32_t s_last = 0; static uint64_t s_run = 0;
         if (ctx->pc == s_last) s_run++; else { s_last = ctx->pc; s_run = 1; }
         if ((++s_n % 2000000) == 0)
-          fprintf(stderr, "[ibranch] %llu indirect branches; current target=0x%05X run=%llu\n",
+          ps3_log("[ibranch] %llu indirect branches; current target=0x%05X run=%llu\n",
                   (unsigned long long)s_n, ctx->pc, (unsigned long long)s_run); } }
     /* Policy-entry trace: the SPURS policy at LS 0xA00 branches on
      * r8 = word at LS[r6] (must be 32 for the path that sets the dispatch ptr
@@ -2179,7 +2214,7 @@ void spu_indirect_branch(spu_context* ctx)
             uint32_t r80=ctx->gpr[80]._u32[0] & SPU_LS_MASK;
             const uint8_t* q = ctx->ls + ((r80+0xC0)&SPU_LS_MASK);
             uint32_t ctxw = ((uint32_t)q[0]<<24)|((uint32_t)q[1]<<16)|((uint32_t)q[2]<<8)|q[3];
-            fprintf(stderr, "[POLTRACE] policy@0xA00 r3=%08X r4=%08X r80=%08X  LS[r80+0xC0]=%08X\n",
+            ps3_log("[POLTRACE] policy@0xA00 r3=%08X r4=%08X r80=%08X  LS[r80+0xC0]=%08X\n",
                 ctx->gpr[3]._u32[0], ctx->gpr[4]._u32[0], r80, ctxw);
             fflush(stderr);
         } }
@@ -2235,7 +2270,7 @@ void spu_indirect_branch(spu_context* ctx)
     if (!ctx->policy_mode && ctx->pc == SPU_JOB_RETURN_LS) {
         static int _n = 0;
         if (_n++ < 4)
-            fprintf(stderr, "[spurs-job] img=%d returned to the job manager \n",
+            ps3_log("[spurs-job] img=%d returned to the job manager \n",
                     ctx->image_id);
         spu_halt(ctx);
         return;
@@ -2274,7 +2309,7 @@ void spu_indirect_branch(spu_context* ctx)
                 ctx->stop_code = w & 0x3FFFu;
                 static int _n = 0;
                 if (_n++ < 8)
-                    fprintf(stderr, "[spu] img=%d exit: synthesised stop 0x%04X at LS 0x%05X\n",
+                    ps3_log("[spu] img=%d exit: synthesised stop 0x%04X at LS 0x%05X\n",
                             ctx->image_id, ctx->stop_code, p0);
                 spu_halt(ctx);
                 return;
@@ -2288,27 +2323,28 @@ void spu_indirect_branch(spu_context* ctx)
         for (int i = 0; i < n_seen; i++) if (seen[i] == ctx->pc) { known = 1; break; }
         if (!known && n_seen < 16) {
             seen[n_seen++] = ctx->pc;
-            fprintf(stderr, "[spu] img=%d branched into unlifted LS 0x%05X "
+            ps3_log("[spu] img=%d branched into unlifted LS 0x%05X "
                     "(lr=0x%05X) -- ending the job\n",
                     ctx->image_id, ctx->pc, ctx->gpr[0]._u32[0] & SPU_LS_MASK);
-            { fprintf(stderr, "      last dispatched PCs (oldest first):");
+            abort();
+            { ps3_log("      last dispatched PCs (oldest first):");
               for (unsigned q = 0; q < 8; q++) {
                   unsigned idx = (g_spu_pch_n + q) & 7u;
-                  if (g_spu_pch_n > q || g_spu_pch[idx]) fprintf(stderr, " 0x%05X", g_spu_pch[idx]);
+                  if (g_spu_pch_n > q || g_spu_pch[idx]) ps3_log(" 0x%05X", g_spu_pch[idx]);
               }
-              fprintf(stderr, "%c", 10); }
+              ps3_log("%c", 10); }
             /* Is there real code at the target, or is the pc garbage? Eight
              * words at the target and at the return address separate "the lift
              * missed a function" from "this branch should never have happened". */
             { uint32_t a[2]; a[0] = ctx->pc & SPU_LS_MASK;
               a[1] = ctx->gpr[0]._u32[0] & SPU_LS_MASK;
               for (int k = 0; k < 2; k++) {
-                  fprintf(stderr, "      LS[0x%05X]:", a[k]);
+                  ps3_log("      LS[0x%05X]:", a[k]);
                   for (uint32_t o = 0; o < 32 && a[k] + o + 3 < SPU_LS_SIZE; o += 4)
-                      fprintf(stderr, " %02X%02X%02X%02X",
+                      ps3_log(" %02X%02X%02X%02X",
                               ctx->ls[a[k]+o], ctx->ls[a[k]+o+1],
                               ctx->ls[a[k]+o+2], ctx->ls[a[k]+o+3]);
-                  fprintf(stderr, "\n");
+                  ps3_log("\n");
               } }
             fflush(stderr);
         }
@@ -2327,7 +2363,7 @@ void spu_indirect_branch(spu_context* ctx)
           if (s_iu && w0) {
               static int _n = 0;
               if (_n++ < 8)
-                  fprintf(stderr, "[spu] img=%d interpreting unlifted LS 0x%05X "
+                  ps3_log("[spu] img=%d interpreting unlifted LS 0x%05X "
                           "(runtime-loaded code)\n", ctx->image_id, p);
               spu_interp_run(ctx, p);
               return;
@@ -2350,7 +2386,7 @@ void spu_indirect_branch(spu_context* ctx)
                 if (ctx->resident_ovl != img) {
                     ctx->resident_ovl = img;
                     static int _n = 0; if (_n++ < 32)
-                        fprintf(stderr, "[spu-ovl] WWS job module resident: codeBase=0x%05X "
+                        ps3_log("[spu-ovl] WWS job module resident: codeBase=0x%05X "
                                 "pc=0x%05X -> overlay image %d\n", codeBase, ctx->pc & SPU_LS_MASK, img);
                 }
                 fn = spu_lookup(ctx->pc, img);
@@ -2398,7 +2434,7 @@ void spu_indirect_branch(spu_context* ctx)
             uint32_t runJob  = (uint32_t)ctx->ls[0x12E0]<<24 | ctx->ls[0x12E1]<<16 |
                                ctx->ls[0x12E2]<<8 | ctx->ls[0x12E3];
             const uint8_t* bs = ctx->ls + 0xDF0;   /* g_WwsJob_bufferSetArray */
-            fprintf(stderr, "[pm-jobres] pc=0x%05X lsaJobCodeBuffer(0x1330)=0x%08X "
+            ps3_log("[pm-jobres] pc=0x%05X lsaJobCodeBuffer(0x1330)=0x%08X "
                     "runJobNum(0x12E0)=0x%08X code@14400:%02X%02X%02X%02X\n"
                     "           bufferSetArray[0xDF0]: %02X%02X%02X%02X %02X%02X%02X%02X "
                     "%02X%02X%02X%02X %02X%02X%02X%02X\n",
@@ -2429,17 +2465,17 @@ void spu_indirect_branch(spu_context* ctx)
         static int _armed = 0;
         if (p >= 0x4000) _armed = 1;
         if (_armed && _n++ < 1500) {
-            fprintf(stderr, "[jobtrace] pc=0x%05X lr=0x%05X%s",
+            ps3_log("[jobtrace] pc=0x%05X lr=0x%05X%s",
                     p, ctx->gpr[0]._u32[0] & SPU_LS_MASK,
                     fn ? "" : " (no lift)");
             /* JobApi entries: args r3-r5. Post-job return 0x3308: result r3 +
              * the job's saved GetBufferTag result r80. */
             if (p == 0x2F30 || p == 0x1700 || p == 0x1770 || p == 0x17C8)
-                fprintf(stderr, " args r3=%08X.%08X r4=%08X r5=%08X",
+                ps3_log(" args r3=%08X.%08X r4=%08X r5=%08X",
                         ctx->gpr[3]._u32[0], ctx->gpr[3]._u32[1],
                         ctx->gpr[4]._u32[0], ctx->gpr[5]._u32[0]);
             if (p == 0x3308 || p == 0x3258)
-                fprintf(stderr, " r3=%08X.%08X.%08X.%08X r80=%08X.%08X",
+                ps3_log(" r3=%08X.%08X.%08X.%08X r80=%08X.%08X",
                         ctx->gpr[3]._u32[0], ctx->gpr[3]._u32[1],
                         ctx->gpr[3]._u32[2], ctx->gpr[3]._u32[3],
                         ctx->gpr[80]._u32[0], ctx->gpr[80]._u32[1]);
@@ -2447,14 +2483,14 @@ void spu_indirect_branch(spu_context* ctx)
              * entry; if wrong here, something clobbered it ACROSS the
              * GetLogicalBuffer call (interrupt delivery?). */
             if (p == 0x2F6C)
-                fprintf(stderr, " r8=%08X r10=%08X r13=%08X r15=%08X int=%d",
+                ps3_log(" r8=%08X r10=%08X r13=%08X r15=%08X int=%d",
                         ctx->gpr[8]._u32[0], ctx->gpr[10]._u32[0],
                         ctx->gpr[13]._u32[0], ctx->gpr[15]._u32[0],
                         ctx->int_enable);
             if (p == 0x3030)   /* final BufferTag in r7 (result) */
-                fprintf(stderr, " BufferTag r7=%08X.%08X",
+                ps3_log(" BufferTag r7=%08X.%08X",
                         ctx->gpr[7]._u32[0], ctx->gpr[7]._u32[1]);
-            fprintf(stderr, "\n");
+            ps3_log("\n");
         }
       } }
     /* LBP_HLE_JOBDONE=1: HLE the WWS job COMPLETION. Our lifted SPURS PM never
@@ -2480,7 +2516,7 @@ void spu_indirect_branch(spu_context* ctx)
                     if (vm_base[w]==0 && vm_base[w+1]==0 && vm_base[w+2]==0 && vm_base[w+3]==0) {
                         vm_base[w+3] = 1;
                         static int _n = 0; if (_n++ < 24)
-                            fprintf(stderr, "[hle-jobdone] wrote completion 0x%08X=1 (job overlay %d)\n",
+                            ps3_log("[hle-jobdone] wrote completion 0x%08X=1 (job overlay %d)\n",
                                     w, ctx->resident_ovl);
                         wrote++;
                     }
@@ -2492,7 +2528,7 @@ void spu_indirect_branch(spu_context* ctx)
         static int s_je = -1;
         if (s_je < 0) { const char* e = getenv("SPU_JOBEXEC"); s_je = e ? 1 : 0; }
         if (s_je) { static int _n = 0; if (_n++ < 24)
-            fprintf(stderr, "[jobexec] DISPATCH job code pc=0x%05X overlay=%d "
+            ps3_log("[jobexec] DISPATCH job code pc=0x%05X overlay=%d "
                     "runJobNum=0x%02X%02X%02X%02X\n",
                     ctx->pc & SPU_LS_MASK, ctx->resident_ovl,
                     ctx->ls[0x12E0], ctx->ls[0x12E1], ctx->ls[0x12E2], ctx->ls[0x12E3]);
@@ -2504,7 +2540,7 @@ void spu_indirect_branch(spu_context* ctx)
               const char* dp = getenv("SPU_JOBEXEC_DUMP");
               if (dp) { FILE* f = fopen(dp, "wb");
                   if (f) { fwrite(ctx->ls, 1, SPU_LS_SIZE, f); fclose(f);
-                      fprintf(stderr, "[jobexec] dumped LS at job entry -> %s\n", dp); }
+                      ps3_log("[jobexec] dumped LS at job entry -> %s\n", dp); }
                   s_dumped = 1; } } }
     }
     if (fn) {
@@ -2539,7 +2575,7 @@ void spu_indirect_branch(spu_context* ctx)
         (ctx->gpr[0]._u32[0] & SPU_LS_MASK) < 0x3700) {
         static int _n = 0;
         if (_n++ < 8)
-            fprintf(stderr, "[wws-jobret] staged job returned to kernel (LS 0); "
+            ps3_log("[wws-jobret] staged job returned to kernel (LS 0); "
                     "resuming PM at link 0x%05X\n", ctx->gpr[0]._u32[0] & SPU_LS_MASK);
         ctx->pc = ctx->gpr[0]._u32[0] & SPU_LS_MASK;
         spu_indirect_branch(ctx);      /* re-dispatch at the rewritten pc */
@@ -2563,7 +2599,7 @@ void spu_indirect_branch(spu_context* ctx)
     if (!ctx->policy_mode && ctx->pc == 0 && ctx->image_id > 0) {
         static int _n = 0;
         if (_n++ < 8)
-            fprintf(stderr, "[spurs-job] img=%d returned to the job manager "
+            ps3_log("[spurs-job] img=%d returned to the job manager "
                     "(branch to LS 0) -- job complete\n", ctx->image_id);
         spu_halt(ctx);
         return;
@@ -2576,7 +2612,7 @@ void spu_indirect_branch(spu_context* ctx)
         if (_n < 12) {
             _n++;
             const uint8_t* p = ctx->ls + (ctx->pc & SPU_LS_MASK);
-            fprintf(stderr, "[wws-jobentry] pc=0x%05X lr=0x%05X bytes:"
+            ps3_log("[wws-jobentry] pc=0x%05X lr=0x%05X bytes:"
                     " %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X\n",
                     ctx->pc & SPU_LS_MASK, ctx->gpr[0]._u32[0] & SPU_LS_MASK,
                     p[0],p[1],p[2],p[3], p[4],p[5],p[6],p[7],
@@ -2588,7 +2624,7 @@ void spu_indirect_branch(spu_context* ctx)
             { const uint8_t* q = ctx->ls + 0x14400;
               const uint8_t* r1 = ctx->ls + 0x1320;
               const uint8_t* r2 = ctx->ls + 0x1440;
-              fprintf(stderr, "[wws-jobentry]   LS14400: %02X%02X%02X%02X %02X%02X%02X%02X"
+              ps3_log("[wws-jobentry]   LS14400: %02X%02X%02X%02X %02X%02X%02X%02X"
                       "  LS1320: %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X"
                       "  LS1440: %02X%02X%02X%02X %02X%02X%02X%02X\n",
                       q[0],q[1],q[2],q[3], q[4],q[5],q[6],q[7],
@@ -2613,7 +2649,7 @@ void spu_indirect_branch(spu_context* ctx)
       unsigned img = (ctx->image_id >= 0 && ctx->image_id < BT0_MAX_IMG)
                      ? (unsigned)ctx->image_id : 0;
       if (_bt0[img]++ < BT0_PER_IMG)
-        fprintf(stderr, "[SPU] BRANCH-TO-0 unresolved pc=0x%05X image=%d lr=0x%05X\n",
+        ps3_log("[SPU] BRANCH-TO-0 unresolved pc=0x%05X image=%d lr=0x%05X\n",
                 ctx->pc, ctx->image_id, ctx->gpr[0]._u32[0] & SPU_LS_MASK); }
     /* One-shot: the FMOD null-handler DSP node carries a PPU descriptor EA at
      * node+0x14 (observed 0x93C3C0). Dump it to identify which plugin/unit
@@ -2623,11 +2659,11 @@ void spu_indirect_branch(spu_context* ctx)
         _ea = e ? (uint32_t)strtoul(e, 0, 16) : 0; _d = _ea ? 1 : 0; }
       if (_d == 1) { _d = 2;
         extern uint8_t* vm_base;
-        fprintf(stderr, "[dspdesc] RAM[0x%08X]:", _ea);
+        ps3_log("[dspdesc] RAM[0x%08X]:", _ea);
         for (int k = 0; k < 0x60; k += 4)
-            fprintf(stderr, " %02X%02X%02X%02X", vm_base[_ea+k], vm_base[_ea+k+1],
+            ps3_log(" %02X%02X%02X%02X", vm_base[_ea+k], vm_base[_ea+k+1],
                     vm_base[_ea+k+2], vm_base[_ea+k+3]);
-        fprintf(stderr, "\n"); fflush(stderr); } }
+        ps3_log("\n"); fflush(stderr); } }
     /* SPU_MISS_DUMP_IMG=<n>: reserve the deep-dump budget for image n's misses
      * (the global 2-shot budget was always consumed by an earlier image's
      * misses, hiding the one under investigation). Unset = old behavior. */
@@ -2637,15 +2673,15 @@ void spu_indirect_branch(spu_context* ctx)
       static int _n=0;
       uint32_t misspc = ctx->pc & SPU_LS_MASK;
       if ((s_img < 0 || ctx->image_id == s_img) && misspc >= s_pcmin && _n++ < 2) {
-        fprintf(stderr, "[SPU] branch-to-0 lr=0x%05X r1=0x%05X\n",
+        ps3_log("[SPU] branch-to-0 lr=0x%05X r1=0x%05X\n",
                 ctx->gpr[0]._u32[0] & SPU_LS_MASK, ctx->gpr[1]._u32[0] & SPU_LS_MASK);
 #ifdef _WIN32
         void* frames[24]; unsigned short fn = RtlCaptureStackBackTrace(0, 24, frames, NULL);
         char* base = (char*)GetModuleHandleA(NULL);
-        fprintf(stderr, "[SPU] host bt RVAs:");
+        ps3_log("[SPU] host bt RVAs:");
         for (unsigned short i = 0; i < fn; i++)
-            fprintf(stderr, " 0x%zX", (size_t)((char*)frames[i] - base));
-        fprintf(stderr, "\n");
+            ps3_log(" 0x%zX", (size_t)((char*)frames[i] - base));
+        ps3_log("\n");
 #endif
         /* State-diff oracle: dump full LS + all GPRs at the branch-to-0 so it can
          * be compared byte-for-byte against the RPCS3 savestate LS of the same
@@ -2654,18 +2690,18 @@ void spu_indirect_branch(spu_context* ctx)
         if (!dp || !*dp) dp = "recomp_spu_ls.bin";
         FILE* lf = fopen(dp, "wb");
         if (lf) { fwrite(ctx->ls, 1, SPU_LS_SIZE, lf); fclose(lf);
-                  fprintf(stderr, "[SPU] dumped 256KB LS -> %s\n", dp); }
-        fprintf(stderr, "[SPU] image_id=%d  GPR dump (r0..r127, hi64:lo64 of each quadword, preferred slot = _u32[0]):\n", ctx->image_id);
+                  ps3_log("[SPU] dumped 256KB LS -> %s\n", dp); }
+        ps3_log("[SPU] image_id=%d  GPR dump (r0..r127, hi64:lo64 of each quadword, preferred slot = _u32[0]):\n", ctx->image_id);
         for (int g = 0; g < 128; g++) {
-            fprintf(stderr, " r%-3d=%08X %08X %08X %08X", g,
+            ps3_log(" r%-3d=%08X %08X %08X %08X", g,
                     ctx->gpr[g]._u32[0], ctx->gpr[g]._u32[1],
                     ctx->gpr[g]._u32[2], ctx->gpr[g]._u32[3]);
-            if ((g & 1) == 1) fprintf(stderr, "\n");
+            if ((g & 1) == 1) ps3_log("\n");
         }
-        fprintf(stderr, "\n");
+        ps3_log("\n");
         /* echo the dispatch chain values the way func_00026DE0 computes them */
         { uint32_t bec0 = ctx->ls[0xBEC0]<<24 | ctx->ls[0xBEC1]<<16 | ctx->ls[0xBEC2]<<8 | ctx->ls[0xBEC3];
-          fprintf(stderr, "[SPU] LS[0xBEC0].w0=0x%08X  LS[0x2d4e0:16]=%02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X\n",
+          ps3_log("[SPU] LS[0xBEC0].w0=0x%08X  LS[0x2d4e0:16]=%02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X\n",
             bec0,
             ctx->ls[0x2d4e0],ctx->ls[0x2d4e1],ctx->ls[0x2d4e2],ctx->ls[0x2d4e3],
             ctx->ls[0x2d4e4],ctx->ls[0x2d4e5],ctx->ls[0x2d4e6],ctx->ls[0x2d4e7],

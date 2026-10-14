@@ -54,6 +54,8 @@
 #include "../../runtime/ppu/ppu_memory.h"
 #include "../../runtime/memory/vm.h"          /* VM_HLE_INJECT_BASE */
 #include "../../include/ps3emu/error_codes.h"
+#include "ps3emu/logging.h"
+
 #include "cellGcmSys.h"
 
 #include <stdio.h>
@@ -219,8 +221,8 @@ void rsx_raise_user_cmd(uint32_t arg)
        * between the two halves of the deadlock. */
       if (n++ < 4 || (n % 256) == 0) {
           uint32_t mask = vm_read32(RSX_DRIVER_INFO_EA + RSX_DI_HANDLERS);
-          fprintf(stderr, "[usercmd] #%lu arg=0x%08X handlers=0x%X qid=%u\n",
-                  n, arg, mask, s_isr_qid); fflush(stderr); } }
+          ps3_log("[usercmd] #%lu arg=0x%08X handlers=0x%X qid=%u\n",
+                  n, arg, mask, s_isr_qid); } }
     vm_write32(RSX_DRIVER_INFO_EA + RSX_DI_USER_CMD_PARAM, arg);
     rsx_send_event(SYS_RSX_EVENT_USER_CMD);
 }
@@ -230,11 +232,11 @@ static void rsx_isr_queue_bringup(void)
     if (s_isr_qid) return;
     s_isr_qid = sys_event_queue_create_direct(RSX_ISR_QUEUE_KEY, 0x20);
     if (!s_isr_qid) {
-        fprintf(stderr, "[sys_rsx] could not create the gcm ISR event queue\n");
+        ps3_log("[sys_rsx] could not create the gcm ISR event queue\n");
         return;
     }
     vm_write32(RSX_DRIVER_INFO_EA + RSX_DI_HANDLER_QUEUE, s_isr_qid);
-    fprintf(stderr, "[sys_rsx] gcm ISR queue id=%u published at driver_info+0x12D0\n",
+    ps3_log("[sys_rsx] gcm ISR queue id=%u published at driver_info+0x12D0\n",
             s_isr_qid);
 }
 
@@ -263,7 +265,7 @@ static int64_t sc_rsx_memory_allocate(ppu_context* ctx)
     if (addr_ea) vm_write64(addr_ea, (uint64_t)local);
 
     if (rsx_dbg())
-        fprintf(stderr, "[sys_rsx] memory_allocate(size=0x%X flags=0x%X) -> "
+        ps3_log("[sys_rsx] memory_allocate(size=0x%X flags=0x%X) -> "
                         "local=0x%08X handle=0x%08X\n",
                 size, (u32)ctx->gpr[6], local, RSX_MEM_HANDLE);
     return CELL_OK;
@@ -300,7 +302,7 @@ static int64_t sc_rsx_context_allocate(ppu_context* ctx)
     if (di_ea)  vm_write64(di_ea,  (uint64_t)RSX_DRIVER_INFO_EA);
     if (rep_ea) vm_write64(rep_ea, (uint64_t)RSX_REPORTS_EA);
 
-    fprintf(stderr, "[sys_rsx] context_allocate -> id=0x%08X dma_control=0x%08X "
+    ps3_log("[sys_rsx] context_allocate -> id=0x%08X dma_control=0x%08X "
                     "(ctrl=0x%08X) driver_info=0x%08X reports=0x%08X mode=0x%llX\n",
             RSX_CONTEXT_ID, dma_control, cellGcm_control_guest_addr(),
             RSX_DRIVER_INFO_EA, RSX_REPORTS_EA,
@@ -321,7 +323,7 @@ static int64_t sc_rsx_context_iomap(ppu_context* ctx)
 
     cellGcm_syscall_iomap(ea, io, size);
     if (rsx_dbg())
-        fprintf(stderr, "[sys_rsx] iomap io=0x%08X <- ea=0x%08X size=0x%X\n",
+        ps3_log("[sys_rsx] iomap io=0x%08X <- ea=0x%08X size=0x%X\n",
                 io, ea, size);
     return CELL_OK;
 }
@@ -343,7 +345,7 @@ static int64_t sc_rsx_context_attribute(ppu_context* ctx)
     case 0x001:                       /* FIFO: a3 = put, a4 = get (IO offsets) */
         cellGcm_syscall_set_fifo((u32)a3, (u32)a4);
         if (rsx_dbg())
-            fprintf(stderr, "[sys_rsx] FIFO put=0x%08X get=0x%08X\n",
+            ps3_log("[sys_rsx] FIFO put=0x%08X get=0x%08X\n",
                     (u32)a3, (u32)a4);
         return CELL_OK;
 
@@ -367,7 +369,7 @@ static int64_t sc_rsx_context_attribute(ppu_context* ctx)
         for (int i = 0; i < n; i++) if (seen[i] == pkt) f = 1;
         if (!f && n < 32) {
             seen[n++] = pkt;
-            fprintf(stderr, "[sys_rsx] context_attribute packet 0x%03X accepted "
+            ps3_log("[sys_rsx] context_attribute packet 0x%03X accepted "
                             "(not emulated) a3=0x%llX a4=0x%llX a5=0x%llX\n",
                     pkt, (unsigned long long)a3, (unsigned long long)a4,
                     (unsigned long long)a5);
@@ -387,14 +389,14 @@ static int64_t sc_rsx_device_map(ppu_context* ctx)
 
     if (dev != 8) {
         if (rsx_dbg())
-            fprintf(stderr, "[sys_rsx] device_map(dev=%llu) -> not present\n",
+            ps3_log("[sys_rsx] device_map(dev=%llu) -> not present\n",
                     (unsigned long long)dev);
         return CELL_EINVAL;
     }
     if (a_ea) vm_write64(a_ea, (uint64_t)RSX_DEVICE_EA);
     if (b_ea) vm_write64(b_ea, 0);
     if (rsx_dbg())
-        fprintf(stderr, "[sys_rsx] device_map(dev=8) -> 0x%08X\n", RSX_DEVICE_EA);
+        ps3_log("[sys_rsx] device_map(dev=8) -> 0x%08X\n", RSX_DEVICE_EA);
     return CELL_OK;
 }
 

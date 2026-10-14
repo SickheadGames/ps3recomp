@@ -37,7 +37,7 @@ static int imejp_alloc(void)
 
 s32 cellImeJpOpen(const CellImeJpConfig* config, CellImeJpHandle* handle)
 {
-    printf("[cellImeJp] Open()\n");
+    ps3_log("[cellImeJp] Open()\n");
     if (!handle) return (s32)CELL_IMEJP_ERROR_INVALID_ARGUMENT;
 
     int slot = imejp_alloc();
@@ -55,7 +55,7 @@ s32 cellImeJpOpen(const CellImeJpConfig* config, CellImeJpHandle* handle)
 
 s32 cellImeJpClose(CellImeJpHandle handle)
 {
-    printf("[cellImeJp] Close(%u)\n", handle);
+    ps3_log("[cellImeJp] Close(%u)\n", handle);
     if (handle >= IMEJP_MAX_HANDLES || !s_slots[handle].in_use)
         return (s32)CELL_IMEJP_ERROR_INVALID_ARGUMENT;
 

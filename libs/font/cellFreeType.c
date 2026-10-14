@@ -19,7 +19,7 @@ static CellFreeTypeLibrary s_lib = 0;
 
 s32 cellFreeTypeInit(const CellFreeTypeConfig* config, CellFreeTypeLibrary* lib)
 {
-    printf("[cellFreeType] Init()\n");
+    ps3_log("[cellFreeType] Init()\n");
     (void)config;
 
     if (s_initialized)
@@ -33,7 +33,7 @@ s32 cellFreeTypeInit(const CellFreeTypeConfig* config, CellFreeTypeLibrary* lib)
 
 s32 cellFreeTypeEnd(CellFreeTypeLibrary lib)
 {
-    printf("[cellFreeType] End()\n");
+    ps3_log("[cellFreeType] End()\n");
     (void)lib;
     s_initialized = 0;
     s_lib = 0;

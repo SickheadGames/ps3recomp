@@ -15,6 +15,7 @@
 #include "../../runtime/memory/vm.h"   /* vm_commit */
 #include "cellAudio.h"
 #include "../../runtime/ppu/ppu_memory.h"   /* vm_base, vm_read64, vm_write32 */
+#include "ps3emu/logging.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -168,7 +169,7 @@ static int audio_backend_init(void)
 {
     if (SDL_WasInit(SDL_INIT_AUDIO) == 0) {
         if (SDL_InitSubSystem(SDL_INIT_AUDIO) < 0) {
-            printf("[cellAudio] SDL audio init failed: %s\n", SDL_GetError());
+            ps3_log("[cellAudio] SDL audio init failed: %s\n", SDL_GetError());
             return -1;
         }
     }
@@ -183,7 +184,7 @@ static int audio_backend_init(void)
 
     s_sdl_audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
     if (s_sdl_audio_dev == 0) {
-        printf("[cellAudio] SDL_OpenAudioDevice failed: %s\n", SDL_GetError());
+        ps3_log("[cellAudio] SDL_OpenAudioDevice failed: %s\n", SDL_GetError());
         return -1;
     }
 
@@ -240,7 +241,7 @@ static int audio_backend_init(void)
 
     hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     if (FAILED(hr) && hr != S_FALSE && hr != RPC_E_CHANGED_MODE) {
-        printf("[cellAudio] CoInitializeEx failed: 0x%08lX\n", hr);
+        ps3_print("[cellAudio] CoInitializeEx failed: 0x%08lX\n", hr);
         return -1;
     }
 
@@ -248,7 +249,7 @@ static int audio_backend_init(void)
     hr = CoCreateInstance(&CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
                           &IID_IMMDeviceEnumerator, (void**)&enumerator);
     if (FAILED(hr)) {
-        printf("[cellAudio] Failed to create device enumerator: 0x%08lX\n", hr);
+        ps3_print("[cellAudio] Failed to create device enumerator: 0x%08lX\n", hr);
         return -1;
     }
 
@@ -257,7 +258,7 @@ static int audio_backend_init(void)
                                                       eConsole, &device);
     enumerator->lpVtbl->Release(enumerator);
     if (FAILED(hr)) {
-        printf("[cellAudio] Failed to get default audio endpoint: 0x%08lX\n", hr);
+        ps3_print("[cellAudio] Failed to get default audio endpoint: 0x%08lX\n", hr);
         return -1;
     }
 
@@ -265,7 +266,7 @@ static int audio_backend_init(void)
                                    NULL, (void**)&s_wasapi_client);
     device->lpVtbl->Release(device);
     if (FAILED(hr)) {
-        printf("[cellAudio] Failed to activate audio client: 0x%08lX\n", hr);
+        ps3_print("[cellAudio] Failed to activate audio client: 0x%08lX\n", hr);
         return -1;
     }
 
@@ -295,7 +296,7 @@ static int audio_backend_init(void)
             AUDCLNT_SHAREMODE_SHARED,
             0, buf_duration, 0, &wfx, NULL);
         if (FAILED(hr)) {
-            printf("[cellAudio] WASAPI Initialize failed: 0x%08lX\n", hr);
+            ps3_print("[cellAudio] WASAPI Initialize failed: 0x%08lX\n", hr);
             s_wasapi_client->lpVtbl->Release(s_wasapi_client);
             s_wasapi_client = NULL;
             CloseHandle(s_wasapi_event);
@@ -313,7 +314,7 @@ static int audio_backend_init(void)
     hr = s_wasapi_client->lpVtbl->GetService(
         s_wasapi_client, &IID_IAudioRenderClient, (void**)&s_wasapi_render);
     if (FAILED(hr)) {
-        printf("[cellAudio] Failed to get render client: 0x%08lX\n", hr);
+        ps3_print("[cellAudio] Failed to get render client: 0x%08lX\n", hr);
         s_wasapi_client->lpVtbl->Release(s_wasapi_client);
         s_wasapi_client = NULL;
         return -1;
@@ -374,7 +375,7 @@ static int audio_backend_room(void)
         /* Device gone (AUDCLNT_E_DEVICE_INVALIDATED on a default-device
          * change, sleep, ...): pace on the clock rather than spin. */
         static int _n = 0; if (_n++ < 4)
-            fprintf(stderr, "[cellAudio] GetCurrentPadding failed 0x%08lX -- clock pacing%c", (unsigned long)hr, 10);
+            ps3_log("[cellAudio] GetCurrentPadding failed 0x%08lX -- clock pacing%c", (unsigned long)hr, 10);
         return -1;
     }
     return (int)(s_wasapi_buf_frames - padding);
@@ -429,7 +430,7 @@ static void audio_mix_one_block(void)
                 for (u32 s = 0; s < probe; s += 64) if (port->buffer[s] != 0.0f) { nz = 1; break; }
                 if (nz) {
                     warned[p] = 1;
-                    fprintf(stderr, "[cellAudio] port %d HAS DATA but never started"
+                    ps3_log("[cellAudio] port %d HAS DATA but never started"
                             " -- game withheld PortStart\n", p);
                 }
             }
@@ -463,7 +464,7 @@ static void audio_mix_one_block(void)
                     map[b] = nz ? '#' : '.';
                 }
                 map[b] = 0;
-                fprintf(stderr, "[audio-ring] port %d ridx=%llu blk=%u ring=[%s]\n",
+                ps3_log("[audio-ring] port %d ridx=%llu blk=%u ring=[%s]\n",
                         p, (unsigned long long)port->read_index, block_idx, map);
             } } }
 
@@ -538,7 +539,7 @@ static void audio_notify_event_queues(void)
 static unsigned __stdcall audio_mix_thread_func(void* arg)
 {
     (void)arg;
-    printf("[cellAudio] Mixing thread started\n");
+    ps3_log("[cellAudio] Mixing thread started\n");
 
     /* Pace to the device clock. The PS3 consumes one block every 5.33 ms;
      * the old Sleep(2)/Sleep(5) loop keyed on a queue depth the 1056-frame
@@ -572,7 +573,7 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
             for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) {
                 float a = s_mix_buffer[i]; if (a < 0) a = -a; if (a > pk) pk = a; }
             if ((++_n % 200) == 0 || (pk > 0.001f && _n < 40))
-                fprintf(stderr, "[audio-peak] block#%u peak=%.4f\n", _n, pk); } }
+                ps3_log("[audio-peak] block#%u peak=%.4f\n", _n, pk); } }
         /* AUDIO_WAV=<file>: append the final mix as raw f32le stereo 48 kHz
          * (ffmpeg -f f32le -ar 48000 -ac 2 -i <file>). */
         { static FILE* _wf = (FILE*)-1;
@@ -586,7 +587,7 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
             { int nz = 0; for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) if (s_mix_buffer[i] != 0.0f) { nz = 1; break; }
               if (!nz) z++; }
             if (now - t0 >= 5000) {
-                fprintf(stderr, "[audio-rate] %.1f blocks/s (real time 187.5), silent %.1f%%, dropped %.0f frames/s, device buf %u%c",
+                ps3_log("[audio-rate] %.1f blocks/s (real time 187.5), silent %.1f%%, dropped %.0f frames/s, device buf %u%c",
                         n * 1000.0 / (now - t0), n ? 100.0 * z / n : 0.0, (g_audio_dropped - d0) * 1000.0 / (now - t0),
                 #if AUDIO_BACKEND_WASAPI
                         (unsigned)s_wasapi_buf_frames, 10);
@@ -599,14 +600,14 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
         audio_notify_event_queues();
     }
 
-    printf("[cellAudio] Mixing thread stopped\n");
+    ps3_log("[cellAudio] Mixing thread stopped\n");
     return 0;
 }
 #else
 static void* audio_mix_thread_func(void* arg)
 {
     (void)arg;
-    printf("[cellAudio] Mixing thread started\n");
+    ps3_log("[cellAudio] Mixing thread started\n");
 
     while (s_mix_thread_running) {
         audio_mix_one_block();
@@ -621,7 +622,7 @@ static void* audio_mix_thread_func(void* arg)
         }
     }
 
-    printf("[cellAudio] Mixing thread stopped\n");
+    ps3_log("[cellAudio] Mixing thread stopped\n");
     return NULL;
 }
 #endif
@@ -681,10 +682,10 @@ s32 cellAudioInit(void)
      * waiting on work we cannot yet complete; failing here lets a title take its
      * silent path and keep going. Diagnostic first, workaround second. */
     if (getenv("PS3_NO_AUDIO")) {
-        printf("[cellAudio] PS3_NO_AUDIO -- reporting audio unavailable\n");
+        ps3_log("[cellAudio] PS3_NO_AUDIO -- reporting audio unavailable\n");
         return (s32)CELL_AUDIO_ERROR_NOT_INIT;
     }
-    printf("[cellAudio] Init()\n");
+    ps3_log("[cellAudio] Init()\n");
 
     if (s_audio_initialized)
         return CELL_AUDIO_ERROR_ALREADY_INIT;
@@ -694,7 +695,7 @@ s32 cellAudioInit(void)
     mutex_init(&s_audio_mutex);
 
     if (audio_backend_init() < 0) {
-        printf("[cellAudio] WARNING: Audio backend init failed, continuing silently\n");
+        ps3_log("[cellAudio] WARNING: Audio backend init failed, continuing silently\n");
         /* Don't fail -- games should still run without audio */
     }
 
@@ -709,7 +710,7 @@ s32 cellAudioInit(void)
       s_audio_start_us = (u64)ts.tv_sec * 1000000ULL + (u64)ts.tv_nsec / 1000ULL; }
 #endif
     if (audio_start_mix_thread() < 0) {
-        printf("[cellAudio] WARNING: Could not start mixing thread\n");
+        ps3_print("[cellAudio] WARNING: Could not start mixing thread\n");
     }
 
     s_audio_initialized = 1;
@@ -718,7 +719,7 @@ s32 cellAudioInit(void)
 
 s32 cellAudioQuit(void)
 {
-    printf("[cellAudio] Quit()\n");
+    ps3_print("[cellAudio] Quit()\n");
 
     if (!s_audio_initialized)
         return CELL_AUDIO_ERROR_NOT_INIT;
@@ -753,7 +754,7 @@ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
 
     u64 nch  = vm_read64(param_ea + 0);   /* nChannel */
     u64 nblk = vm_read64(param_ea + 8);   /* nBlock   */
-    printf("[cellAudio] PortOpen(nChannel=%llu, nBlock=%llu)\n",
+    ps3_print("[cellAudio] PortOpen(nChannel=%llu, nBlock=%llu)\n",
            (unsigned long long)nch, (unsigned long long)nblk);
 
     if (nch != CELL_AUDIO_PORT_2CH && nch != CELL_AUDIO_PORT_8CH)
@@ -821,7 +822,7 @@ s32 cellAudioPortOpen(const CellAudioPortParam* param, u32* portNum)
 
 s32 cellAudioPortClose(u32 portNum)
 {
-    printf("[cellAudio] PortClose(port=%u)\n", portNum);
+    ps3_print("[cellAudio] PortClose(port=%u)\n", portNum);
 
     if (!s_audio_initialized)
         return CELL_AUDIO_ERROR_NOT_INIT;
@@ -850,7 +851,7 @@ s32 cellAudioPortClose(u32 portNum)
 
 s32 cellAudioPortStart(u32 portNum)
 {
-    printf("[cellAudio] PortStart(port=%u)\n", portNum);
+    ps3_print("[cellAudio] PortStart(port=%u)\n", portNum);
 
     if (!s_audio_initialized)
         return CELL_AUDIO_ERROR_NOT_INIT;
@@ -870,7 +871,7 @@ s32 cellAudioPortStart(u32 portNum)
 
 s32 cellAudioPortStop(u32 portNum)
 {
-    printf("[cellAudio] PortStop(port=%u)\n", portNum);
+    ps3_print("[cellAudio] PortStop(port=%u)\n", portNum);
 
     if (!s_audio_initialized)
         return CELL_AUDIO_ERROR_NOT_INIT;
@@ -956,7 +957,7 @@ s32 cellAudioCreateNotifyEventQueue(u32* id, u64* key)
     uint32_t id_ea  = (uint32_t)(uintptr_t)id;
     uint32_t key_ea = (uint32_t)(uintptr_t)key;
 
-    printf("[cellAudio] CreateNotifyEventQueue(id_ea=0x%08X key_ea=0x%08X)\n",
+    ps3_print("[cellAudio] CreateNotifyEventQueue(id_ea=0x%08X key_ea=0x%08X)\n",
            id_ea, key_ea);
 
     if (!s_audio_initialized)
@@ -986,14 +987,14 @@ s32 cellAudioCreateNotifyEventQueue(u32* id, u64* key)
 
     vm_write32(id_ea, qid);
     vm_write64(key_ea, k);
-    printf("[cellAudio] CreateNotifyEventQueue -> id=%u key=0x%llX\n",
+    ps3_print("[cellAudio] CreateNotifyEventQueue -> id=%u key=0x%llX\n",
            qid, (unsigned long long)k);
     return CELL_OK;
 }
 
 s32 cellAudioSetNotifyEventQueue(u64 key)
 {
-    printf("[cellAudio] SetNotifyEventQueue(key=0x%llX)\n",
+    ps3_print("[cellAudio] SetNotifyEventQueue(key=0x%llX)\n",
            (unsigned long long)key);
 
     if (!s_audio_initialized)
@@ -1016,7 +1017,7 @@ s32 cellAudioSetNotifyEventQueue(u64 key)
 
 s32 cellAudioRemoveNotifyEventQueue(u64 key)
 {
-    printf("[cellAudio] RemoveNotifyEventQueue(key=0x%llX)\n",
+    ps3_print("[cellAudio] RemoveNotifyEventQueue(key=0x%llX)\n",
            (unsigned long long)key);
 
     if (!s_audio_initialized)
@@ -1075,7 +1076,7 @@ s32 cellAudioGetPortConfig(u32 portNum, CellAudioPortConfig* config)
     vm_write32(cfg + 28, (u32)port->port_addr);                             /* portAddr */
 
     { static int _n = 0; if (_n++ < 24)
-        fprintf(stderr, "[cellAudio] GetPortConfig(port=%u) status=%s bufEA=0x%08X ridxEA=0x%08X\n",
+        ps3_log("[cellAudio] GetPortConfig(port=%u) status=%s bufEA=0x%08X ridxEA=0x%08X\n",
                 portNum, port->running ? "RUN" : "READY",
                 (u32)port->port_addr, (u32)port->read_idx_addr); }
 
@@ -1106,7 +1107,7 @@ s32 cellAudioSetPersonalDevice(s32 iPersonalStream, s32 iDevice)
 {
     (void)iPersonalStream;
     (void)iDevice;
-    printf("[cellAudio] SetPersonalDevice(stream=%d, device=%d) - stub\n",
+    ps3_print("[cellAudio] SetPersonalDevice(stream=%d, device=%d) - stub\n",
            iPersonalStream, iDevice);
     return CELL_OK;
 }
@@ -1114,6 +1115,6 @@ s32 cellAudioSetPersonalDevice(s32 iPersonalStream, s32 iDevice)
 s32 cellAudioUnsetPersonalDevice(s32 iPersonalStream)
 {
     (void)iPersonalStream;
-    printf("[cellAudio] UnsetPersonalDevice(stream=%d) - stub\n", iPersonalStream);
+    ps3_print("[cellAudio] UnsetPersonalDevice(stream=%d) - stub\n", iPersonalStream);
     return CELL_OK;
 }

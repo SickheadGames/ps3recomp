@@ -16,7 +16,7 @@ static int s_initialized = 0;
 
 s32 cellVideoExportInit(void)
 {
-    printf("[cellVideoExport] Init()\n");
+    ps3_log("[cellVideoExport] Init()\n");
     if (s_initialized)
         return (s32)CELL_VIDEO_EXPORT_ERROR_ALREADY_INITIALIZED;
     s_initialized = 1;
@@ -25,7 +25,7 @@ s32 cellVideoExportInit(void)
 
 s32 cellVideoExportEnd(void)
 {
-    printf("[cellVideoExport] End()\n");
+    ps3_log("[cellVideoExport] End()\n");
     s_initialized = 0;
     return CELL_OK;
 }
@@ -34,7 +34,7 @@ s32 cellVideoExportStart(const CellVideoExportParam* param,
                           CellVideoExportCallback callback, void* userdata)
 {
     (void)param;
-    printf("[cellVideoExport] Start() - not supported\n");
+    ps3_log("[cellVideoExport] Start() - not supported\n");
     if (!s_initialized)
         return (s32)CELL_VIDEO_EXPORT_ERROR_NOT_INITIALIZED;
 

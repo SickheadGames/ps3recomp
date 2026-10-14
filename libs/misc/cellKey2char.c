@@ -78,7 +78,7 @@ static const char s_shifted_numbers[] = {
 
 s32 cellKey2CharOpen(u32 arrangement, CellKey2CharHandle* handle)
 {
-    printf("[cellKey2char] Open(arrangement=%u)\n", arrangement);
+    ps3_log("[cellKey2char] Open(arrangement=%u)\n", arrangement);
 
     if (!handle)
         return (s32)CELL_K2C_ERROR_INVALID_PARAMETER;
@@ -98,7 +98,7 @@ s32 cellKey2CharOpen(u32 arrangement, CellKey2CharHandle* handle)
 
 s32 cellKey2CharClose(CellKey2CharHandle handle)
 {
-    printf("[cellKey2char] Close(handle=%u)\n", handle);
+    ps3_log("[cellKey2char] Close(handle=%u)\n", handle);
 
     if (handle >= MAX_K2C_HANDLES || !s_contexts[handle].in_use)
         return (s32)CELL_K2C_ERROR_INVALID_HANDLE;

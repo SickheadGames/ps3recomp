@@ -9,6 +9,7 @@
 #include "sysPrxForUser.h"
 #include <ps3emu/guest_call.h>
 #include "../../runtime/ppu/ppu_memory.h"   /* vm_base, vm_write32: translate + byte-swap */
+#include "ps3emu/logging.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
@@ -171,7 +172,7 @@ void sys_process_exit(s32 exitcode)
 {
     g_sys_process_exit_code   = exitcode;
     g_sys_process_exit_called = 1;
-    printf("[sysPrxForUser] sys_process_exit(code=%d)\n", exitcode);
+    ps3_log("[sysPrxForUser] sys_process_exit(code=%d)\n", exitcode);
 #ifdef _WIN32
     /* The RSX present thread runs at ~60Hz; a title that finishes in a few ms
      * would tear down before the first frame is ever presented. Hold
@@ -184,7 +185,7 @@ void sys_process_exit(s32 exitcode)
      * Ignoring the exit on the calling thread lets the render loop keep running
      * so we can see whether sustained execution produces on-screen content. */
     if (getenv("YDKJ_NOEXIT")) {
-        printf("[sysPrxForUser] sys_process_exit IGNORED (YDKJ_NOEXIT) -- parking thread\n");
+        ps3_log("[sysPrxForUser] sys_process_exit IGNORED (YDKJ_NOEXIT) -- parking thread\n");
         fflush(stdout);
         for (;;) {
 #ifdef _WIN32
@@ -279,7 +280,7 @@ s32 _sys_printf(const char* fmt, ...)
     char buf[2048];
     int ret = yz_format(buf, sizeof buf, (const char*)yz_g2h(fmt), ap);
     va_end(ap);
-    printf("[PS3] %s", buf);
+    ps3_log("[PS3] %s", buf);
     return ret;
 }
 
@@ -303,7 +304,7 @@ s32 _sys_printf(const char* fmt, ...)
 s32 _sys_trap_process(const char* msg)
 {
     const char* m = (const char*)yz_g2h(msg);
-    printf("[PS3] %s", m ? m : "(trap)\n");
+    ps3_log("[PS3] %s", m ? m : "(trap)\n");
     return CELL_OK;
 }
 
@@ -486,7 +487,7 @@ s32 sys_ppu_thread_once(u32 once_ctrl_ea, u32 init_opd)
     if (first && init_opd && g_ps3_guest_caller) {
         static int n = 0;
         if (n++ < 8)
-            printf("[sysPrxForUser] sys_ppu_thread_once: running init 0x%08X"
+            ps3_log("[sysPrxForUser] sys_ppu_thread_once: running init 0x%08X"
                    " (ctrl 0x%08X)\n", init_opd, once_ctrl_ea);
         g_ps3_guest_caller(init_opd, 0, 0, 0, 0, 0, 0, 0, 0);
     }
@@ -532,13 +533,13 @@ s32 sys_lwmutex_lock(sys_lwmutex_t_hle* lwmutex, u64 timeout)
     u32 slot = lwmutex->sleep_queue - 1;
     if (slot >= MAX_LWMUTEX || !s_lwmutex[slot].in_use) {
 #ifdef _WIN32
-        printf("[sysPrxForUser] sys_lwmutex_lock FAIL guest=0x%08X "
+        ps3_log("[sysPrxForUser] sys_lwmutex_lock FAIL guest=0x%08X "
                "sleep_queue=0x%08X (%s) [host tid %lu] -> ESRCH\n",
                YZ_GUEST_ADDR(lwmutex), lwmutex->sleep_queue,
                slot >= MAX_LWMUTEX ? "bad slot" : "slot not in use",
                GetCurrentThreadId());
 #else
-        printf("[sysPrxForUser] sys_lwmutex_lock FAIL guest=0x%08X "
+        ps3_log("[sysPrxForUser] sys_lwmutex_lock FAIL guest=0x%08X "
                "sleep_queue=0x%08X (%s) -> ESRCH\n",
                YZ_GUEST_ADDR(lwmutex), lwmutex->sleep_queue,
                slot >= MAX_LWMUTEX ? "bad slot" : "slot not in use");
@@ -550,10 +551,10 @@ s32 sys_lwmutex_lock(sys_lwmutex_t_hle* lwmutex, u64 timeout)
 
 #ifdef _WIN32
     if (!TryEnterCriticalSection(&s_lwmutex[slot].cs)) {
-        fprintf(stderr, "[LWMTX] tid %lu BLOCKING on lwmutex slot %u (guest 0x%08X)\n",
+        ps3_log("[LWMTX] tid %lu BLOCKING on lwmutex slot %u (guest 0x%08X)\n",
                 GetCurrentThreadId(), slot, YZ_GUEST_ADDR(lwmutex));
         EnterCriticalSection(&s_lwmutex[slot].cs);
-        fprintf(stderr, "[LWMTX] tid %lu acquired slot %u\n", GetCurrentThreadId(), slot);
+        ps3_log("[LWMTX] tid %lu acquired slot %u\n", GetCurrentThreadId(), slot);
     }
 #else
     pthread_mutex_lock(&s_lwmutex[slot].mtx);
@@ -614,10 +615,10 @@ s32 sys_lwmutex_destroy(sys_lwmutex_t_hle* lwmutex)
 {
     YZ_XLAT(lwmutex, sys_lwmutex_t_hle*);
 #ifdef _WIN32
-    printf("[sysPrxForUser] sys_lwmutex_destroy(guest=0x%08X) [host tid %lu]\n",
+    ps3_log("[sysPrxForUser] sys_lwmutex_destroy(guest=0x%08X) [host tid %lu]\n",
            lwmutex ? YZ_GUEST_ADDR(lwmutex) : 0, GetCurrentThreadId());
 #else
-    printf("[sysPrxForUser] sys_lwmutex_destroy(guest=0x%08X)\n",
+    ps3_log("[sysPrxForUser] sys_lwmutex_destroy(guest=0x%08X)\n",
            lwmutex ? YZ_GUEST_ADDR(lwmutex) : 0);
 #endif
 
@@ -625,7 +626,7 @@ s32 sys_lwmutex_destroy(sys_lwmutex_t_hle* lwmutex)
 
     u32 slot = lwmutex->sleep_queue - 1;
     if (slot >= MAX_LWMUTEX || !s_lwmutex[slot].in_use) {
-        printf("[sysPrxForUser] sys_lwmutex_destroy -> ESRCH\n");
+        ps3_log("[sysPrxForUser] sys_lwmutex_destroy -> ESRCH\n");
         return CELL_ESRCH;   /* already destroyed / never created */
     }
 
@@ -634,7 +635,7 @@ s32 sys_lwmutex_destroy(sys_lwmutex_t_hle* lwmutex)
      * from: the EBUSY keeps the lock (and the heap) alive. */
 #ifdef _WIN32
     if (!TryEnterCriticalSection(&s_lwmutex[slot].cs)) {
-        printf("[sysPrxForUser] sys_lwmutex_destroy -> EBUSY\n");
+        ps3_log("[sysPrxForUser] sys_lwmutex_destroy -> EBUSY\n");
         return CELL_EBUSY;
     }
     LeaveCriticalSection(&s_lwmutex[slot].cs);
@@ -648,7 +649,7 @@ s32 sys_lwmutex_destroy(sys_lwmutex_t_hle* lwmutex)
     s_lwmutex[slot].in_use = 0;
 
     memset(lwmutex, 0, sizeof(*lwmutex));
-    printf("[sysPrxForUser] sys_lwmutex_destroy -> OK\n");
+    ps3_log("[sysPrxForUser] sys_lwmutex_destroy -> OK\n");
     return CELL_OK;
 }
 
@@ -662,7 +663,7 @@ s32 sys_lwcond_create(sys_lwcond_t_hle* lwcond, sys_lwmutex_t_hle* lwmutex,
     YZ_XLAT(lwcond, sys_lwcond_t_hle*);
     YZ_XLAT(lwmutex, sys_lwmutex_t_hle*);
     YZ_XLAT(attr, const sys_lwcond_attribute_t*);
-    printf("[sysPrxForUser] sys_lwcond_create(name='%.8s')\n",
+    ps3_log("[sysPrxForUser] sys_lwcond_create(name='%.8s')\n",
            attr ? attr->name : "???");
 
     if (!lwcond || !lwmutex)
@@ -730,7 +731,7 @@ s32 sys_lwcond_signal_all(sys_lwcond_t_hle* lwcond)
 s32 sys_lwcond_wait(sys_lwcond_t_hle* lwcond, u64 timeout)
 {
     YZ_XLAT(lwcond, sys_lwcond_t_hle*);
-    fprintf(stderr, "[WAIT] lwcond_wait(timeout=%llu)\n", (unsigned long long)timeout);
+    ps3_log("[WAIT] lwcond_wait(timeout=%llu)\n", (unsigned long long)timeout);
     if (!lwcond) return CELL_EFAULT;
 
     u32 cslot = lwcond->lwcond_queue - 1;
@@ -779,7 +780,7 @@ s32 sys_lwcond_wait(sys_lwcond_t_hle* lwcond, u64 timeout)
 s32 sys_lwcond_destroy(sys_lwcond_t_hle* lwcond)
 {
     YZ_XLAT(lwcond, sys_lwcond_t_hle*);
-    printf("[sysPrxForUser] sys_lwcond_destroy()\n");
+    ps3_log("[sysPrxForUser] sys_lwcond_destroy()\n");
 
     if (!lwcond) return CELL_EFAULT;
 
@@ -805,7 +806,7 @@ s32 sys_heap_create_heap(sys_heap_t* heap, u32 start_addr, u32 size,
     (void)start_addr; (void)size; (void)flags;
     (void)alloc_func; (void)free_func;
 
-    printf("[sysPrxForUser] sys_heap_create_heap(size=%u)\n", size);
+    ps3_log("[sysPrxForUser] sys_heap_create_heap(size=%u)\n", size);
 
     if (!heap) return CELL_EFAULT;
 
@@ -822,7 +823,7 @@ s32 sys_heap_create_heap(sys_heap_t* heap, u32 start_addr, u32 size,
 
 s32 sys_heap_destroy_heap(sys_heap_t heap)
 {
-    printf("[sysPrxForUser] sys_heap_destroy_heap(id=%u)\n", heap);
+    ps3_log("[sysPrxForUser] sys_heap_destroy_heap(id=%u)\n", heap);
 
     for (int i = 0; i < MAX_HEAPS; i++) {
         if (s_heaps[i].in_use && s_heaps[i].id == heap) {
@@ -895,7 +896,7 @@ static u32 yz_heap_alloc(u32 size, u32 align)
     { static int dbg = -1;
       if (dbg < 0) dbg = getenv("SYS_HEAP_DBG") ? 1 : 0;
       if (dbg) { static int n = 0; if (n++ < 400)
-          fprintf(stderr, "[heap] alloc size=%u align=%u -> 0x%08X (raw 0x%08X, bin %u)%c",
+          ps3_log("[heap] alloc size=%u align=%u -> 0x%08X (raw 0x%08X, bin %u)%c",
                   size, align, user, raw, b, 10); } }
     vm_write32(user - 4,  user - raw);
     vm_write32(user - 8,  b);
@@ -914,7 +915,7 @@ static void yz_heap_free(u32 user)
     { static int dbg = -1;
       if (dbg < 0) dbg = getenv("SYS_HEAP_DBG") ? 1 : 0;
       if (dbg) { static int n = 0; if (n++ < 400)
-          fprintf(stderr, "[heap] free  0x%08X (bin %u)%c", user, b, 10); } }
+          ps3_log("[heap] free  0x%08X (bin %u)%c", user, b, 10); } }
     vm_write32(user - 12, 0);                            /* poison: catch double free */
     slot_lock();
     vm_write32(raw, s_heap_bin[b]);
@@ -1036,7 +1037,7 @@ s32 _sys_heap_free(sys_heap_t heap, void* ptr)
 
 s32 sys_prx_exitspawn_with_level(void)
 {
-    printf("[sysPrxForUser] sys_prx_exitspawn_with_level() - no-op\n");
+    ps3_log("[sysPrxForUser] sys_prx_exitspawn_with_level() - no-op\n");
     return CELL_OK;
 }
 
@@ -1045,12 +1046,12 @@ s32 sys_prx_get_module_id_by_name(const char* name, u64 flags, u32* id)
     (void)flags;
     /* name/id arrive as raw GUEST effective addresses (the generic HLE adapter
      * forwards gpr3.. untranslated). Translate before touching memory -- else
-     * printf("%s", name) derefs a bare host address and AVs. This path first
+     * ps3_log("%s", name) derefs a bare host address and AVs. This path first
      * appears once real libsre is loaded (its name string lives in the libsre
      * image at 0x3000xxxx). Same bug class as the _sys_memset fix above. */
     const char* hname = (const char*)yz_g2h(name);
     u32* hid = (u32*)yz_g2h(id);
-    printf("[sysPrxForUser] sys_prx_get_module_id_by_name('%s')\n",
+    ps3_log("[sysPrxForUser] sys_prx_get_module_id_by_name('%s')\n",
            hname ? hname : "(null)");
 
     /* A null id is not an error. The caller that only wants to know whether a

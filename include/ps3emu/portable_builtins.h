@@ -190,11 +190,17 @@ PORT_INLINE int32_t port_atomic_load32(volatile int32_t *p)
 PORT_INLINE void port_atomic_store32(volatile int32_t *p, int32_t v)
 { (void)_InterlockedExchange((volatile long *)p, (long)v); }
 
+PORT_INLINE void port_atomic_storeu32(volatile uint32_t *p, uint32_t v)
+{ (void)_InterlockedExchange((volatile unsigned long *)p, (unsigned long)v); }
+
 PORT_INLINE int32_t port_atomic_exchange32(volatile int32_t *p, int32_t v)
 { return (int32_t)_InterlockedExchange((volatile long *)p, (long)v); }
 
 PORT_INLINE int32_t port_atomic_fetch_add32(volatile int32_t *p, int32_t v)
 { return (int32_t)_InterlockedExchangeAdd((volatile long *)p, (long)v); }
+
+PORT_INLINE uint32_t port_atomic_fetch_addu32(volatile uint32_t*p, uint32_t v)
+{ return (uint32_t)_InterlockedExchangeAdd((volatile unsigned long *)p, (unsigned long)v); }
 
 PORT_INLINE int32_t port_atomic_add_fetch32(volatile int32_t* p, int32_t v)
 {

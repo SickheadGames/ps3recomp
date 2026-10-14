@@ -73,7 +73,7 @@ void np_psnr_setup(const char* username, const char* server)
         if (!named[i] || !*named[i]) continue;
         found = clean_online_id(named[i], s_id);
         if (!found)
-            printf("[psnr] \"%s\" is not a valid online ID (3-16 letters, digits, - or _, "
+            ps3_log("[psnr] \"%s\" is not a valid online ID (3-16 letters, digits, - or _, "
                    "starting with a letter)\n", named[i]);
     }
     if (!found) {
@@ -86,7 +86,7 @@ void np_psnr_setup(const char* username, const char* server)
         if (!clean_online_id(os, s_id)) strcpy(s_id, "PS3Player");
     }
     s_id_state = 1;
-    printf("[psnr] player \"%s\"%s\n", s_id, np_psnr_enabled() ? "" : " (offline)");
+    ps3_log("[psnr] player \"%s\"%s\n", s_id, np_psnr_enabled() ? "" : " (offline)");
 }
 
 const char* np_psnr_identity(void)
@@ -143,14 +143,14 @@ int np_psnr_connect(const char* comm_id)
     s_user_id = user_id;
     UNLOCK();
     if (s_client)
-        printf("[psnr] connected to %s:%u as \"%s\" (%s), user %u, seen from %u.%u.%u.%u, p2p port %u\n",
+        ps3_log("[psnr] connected to %s:%u as \"%s\" (%s), user %u, seen from %u.%u.%u.%u, p2p port %u\n",
                host, port, np_psnr_online_id(), comm_id, user_id, ip[0], ip[1], ip[2], ip[3],
                np_psnr_p2p_port());
     else if (psnr_connect_error() == PSNR_E_NAME_TAKEN)
-        printf("[psnr] %s:%u: another player there is already \"%s\" -- pick another "
+        ps3_log("[psnr] %s:%u: another player there is already \"%s\" -- pick another "
                "with --username. NP stays offline\n", host, port, np_psnr_online_id());
     else
-        printf("[psnr] could not reach %s:%u -- NP stays offline\n", host, port);
+        ps3_log("[psnr] could not reach %s:%u -- NP stays offline\n", host, port);
     return s_client ? 0 : -1;
 }
 
@@ -284,7 +284,7 @@ int np_psnr_p2p_filter(void* buf, uint32_t* len, uint8_t from_ip[4], uint16_t* f
         if (!s_probed) {
             s_probed = 1;
             s_next_probe = nat_now_ms() + REPROBE_MS;
-            printf("[psnr] P2P socket seen at %u.%u.%u.%u:%u\n", ip[0], ip[1], ip[2], ip[3], port);
+            ps3_log("[psnr] P2P socket seen at %u.%u.%u.%u:%u\n", ip[0], ip[1], ip[2], ip[3], port);
         }
     } else {   /* a punch */
         LOCK();
@@ -346,7 +346,7 @@ int64_t np_psnr_stream_connect(const uint8_t ip[4], uint16_t port)
     UNLOCK();
     if (!to || !s_client) return -2;
     int64_t fd = psnr_stream_connect(s_client, to, port, STREAM_TIMEOUT_MS);
-    printf("[psnr] stream to %u.%u.%u.%u:%u through the relay: %s\n",
+    ps3_log("[psnr] stream to %u.%u.%u.%u:%u through the relay: %s\n",
            ip[0], ip[1], ip[2], ip[3], port, fd >= 0 ? "open" : "failed");
     return fd;
 }
@@ -365,7 +365,7 @@ static int nat_push(const psnr_msg* m)
         }
         if (p) p->relay_stream = relay;
         UNLOCK();
-        if (relay) printf("[psnr] streams to user %u go through the relay\n", user);
+        if (relay) ps3_log("[psnr] streams to user %u go through the relay\n", user);
         return 1;
     }
     if (m->type == PSNR_STREAM_OFFER && m->len >= 10) {
@@ -377,7 +377,7 @@ static int nat_push(const psnr_msg* m)
         if (p) { memcpy(ip, p->ip, 4); port = p->port; }
         UNLOCK();
         int64_t fd = s_client && s_stream_sink ? psnr_stream_accept(s_client, id, 5000) : -1;
-        printf("[psnr] stream from user %u through the relay: %s\n", from, fd >= 0 ? "open" : "failed");
+        ps3_log("[psnr] stream from user %u through the relay: %s\n", from, fd >= 0 ? "open" : "failed");
         if (fd >= 0) s_stream_sink(fd, ip, port);
         return 1;
     }
@@ -413,7 +413,7 @@ static void nat_tick(void)
         if (!p->relay_udp && !p->heard_at && p->punched_at && now - p->punched_at > RELAY_AFTER &&
             psnr_relay_available(s_client)) {
             p->relay_udp = 1;
-            printf("[psnr] nothing direct from %u.%u.%u.%u:%u; its datagrams go through the relay\n",
+            ps3_log("[psnr] nothing direct from %u.%u.%u.%u:%u; its datagrams go through the relay\n",
                    p->ip[0], p->ip[1], p->ip[2], p->ip[3], p->port);
         }
     }
@@ -435,7 +435,7 @@ void np_psnr_pump(void)
         int r = psnr_poll(s_client, &m);
         if (r < 0) {
             /* Gone: fail every outstanding request so no title waits forever. */
-            printf("[psnr] connection lost\n");
+            ps3_log("[psnr] connection lost\n");
             psnr_close(s_client);
             s_client = NULL;
             psnr_msg dead;

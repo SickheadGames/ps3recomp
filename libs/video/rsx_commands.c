@@ -16,6 +16,7 @@
 
 #include "rsx_commands.h"
 #include "ps3emu/milestone.h"   /* ps3_ms -- boot milestone log */
+#include "ps3emu/logging.h"
 #include <stdio.h>
 #include <stdlib.h>   /* getenv -- an implicit decl returns int, truncating the pointer */
 #include <string.h>
@@ -132,7 +133,7 @@ static int process_surface_method(rsx_state* state, u32 method, u32 data)
           static unsigned _seen[32]; static int _n = 0;
           if (_s) { int f = 0; for (int k = 0; k < _n; k++) if (_seen[k] == data) f = 1;
               if (!f && _n < 32) { _seen[_n++] = data;
-                  fprintf(stderr, "[SURF] color offset -> 0x%08X%c", data, 10); } } }
+                  ps3_log("[SURF] color offset -> 0x%08X%c", data, 10); } } }
         state->surface_dirty = 1;
         return 0;
     case NV4097_SET_SURFACE_COLOR_BOFFSET:
@@ -153,7 +154,7 @@ static int process_surface_method(rsx_state* state, u32 method, u32 data)
         return 0;
     case NV4097_SET_SURFACE_COLOR_TARGET:
         { static int _ct=0; if (_ct++ < 24 && getenv("RTT_DUMP"))
-            fprintf(stderr, "[RSXCT] color_target=0x%X offA=0x%X offB=0x%X offC=0x%X offD=0x%X%s",
+            ps3_log("[RSXCT] color_target=0x%X offA=0x%X offB=0x%X offC=0x%X offD=0x%X%s",
                     data, state->surface_color_offset[0], state->surface_color_offset[1],
                     state->surface_color_offset[2], state->surface_color_offset[3], "\n"); }
         state->color_target = data;
@@ -339,7 +340,12 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
      * the first real draw -- exactly the ones worth seeing -- were never traced. */
     { static int _rt=-1; if(_rt<0){ const char* e=getenv("RSX_TRACE");
         _rt = e ? (atoi(e) > 1 ? atoi(e) : 250) : 0; }
-      if(_rt){ static int _m=0; if(_m++<_rt) fprintf(stderr,"[rsxm] method=0x%04X data=0x%08X\n", method, data); } }
+      if(_rt){ static int _m=0; if(_m++<_rt) ps3_log("[rsxm] method=0x%04X data=0x%08X\n", method, data); } }
+
+    // Noop methods.
+    if (method == 0x0100)
+        return 0;
+
     /* Back-end write label / semaphore (cellGcmSetWriteBackEndLabel): the RSX
      * writes a value to a report/label the CPU polls for CPU<->RSX sync (double
      * buffering). Real hardware DOES this; without it the game's frame-fence
@@ -365,7 +371,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
          * Apply the same swap the hardware does so the pre-swap cancels out. */
         u32 val = (data & 0xff00ff00u) | ((data >> 16) & 0xffu) | ((data & 0xffu) << 16);
         vm_write32(VM_HLE_INJECT_BASE + (s_sem_off & 0x00FFFFFFu), val);
-        { static int _l=0; if(_l++<8) fprintf(stderr,"[RSX] label write @0x%08X = 0x%08X (sync fence, raw 0x%08X)\n", VM_HLE_INJECT_BASE+(s_sem_off&0xFFFFFF), val, data); }
+        { static int _l=0; if(_l++<8) ps3_log("[RSX] label write @0x%08X = 0x%08X (sync fence, raw 0x%08X)\n", VM_HLE_INJECT_BASE+(s_sem_off&0xFFFFFF), val, data); }
         return 0;
       }
       if (method == 0x1D74) {
@@ -462,7 +468,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
         return 0;
     }
     if (method == NV4097_CLEAR_SURFACE) {
-        { static int _c=0; if (_c++ < 12) fprintf(stderr, "[RSX] CLEAR_SURFACE mask=0x%X color=0x%08X\n", data, state->color_clear_value); }
+        { static int _c=0; if (_c++ < 12) ps3_log("[RSX] CLEAR_SURFACE mask=0x%X color=0x%08X\n", data, state->color_clear_value); }
         if (s_backend && s_backend->clear) {
             float depth = (float)(state->zstencil_clear_value >> 8) / (float)0xFFFFFF;
             u8 stencil = state->zstencil_clear_value & 0xFF;
@@ -630,13 +636,13 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
         { static int _d = -1; if (_d < 0) _d = getenv("VDATA_DBG") ? 1 : 0;
           static int _n = 0;
           if (_d && _n < 400) { _n++;
-            fprintf(stderr, "[VDATA4F] attr=%u lane=%u = %.4f%c", idx, lane, f, 10); } }
+            ps3_log("[VDATA4F] attr=%u lane=%u = %.4f%c", idx, lane, f, 10); } }
         return 0;
     }
 
     if (method == NV4097_SET_TRANSFORM_CONSTANT_LOAD) {
         { static int _n=0, _e=-1; if (_e < 0) _e = getenv("LOAD_DBG") ? 1 : 0; if (_e && _n++ < 200)
-            fprintf(stderr, "[LOAD] transform_constant_load = %u\n", data); }
+            ps3_log("[LOAD] transform_constant_load = %u\n", data); }
         state->transform_constant_load = data;
         return 0;
     }
@@ -676,10 +682,10 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
               static int _n=0;
               static int _max=-1; if(_max<0){const char*m=getenv("TCONST_MAX");_max=m?atoi(m):64;}
               int _hit = _en && (getenv("TCONST_ALL") ? (_n<_max) : (slot>=12 && slot<=30 && _n<400));
-              if(_hit){ _n++; fprintf(stderr,"[TCONST] load=%u slot=%u lane=%u = %.4f\n", state->transform_constant_load, slot, lane, f); } }
+              if(_hit){ _n++; ps3_log("[TCONST] load=%u slot=%u lane=%u = %.4f\n", state->transform_constant_load, slot, lane, f); } }
             state->vertex_constants[slot][lane] = f;
             { static int _sq=0, _e=-1; if (_e < 0) _e = getenv("SEQ_DBG") ? 1 : 0; if (_e && slot==256 && lane==0 && _sq++ < 500)
-                fprintf(stderr, "[SEQ] upload c256.x=%.4f (load=%u)\n", f, state->transform_constant_load); }
+                ps3_log("[SEQ] upload c256.x=%.4f (load=%u)\n", f, state->transform_constant_load); }
             if (!state->vertex_constants_dirty) {
                 state->vertex_constants_lo = slot;
                 state->vertex_constants_hi = slot;
@@ -748,9 +754,9 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
     if (method == NV4097_DRAW_ARRAYS) {
         u32 first = data & 0xFFFFFF;
         u32 count = ((data >> 24) & 0xFF) + 1;
-        { static int _d=0; if (_d++ < 32) fprintf(stderr, "[RSX] DRAW_ARRAYS prim=%u first=%u count=%u\n", state->primitive_type, first, count); }
+        { static int _d=0; if (_d++ < 32) ps3_log("[RSX] DRAW_ARRAYS prim=%u first=%u count=%u\n", state->primitive_type, first, count); }
         { static int _sq=0, _e=-1; if (_e < 0) _e = getenv("SEQ_DBG") ? 1 : 0; if (_e && _sq++ < 500)
-            fprintf(stderr, "[SEQ] DRAW surf0=0x%X c256.x=%.4f c257.y=%.4f\n",
+            ps3_log("[SEQ] DRAW surf0=0x%X c256.x=%.4f c257.y=%.4f\n",
                     state->surface_color_offset[0], state->vertex_constants[256][0],
                     state->vertex_constants[257][1]); }
         /* MVPDBG: dump every non-zero vertex-constant slot the FIRST time a
@@ -763,7 +769,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
                 for (int s = 0; s < RSX_MAX_VERTEX_CONSTANTS; s++) {
                     float* v = state->vertex_constants[s];
                     if (v[0]||v[1]||v[2]||v[3])
-                        fprintf(stderr, "[MVP] c[%3d] = %10.4f %10.4f %10.4f %10.4f\n",
+                        ps3_log("[MVP] c[%3d] = %10.4f %10.4f %10.4f %10.4f\n",
                                 s, v[0], v[1], v[2], v[3]);
                 }
             }
@@ -776,7 +782,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
 
     if (method == NV4097_SET_SHADER_CONTROL) {
         { static int _sc=0; if (_sc++ < 12 && getenv("RTT_DUMP"))
-            fprintf(stderr, "[RSXSC] shader_control=0x%X\n", data); }
+            ps3_log("[RSXSC] shader_control=0x%X\n", data); }
         state->shader_control = data;
         state->shader_dirty = 1;
         return 0;
@@ -793,7 +799,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
         /* [23:0] first index, [31:24] count-1 (same packing as DRAW_ARRAYS). */
         u32 first = data & 0xFFFFFF;
         u32 count = ((data >> 24) & 0xFF) + 1;
-        { static int _d=0; if (_d++ < 8) fprintf(stderr, "[RSX] DRAW_INDEX_ARRAY prim=%u first=%u count=%u idxoff=0x%X dma=0x%X\n", state->primitive_type, first, count, state->index_array_offset, state->index_array_dma); }
+        { static int _d=0; if (_d++ < 8) ps3_log("[RSX] DRAW_INDEX_ARRAY prim=%u first=%u count=%u idxoff=0x%X dma=0x%X\n", state->primitive_type, first, count, state->index_array_offset, state->index_array_dma); }
         ps3_ms("rsx:draw_indexed");
         if (s_backend && s_backend->draw_indexed)
             s_backend->draw_indexed(s_backend->userdata, state->primitive_type,
@@ -810,6 +816,28 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
     if (method == NV4097_SET_SCISSOR_VERTICAL) {
         state->scissor_y = data & 0xFFFF;
         state->scissor_h = (data >> 16) & 0xFFFF;
+        return 0;
+    }
+
+    /* Clipping */
+    if (method == NV4097_SET_CLIP_MIN)
+    {
+        state->clip_min = ((float*)&data)[0];
+        state->viewport_dirty = 1;
+        return 0;
+    }
+    if (method == NV4097_SET_CLIP_MAX)
+    {
+        state->clip_max = ((float*)&data)[0];
+        state->viewport_dirty = 1;
+        return 0;
+    }
+
+    if (method == NV4097_SET_WINDOW_OFFSET)
+    {
+        // TODO:
+        state->window_offset_x = data & 0xFFFF;
+        state->window_offset_y = (data >> 16) & 0xFFFF;
         return 0;
     }
 
@@ -830,7 +858,7 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
 #ifndef NDEBUG
     static int s_unknown_count = 0;
     if (s_unknown_count < 50) {
-        printf("[RSX] unknown method 0x%04X = 0x%08X\n", method, data);
+        ps3_log("[RSX] unknown method 0x%04X = 0x%08X\n", method, data);
         s_unknown_count++;
     }
 #endif
@@ -848,7 +876,7 @@ int rsx_process_command_buffer(rsx_state* state, const u32* buf, u32 size)
     u32 pos = 0;
     u32 count = size / 4; /* size in dwords */
 
-    { static int _c=0; if (count && _c++ < 16) fprintf(stderr, "[RSX] process_cmd_buffer words=%u first_hdr=0x%08X\n", count, buf[0]); }
+    { static int _c=0; if (count && _c++ < 16) ps3_log("[RSX] process_cmd_buffer words=%u first_hdr=0x%08X\n", count, buf[0]); }
     while (pos < count) {
         u32 header = buf[pos++];
         u32 type = (header >> 29) & 0x7;

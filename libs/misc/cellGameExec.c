@@ -29,7 +29,7 @@ static int s_exit_param_set = 0;
 s32 cellGameSetExitParam(const CellGameExecBootParam* param_guest)
 {
     const CellGameExecBootParam* param = GUEST_PTR(param_guest, const CellGameExecBootParam*);
-    printf("[cellGameExec] SetExitParam(type=%u, titleId=%.16s)\n",
+    ps3_log("[cellGameExec] SetExitParam(type=%u, titleId=%.16s)\n",
            param ? param->type : 0,
            param ? param->titleId : "(null)");
 
@@ -44,7 +44,7 @@ s32 cellGameSetExitParam(const CellGameExecBootParam* param_guest)
 s32 cellGameGetExitParam(CellGameExecBootParam* param_guest)
 {
     CellGameExecBootParam* param = GUEST_PTR(param_guest, CellGameExecBootParam*);
-    printf("[cellGameExec] GetExitParam()\n");
+    ps3_log("[cellGameExec] GetExitParam()\n");
 
     if (!param)
         return CELL_EINVAL;
@@ -58,10 +58,10 @@ s32 cellGameGetExitParam(CellGameExecBootParam* param_guest)
 
 void cellGameExitToShelf(void)
 {
-    printf("[cellGameExec] ExitToShelf() -- terminating process\n");
+    ps3_log("[cellGameExec] ExitToShelf() -- terminating process\n");
 
     if (s_exit_param_set) {
-        printf("[cellGameExec]   Next title: %.16s (type=%u)\n",
+        ps3_log("[cellGameExec]   Next title: %.16s (type=%u)\n",
                s_exit_param.titleId, s_exit_param.type);
     }
 
@@ -70,7 +70,7 @@ void cellGameExitToShelf(void)
 
 s32 cellGameGetBootGameInfo(u32* type, char* dirName, u32* execData)
 {
-    printf("[cellGameExec] GetBootGameInfo() -> DISC\n");
+    ps3_log("[cellGameExec] GetBootGameInfo() -> DISC\n");
 
     /* Disc-boot title (matches cellGame's disc-content reporting). Args are
      * guest addresses: scalars written big-endian, dirName only meaningful

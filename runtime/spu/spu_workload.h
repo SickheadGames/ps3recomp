@@ -42,8 +42,7 @@ uint64_t spu_workload_fingerprint(const void* data, size_t n);
 /* Register one lifted SPU binary under its image fingerprint. `name` is borrowed
  * (kept by pointer for logging — pass a string literal / static). Idempotent on
  * fingerprint: a second register of the same fp updates the entry. */
-void spu_workload_register(uint64_t fingerprint, spu_lifted_entry_fn fn,
-                           const char* name);
+int32_t spu_workload_register(uint64_t fingerprint, spu_lifted_entry_fn fn, const char* name);
 
 /* As spu_workload_register, but binds the image's indirect-branch table id
  * (the value passed to spu_begin_image() before this image's recomp_register).
@@ -127,6 +126,10 @@ int spu_workload_dispatch_async(const uint8_t* image, uint32_t image_size,
 
 /* Number of currently registered lifted SPU binaries (diagnostics/tests). */
 unsigned spu_workload_count(void);
+
+
+void spu_register_function(uint32_t addr, void (*fn)(spu_context*));
+void spu_register_function_img(int32_t image, uint32_t addr, void (*fn)(spu_context*));
 
 #ifdef __cplusplus
 }

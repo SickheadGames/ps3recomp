@@ -58,7 +58,7 @@ s32 sceNpInit(u32 poolSize, void* poolPtr)
     (void)poolSize;
     (void)poolPtr;
 
-    printf("[sceNp] Init(poolSize=%u, username=\"%s\")\n",
+    ps3_log("[sceNp] Init(poolSize=%u, username=\"%s\")\n",
            poolSize, np_psnr_online_id());
 
     if (s_np_initialized)
@@ -70,7 +70,7 @@ s32 sceNpInit(u32 poolSize, void* poolPtr)
 
 s32 sceNpTerm(void)
 {
-    printf("[sceNp] Term()\n");
+    ps3_log("[sceNp] Term()\n");
 
     if (!s_np_initialized)
         return SCE_NP_ERROR_NOT_INITIALIZED;
@@ -94,7 +94,7 @@ s32 sceNpGetNpId(s32 userId, SceNpId* npId)
      * time it asked for its NP ID online. */
     npId = GUEST_PTR(npId, SceNpId*);
     np_build_fake_id(npId);
-    printf("[sceNp] GetNpId(user=%d) -> \"%s\"\n", userId, np_psnr_online_id());
+    ps3_log("[sceNp] GetNpId(user=%d) -> \"%s\"\n", userId, np_psnr_online_id());
     return CELL_OK;
 }
 
@@ -113,7 +113,7 @@ s32 sceNpGetOnlineId(s32 userId, SceNpOnlineId* onlineId)
     strncpy(onlineId->data, np_psnr_online_id(), SCE_NP_ONLINEID_MAX_LENGTH);
     onlineId->term = '\0';
 
-    printf("[sceNp] GetOnlineId(user=%d) -> \"%s\"\n", userId, np_psnr_online_id());
+    ps3_log("[sceNp] GetOnlineId(user=%d) -> \"%s\"\n", userId, np_psnr_online_id());
     return CELL_OK;
 }
 
@@ -132,7 +132,7 @@ s32 sceNpGetOnlineName(s32 userId, SceNpOnlineName* onlineName)
     strncpy(onlineName->data, np_psnr_online_id(),
             SCE_NP_ONLINENAME_MAX_LENGTH - 1);
 
-    printf("[sceNp] GetOnlineName(user=%d) -> \"%s\"\n",
+    ps3_log("[sceNp] GetOnlineName(user=%d) -> \"%s\"\n",
            userId, np_psnr_online_id());
     return CELL_OK;
 }
@@ -154,7 +154,7 @@ s32 sceNpGetUserProfile(s32 userId, SceNpUserInfo* userInfo)
             SCE_NP_ONLINENAME_MAX_LENGTH - 1);
     /* Leave avatar URL empty */
 
-    printf("[sceNp] GetUserProfile(user=%d) -> \"%s\"\n",
+    ps3_log("[sceNp] GetUserProfile(user=%d) -> \"%s\"\n",
            userId, np_psnr_online_id());
     return CELL_OK;
 }
@@ -172,7 +172,7 @@ s32 sceNpGetAccountRegion(s32 userId, u32* region)
     /* Region: US (SCEA) = 0x5553 ('US') */
     vm_write32((u32)(uintptr_t)region, (u32)0x5553);
 
-    printf("[sceNp] GetAccountRegion(user=%d) -> US\n", userId);
+    ps3_log("[sceNp] GetAccountRegion(user=%d) -> US\n", userId);
     return CELL_OK;
 }
 
@@ -187,7 +187,7 @@ s32 sceNpGetAccountAge(s32 userId, s32* age)
         return SCE_NP_ERROR_INVALID_ARGUMENT;
 
     vm_write32((u32)(uintptr_t)age, 25); /* default adult age */
-    printf("[sceNp] GetAccountAge(user=%d) -> 25\n", userId);
+    ps3_log("[sceNp] GetAccountAge(user=%d) -> 25\n", userId);
     return CELL_OK;
 }
 
@@ -204,7 +204,7 @@ s32 sceNpGetMyLanguages(SceNpMyLanguages* langs)
     vm_write32(langs_ea + 4, 0);
     vm_write32(langs_ea + 8, 0);
 
-    printf("[sceNp] GetMyLanguages() -> English\n");
+    ps3_log("[sceNp] GetMyLanguages() -> English\n");
     return CELL_OK;
 }
 
@@ -235,7 +235,7 @@ s32 sceNpManagerGetStatus(s32* status)
     s32 st = np_psnr_enabled() ? SCE_NP_MANAGER_STATUS_ONLINE : SCE_NP_MANAGER_STATUS_OFFLINE;
     vm_write32((uint32_t)(uintptr_t)status, (uint32_t)st);
     { static s32 last = -2;
-      if (st != last) printf("[sceNp] ManagerGetStatus() -> %s\n", st < 0 ? "OFFLINE" : "ONLINE");
+      if (st != last) ps3_log("[sceNp] ManagerGetStatus() -> %s\n", st < 0 ? "OFFLINE" : "ONLINE");
       last = st; }
     return CELL_OK;
 }
@@ -246,7 +246,7 @@ s32 sceNpManagerRegisterCallback(SceNpManagerCallback callback, void* arg)
         return SCE_NP_ERROR_NOT_INITIALIZED;
     s_npmgr_cb     = callback;
     s_npmgr_cb_arg = arg;
-    printf("[sceNp] ManagerRegisterCallback()\n");
+    ps3_log("[sceNp] ManagerRegisterCallback()\n");
     /* Online: tell the title it is signed in, as the console does once the
      * manager reaches ONLINE. Delivered on its next cellSysutilCheckCallback. */
     if (np_psnr_enabled() && callback) {

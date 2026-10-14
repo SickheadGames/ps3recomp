@@ -52,7 +52,7 @@ s32 cellUserInfoGetStat(u32 id, CellUserInfoUserStat* stat)
 
 s32 cellUserInfoGetList(u32* listNum, CellUserInfoUserList* list, u32* currentUser)
 {
-    printf("[cellUserInfo] GetList()\n");
+    ps3_log("[cellUserInfo] GetList()\n");
     u32* listNum_h = GUEST_PTR(listNum, u32*);
     CellUserInfoUserList* list_h = GUEST_PTR(list, CellUserInfoUserList*);
     u32* currentUser_h = GUEST_PTR(currentUser, u32*);
@@ -78,7 +78,7 @@ s32 cellUserInfoSelectUser_ListSet(u32 listType,
 {
     (void)listType;
     (void)listSet;
-    printf("[cellUserInfo] SelectUser_ListSet()\n");
+    ps3_log("[cellUserInfo] SelectUser_ListSet()\n");
 
     /* Auto-select the default user */
     s_selected_user = EMU_USER_ID;
@@ -92,7 +92,7 @@ s32 cellUserInfoSelectUser_ListSet(u32 listType,
 
 s32 cellUserInfoSelectUser_ListGet(u32* selectedUser)
 {
-    printf("[cellUserInfo] SelectUser_ListGet()\n");
+    ps3_log("[cellUserInfo] SelectUser_ListGet()\n");
 
     if (!selectedUser)
         return CELL_USERINFO_ERROR_PARAM;
@@ -104,14 +104,14 @@ s32 cellUserInfoSelectUser_ListGet(u32* selectedUser)
 
 s32 cellUserInfoEnableOverlay(s32 enable)
 {
-    printf("[cellUserInfo] EnableOverlay(%d)\n", enable);
+    ps3_log("[cellUserInfo] EnableOverlay(%d)\n", enable);
     /* No-op in recomp -- no system overlay */
     return CELL_OK;
 }
 
 s32 cellUserInfoGetHomeDir(u32 id, char* homePath, u32 homePathSize)
 {
-    printf("[cellUserInfo] GetHomeDir(id=%u)\n", id);
+    ps3_log("[cellUserInfo] GetHomeDir(id=%u)\n", id);
 
     if (!homePath || homePathSize == 0)
         return CELL_USERINFO_ERROR_PARAM;

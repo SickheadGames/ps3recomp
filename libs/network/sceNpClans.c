@@ -17,7 +17,7 @@ static int s_initialized = 0;
 s32 sceNpClansInit(const void* commId, const void* passPhrase, u32 poolSize)
 {
     (void)commId; (void)passPhrase; (void)poolSize;
-    printf("[sceNpClans] Init()\n");
+    ps3_log("[sceNpClans] Init()\n");
     if (s_initialized)
         return (s32)SCE_NP_CLANS_ERROR_ALREADY_INITIALIZED;
     s_initialized = 1;
@@ -26,7 +26,7 @@ s32 sceNpClansInit(const void* commId, const void* passPhrase, u32 poolSize)
 
 s32 sceNpClansTerm(void)
 {
-    printf("[sceNpClans] Term()\n");
+    ps3_log("[sceNpClans] Term()\n");
     s_initialized = 0;
     return CELL_OK;
 }
@@ -35,7 +35,7 @@ s32 sceNpClansCreateClan(const char* name, const char* tag,
                            SceNpClansRequestId* reqId)
 {
     (void)name; (void)tag; (void)reqId;
-    printf("[sceNpClans] CreateClan() - offline\n");
+    ps3_log("[sceNpClans] CreateClan() - offline\n");
     return (s32)SCE_NP_CLANS_ERROR_NOT_CONNECTED;
 }
 
