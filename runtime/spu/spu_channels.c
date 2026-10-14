@@ -296,7 +296,12 @@ int spu_run_with_halt(void (*entry)(spu_context*), spu_context* ctx)
  *     stored both took the same slot and then shared one engine's queue and tag
  *     state -- one SPU's tag wait satisfied by the other SPU's transfer.
  * ===========================================================================*/
-#define SPU_MAX_CONTEXTS 8
+
+/* 8 was too few. Policy-module contexts are persistent per (workload, lane) and
+ * never release their slot, so a title with 11 WWS workloads plus SPU thread groups ran the rest on
+ * the shared fallback engine, where one context's DMA clears a tag bit another context is waiting
+ * on (Killzone 3: a PM looping forever on an incomplete tag, the intermittent early stops). */
+#define SPU_MAX_CONTEXTS 64
 
 typedef struct {
     spu_context* volatile ctx;
@@ -306,7 +311,22 @@ typedef struct {
 static spu_mfc_slot s_mfc_slots[SPU_MAX_CONTEXTS];
 static SRWLOCK      s_mfc_claim_lock = SRWLOCK_INIT;
 
+/* Per-thread cache of the last lookup (the table is now 64 long and this runs on
+ * every MFC channel access). Only the owning thread releases a slot (spu_mfc_release), and it clears
+ * its own cache there; a slot's ctx never changes while it is claimed. */
+static SPU_THREAD_LOCAL spu_context * t_mfc_ctx;
+static SPU_THREAD_LOCAL mfc_engine * t_mfc_eng;
+
+static mfc_engine * mfc_for_slow(spu_context * ctx);
 static mfc_engine* mfc_for(spu_context* ctx)
+{
+    if (t_mfc_ctx == ctx && t_mfc_eng) return t_mfc_eng;
+    mfc_engine * e = mfc_for_slow(ctx);
+    t_mfc_ctx = ctx; t_mfc_eng = e;
+    return e;    
+}
+
+static mfc_engine * mfc_for_slow(spu_context * ctx)
 {
     for (int i = 0; i < SPU_MAX_CONTEXTS; i++)
         if (s_mfc_slots[i].ctx == ctx)
@@ -321,6 +341,10 @@ static mfc_engine* mfc_for(spu_context* ctx)
         mfc_engine_init(&s_mfc_slots[i].mfc);
         s_mfc_slots[i].ctx = ctx;
         e = &s_mfc_slots[i].mfc;
+        { static int s_hw = 0;   /* high-water mark of claimed slots */
+        if (i + 1 > s_hw) {
+            s_hw = i + 1;
+            if (s_hw % 8 == 0) { fprintf(stderr, "[SPU] %d MFC engine slots in use\n", s_hw); fflush(stderr); } } }
     }
     if (!e) {
         /* Out of slots: fall back to a shared engine (correct for single-SPU).
@@ -356,6 +380,7 @@ static mfc_engine* mfc_for(spu_context* ctx)
 void spu_mfc_release(spu_context* ctx)
 {
     if (!ctx) return;
+    if (t_mfc_ctx == ctx) { t_mfc_ctx = NULL; t_mfc_eng = NULL; }
     AcquireSRWLockExclusive(&s_mfc_claim_lock);
     for (int i = 0; i < SPU_MAX_CONTEXTS; i++) {
         if (s_mfc_slots[i].ctx != ctx) continue;
@@ -2004,7 +2029,7 @@ static int spu_smc_microstep(spu_context* ctx)
             pc += 4; continue;
         }
         if (op9 == 0x041 || op9 == 0x061) {                   /* stqa / lqa (abs) */
-            uint32_t a = (((w >> 7) & 0xFFFF) << 4) & SPU_LS_MASK & ~15u;
+            uint32_t a = (((w >> 7) & 0xFFFF) << 2) & SPU_LS_MASK & ~15u;
             if (op9 == 0x041) spu_ls_write128(ctx, a, ctx->gpr[rt]);
             else              ctx->gpr[rt] = spu_ls_read128(ctx, a);
             pc += 4; continue;
