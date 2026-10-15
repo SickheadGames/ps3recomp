@@ -297,11 +297,65 @@ static inline u128 spu_csflt(u128 a, int i8){ u128 r; double f=exp2((double)(i8-
 static inline u128 spu_cuflt(u128 a, int i8){ u128 r; double f=exp2((double)(i8-155));
     for(int i=0;i<4;i++) r._f32[i]=(float)((double)a._u32[i]*f); return r; }
 static inline u128 spu_fm(u128 a, u128 b) { u128 r; for(int i=0;i<4;i++) r._f32[i]=a._f32[i]*b._f32[i]; return r; }
-static inline u128 spu_fma(u128 a, u128 b, u128 c)  { u128 r; for(int i=0;i<4;i++) r._f32[i]=fmaf(a._f32[i], b._f32[i], c._f32[i]); return r; }
-static inline u128 spu_fms(u128 a, u128 b, u128 c)  { u128 r; for(int i=0;i<4;i++) r._f32[i]=fmaf(a._f32[i], b._f32[i], -c._f32[i]); return r; }
-static inline u128 spu_fnms(u128 a, u128 b, u128 c) { u128 r; for(int i=0;i<4;i++) r._f32[i]=fmaf(a._f32[i], -b._f32[i], c._f32[i]); return r; }
 static inline u128 spu_fceq(u128 a, u128 b) { u128 r; for(int i=0;i<4;i++) r._u32[i]=(a._f32[i]==b._f32[i])?0xFFFFFFFFu:0; return r; }
 static inline u128 spu_fcgt(u128 a, u128 b) { u128 r; for(int i=0;i<4;i++) r._u32[i]=(a._f32[i]>b._f32[i])?0xFFFFFFFFu:0; return r; }
+
+
+/* ---------------------------------------------------------------------------
+ * SPU fused multiply-add family.
+ *
+ * MSVC never defines __FMA__/__AVX2__ unless /arch says so, but it *does*
+ * permit FMA3 intrinsics unconditionally on x64 -- the same trap as
+ * __SSE4_1__. Without this guard every op became a ucrtbase fmaf() call,
+ * 4 per instruction: 16.19% of total CPU in the AC1 profile.
+ *
+ *   fma   rt = ra*rb + rc   ->  _mm_fmadd_ps
+ *   fms   rt = ra*rb - rc   ->  _mm_fmsub_ps
+ *   fnms  rt = rc - ra*rb   ->  _mm_fnmadd_ps   (NOT _mm_fnmsub_ps,
+ *                                                which is -(a*b)-c)
+ *
+ * These are lane-wise, so the SPU_W byte-order convention is irrelevant
+ * here -- no swizzle in/out, unlike shufb.
+ * --------------------------------------------------------------------------- */
+#if defined(__FMA__) || defined(__AVX2__)
+#  define SPU_HAVE_FMA3 1
+#elif defined(_MSC_VER) && !defined(__clang__) && (defined(_M_X64) || defined(_M_AMD64))
+#  define SPU_HAVE_FMA3 1   /* MSVC permits FMA3 intrinsics with no /arch flag */
+#else
+#  pragma message("ps3recomp: WARNING - SPU fma/fms/fnms using scalar CRT fmaf() fallback")
+#endif
+
+#if defined(SPU_HAVE_FMA3)
+#include <immintrin.h>
+
+static inline u128 spu_fma(u128 a, u128 b, u128 c) {        /* a*b + c */
+    __m128 A, B, C; memcpy(&A, &a, 16); memcpy(&B, &b, 16); memcpy(&C, &c, 16);
+    __m128 R = _mm_fmadd_ps(A, B, C);
+    u128 o; memcpy(&o, &R, 16); return o;
+}
+static inline u128 spu_fms(u128 a, u128 b, u128 c) {        /* a*b - c */
+    __m128 A, B, C; memcpy(&A, &a, 16); memcpy(&B, &b, 16); memcpy(&C, &c, 16);
+    __m128 R = _mm_fmsub_ps(A, B, C);
+    u128 o; memcpy(&o, &R, 16); return o;
+}
+static inline u128 spu_fnms(u128 a, u128 b, u128 c) {       /* c - a*b */
+    __m128 A, B, C; memcpy(&A, &a, 16); memcpy(&B, &b, 16); memcpy(&C, &c, 16);
+    __m128 R = _mm_fnmadd_ps(A, B, C);
+    u128 o; memcpy(&o, &R, 16); return o;
+}
+#endif
+
+/* Reference implementations -- also the pre-Haswell fallback. Kept visible
+ * unconditionally so tests/test_spu_fma.c can check both, matching shufb. */
+static inline u128 spu_fma_ref(u128 a, u128 b, u128 c) { u128 r; for (int i = 0; i < 4; i++) r._f32[i] = fmaf(a._f32[i], b._f32[i], c._f32[i]); return r; }
+static inline u128 spu_fms_ref(u128 a, u128 b, u128 c) { u128 r; for (int i = 0; i < 4; i++) r._f32[i] = fmaf(a._f32[i], b._f32[i], -c._f32[i]); return r; }
+static inline u128 spu_fnms_ref(u128 a, u128 b, u128 c) { u128 r; for (int i = 0; i < 4; i++) r._f32[i] = fmaf(a._f32[i], -b._f32[i], c._f32[i]); return r; }
+
+#if !defined(SPU_HAVE_FMA3)
+#  define spu_fma  spu_fma_ref
+#  define spu_fms  spu_fms_ref
+#  define spu_fnms spu_fnms_ref
+#endif
 
 /* ---- SPU double-precision (2 doubles/reg; dword i = words 2i(high),2i+1(low)).
  * Reassemble via _u32 -- our u128 is host-LE, so a naive _f64[i] would SWAP the
