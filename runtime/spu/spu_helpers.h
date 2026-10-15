@@ -176,12 +176,19 @@ static inline u128 spu_selb(u128 a, u128 b, u128 c) {
     r._u64[1]=(a._u64[1]&~c._u64[1])|(b._u64[1]&c._u64[1]);
     return r;
 }
+
+#if defined(__SSE4_1__) || defined(__AVX__) || defined(__AVX2__)
+#  define SPU_HAVE_SSE41 1
+#elif defined(_MSC_VER) && !defined(__clang__) && (defined(_M_X64) || defined(_M_AMD64))
+#  define SPU_HAVE_SSE41 1   /* MSVC permits SSE4.1 intrinsics with no /arch flag */
+#endif
+
 /* shufb special selectors per Cell BE ISA:
  *   sel & 0xE0 == 0xE0 -> 0x80
  *   sel & 0xC0 == 0xC0 -> 0xFF
  *   sel & 0xC0 == 0x80 -> 0x00
  *   otherwise           -> concat{a,b}[sel & 0x1F] */
-#if defined(__SSE4_1__)
+#if defined(SPU_HAVE_SSE41)
 #include <smmintrin.h>
 /* pshufb version: one of the hottest SPU ops (~11% of GH3's FMOD mixer task
  * as the byte loop). SPU byte P lives at host byte SPU_W(P), i.e. the bytes
@@ -225,6 +232,7 @@ static inline u128 spu_shufb_ref(u128 a, u128 b, u128 c) {
     return r;
 }
 #else
+#  pragma message("ps3recomp: WARNING - SPU vector ops using scalar byte-loop fallback")
 static inline u128 spu_shufb(u128 a, u128 b, u128 c) {
     /* shufb is defined on SPU byte positions. Our u128 is host-native LE, so SPU
      * byte P lives at _u8[SPU_W(P)]; map every access (the concat source, the
