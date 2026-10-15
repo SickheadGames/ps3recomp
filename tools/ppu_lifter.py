@@ -2474,17 +2474,52 @@ class PPULifter:
                     f"memcpy(&ctx->vr[{vd}], tmp + {sh}, 16); }}")
 
         # VMX integer multiply-accumulate
-        if mn == "vmsumshm":
-            # vmsumshm vD, vA, vB, vC: multiply s16×s16 pairs, add to s32 accumulator
-            vd = int(ops[0][1:])
-            va = int(ops[1][1:])
-            vb = int(ops[2][1:])
-            vc = int(ops[3][1:])
-            return (f"{{ int16_t* a=(int16_t*)&ctx->vr[{va}]; "
-                    f"int16_t* b=(int16_t*)&ctx->vr[{vb}]; "
-                    f"int32_t* c=(int32_t*)&ctx->vr[{vc}]; "
-                    f"int32_t* d=(int32_t*)&ctx->vr[{vd}]; "
-                    f"for(int i=0;i<4;i++) d[i]=c[i]+(int32_t)a[i*2]*(int32_t)b[i*2]+(int32_t)a[i*2+1]*(int32_t)b[i*2+1]; }}")
+        # ---- halfword/word ops with big-endian lane semantics ----
+        # ctx->vr holds guest bytes in memory (big-endian) order, so halfword and word
+        # lanes are assembled from their bytes explicitly; a raw int16_t*/uint32_t* cast
+        # reads byte-reversed lanes on a little-endian host.
+        if mn in ("vmulouh", "vmsumshm", "vmsumuhm", "vadduws", "vadduhs", "vpkuwum", "vpkswss",
+                  "vsubuws", "vsrb", "vsrab"):
+            regs = [int(o[1:]) for o in ops]
+            vd, va, vb = regs[0], regs[1], regs[2]
+            pre = (f"const uint8_t* A=(const uint8_t*)&ctx->vr[{va}]; "
+                   f"const uint8_t* B=(const uint8_t*)&ctx->vr[{vb}]; uint8_t R[16]; ")
+            H = "((uint32_t)({p})[2*({i})]<<8|(uint32_t)({p})[2*({i})+1])"
+            W = ("((uint32_t)({p})[4*({i})]<<24|(uint32_t)({p})[4*({i})+1]<<16|"
+                 "(uint32_t)({p})[4*({i})+2]<<8|(uint32_t)({p})[4*({i})+3])")
+            def h(pp, ii): return H.format(p=pp, i=ii)
+            def w(pp, ii): return W.format(p=pp, i=ii)
+            stw = "R[4*i]=(uint8_t)(r>>24); R[4*i+1]=(uint8_t)(r>>16); R[4*i+2]=(uint8_t)(r>>8); R[4*i+3]=(uint8_t)r;"
+            sth = "R[2*i]=(uint8_t)(r>>8); R[2*i+1]=(uint8_t)r;"
+            post = f" memcpy(&ctx->vr[{vd}], R, 16); }}"
+            if mn == "vmulouh":
+                body = f"for(int i=0;i<4;i++){{ uint32_t r={h('A','2*i+1')}*{h('B','2*i+1')}; {stw} }}"
+            elif mn in ("vmsumshm", "vmsumuhm"):
+                vc = regs[3]
+                cast = "(int32_t)(int16_t)" if mn == "vmsumshm" else "(uint32_t)"
+                pre += f"const uint8_t* C=(const uint8_t*)&ctx->vr[{vc}]; "
+                body = (f"for(int i=0;i<4;i++){{ uint32_t r=(uint32_t)({w('C','i')} "
+                        f"+ (uint32_t)({cast}{h('A','2*i')}*{cast}{h('B','2*i')}) "
+                        f"+ (uint32_t)({cast}{h('A','2*i+1')}*{cast}{h('B','2*i+1')})); {stw} }}")
+            elif mn == "vadduws":
+                body = (f"for(int i=0;i<4;i++){{ uint64_t s=(uint64_t){w('A','i')}+(uint64_t){w('B','i')}; "
+                        f"uint32_t r=(uint32_t)(s>0xFFFFFFFFull?0xFFFFFFFFull:s); {stw} }}")
+            elif mn == "vsubuws":
+                body = (f"for(int i=0;i<4;i++){{ uint32_t a={w('A','i')}, b={w('B','i')}; "
+                        f"uint32_t r=a>b?a-b:0u; {stw} }}")
+            elif mn == "vadduhs":
+                body = (f"for(int i=0;i<8;i++){{ uint32_t s={h('A','i')}+{h('B','i')}; "
+                        f"uint32_t r=s>0xFFFFu?0xFFFFu:s; {sth} }}")
+            elif mn == "vpkuwum":
+                body = (f"for(int i=0;i<8;i++){{ uint32_t r=(i<4?{w('A','i')}:{w('B','i-4')})&0xFFFFu; {sth} }}")
+            elif mn == "vpkswss":
+                body = (f"for(int i=0;i<8;i++){{ int32_t v=(int32_t)(i<4?{w('A','i')}:{w('B','i-4')}); "
+                        f"uint32_t r=(uint32_t)(uint16_t)(int16_t)(v>32767?32767:v<-32768?-32768:v); {sth} }}")
+            elif mn == "vsrb":
+                body = "for(int i=0;i<16;i++) R[i]=(uint8_t)(A[i]>>(B[i]&7u));"
+            else:  # vsrab
+                body = "for(int i=0;i<16;i++) R[i]=(uint8_t)((int8_t)A[i]>>(B[i]&7u));"
+            return "{ " + pre + body + post
 
         # VMX integer compare
         if mn.startswith("vcmpequh"):
@@ -2772,21 +2807,11 @@ class PPULifter:
             return (f"{{ int8_t* d=(int8_t*)&ctx->vr[{vd}]; int8_t* a=(int8_t*)&ctx->vr[{va}]; "
                     f"int8_t* b=(int8_t*)&ctx->vr[{vb}]; "
                     f"for(int i=0;i<16;i++){{int32_t r=(int32_t)a[i]+(int32_t)b[i]; d[i]=(int8_t)(r>127?127:r<-128?-128:r);}} }}")
-        if mn == "vadduhs":
-            vd, va, vb = int(ops[0][1:]), int(ops[1][1:]), int(ops[2][1:])
-            return (f"{{ uint16_t* d=(uint16_t*)&ctx->vr[{vd}]; uint16_t* a=(uint16_t*)&ctx->vr[{va}]; "
-                    f"uint16_t* b=(uint16_t*)&ctx->vr[{vb}]; "
-                    f"for(int i=0;i<8;i++){{uint32_t r=(uint32_t)a[i]+(uint32_t)b[i]; d[i]=(uint16_t)(r>65535u?65535u:r);}} }}")
         if mn == "vaddshs":
             vd, va, vb = int(ops[0][1:]), int(ops[1][1:]), int(ops[2][1:])
             return (f"{{ int16_t* d=(int16_t*)&ctx->vr[{vd}]; int16_t* a=(int16_t*)&ctx->vr[{va}]; "
                     f"int16_t* b=(int16_t*)&ctx->vr[{vb}]; "
                     f"for(int i=0;i<8;i++){{int32_t r=(int32_t)a[i]+(int32_t)b[i]; d[i]=(int16_t)(r>32767?32767:r<-32768?-32768:r);}} }}")
-        if mn == "vadduws":
-            vd, va, vb = int(ops[0][1:]), int(ops[1][1:]), int(ops[2][1:])
-            return (f"{{ uint32_t* d=(uint32_t*)&ctx->vr[{vd}]; uint32_t* a=(uint32_t*)&ctx->vr[{va}]; "
-                    f"uint32_t* b=(uint32_t*)&ctx->vr[{vb}]; "
-                    f"for(int i=0;i<4;i++){{uint64_t r=(uint64_t)a[i]+(uint64_t)b[i]; d[i]=(uint32_t)(r>0xFFFFFFFFu?0xFFFFFFFFu:r);}} }}")
 
         # Subtract saturate
         if mn == "vsubsws":
@@ -2905,12 +2930,6 @@ class PPULifter:
         # (vmaxsw handled above by the generic vmax/vmin loop)
 
         # Integer multiply (odd/even halfword)
-        if mn == "vmulouh":
-            vd, va, vb = int(ops[0][1:]), int(ops[1][1:]), int(ops[2][1:])
-            return (f"{{ uint32_t* d=(uint32_t*)&ctx->vr[{vd}]; uint16_t* a=(uint16_t*)&ctx->vr[{va}]; "
-                    f"uint16_t* b=(uint16_t*)&ctx->vr[{vb}]; "
-                    f"d[0]=(uint32_t)a[1]*(uint32_t)b[1]; d[1]=(uint32_t)a[3]*(uint32_t)b[3]; "
-                    f"d[2]=(uint32_t)a[5]*(uint32_t)b[5]; d[3]=(uint32_t)a[7]*(uint32_t)b[7]; }}")
         if mn == "vmuleuh":
             vd, va, vb = int(ops[0][1:]), int(ops[1][1:]), int(ops[2][1:])
             return (f"{{ uint32_t* d=(uint32_t*)&ctx->vr[{vd}]; uint16_t* a=(uint16_t*)&ctx->vr[{va}]; "
@@ -3036,16 +3055,6 @@ class PPULifter:
                     f"uint32_t* b=(uint32_t*)&ctx->vr[{vb}]; "
                     f"for(int i=0;i<4;i++){{uint32_t v=a[i]; d[i]=(uint16_t)(v>65535u?65535u:v);}} "
                     f"for(int i=0;i<4;i++){{uint32_t v=b[i]; d[4+i]=(uint16_t)(v>65535u?65535u:v);}} }}")
-
-        # Pack unsigned word -> unsigned halfword, modulo (vpkuwum): keep the
-        # low half of each word, no clamping. Same narrowing step as vpkuwus
-        # where the caller already knows the values fit.
-        if mn == "vpkuwum":
-            vd, va, vb = int(ops[0][1:]), int(ops[1][1:]), int(ops[2][1:])
-            return (f"{{ uint16_t* d=(uint16_t*)&ctx->vr[{vd}]; uint32_t* a=(uint32_t*)&ctx->vr[{va}]; "
-                    f"uint32_t* b=(uint32_t*)&ctx->vr[{vb}]; "
-                    f"for(int i=0;i<4;i++) d[i]=(uint16_t)(a[i]&0xFFFFu); "
-                    f"for(int i=0;i<4;i++) d[4+i]=(uint16_t)(b[i]&0xFFFFu); }}")
 
         # vmsummbm (VA-form, 4 operands)
         if mn == "vmsummbm":
