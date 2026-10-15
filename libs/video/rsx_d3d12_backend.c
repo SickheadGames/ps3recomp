@@ -586,9 +586,8 @@ static int init_d3d12(u32 width, u32 height)
                 ? DXGI_GPU_PREFERENCE_MINIMUM_POWER
                 : DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE;
             IDXGIAdapter1* adapter = NULL;
-            for (UINT ai = 0; factory6->lpVtbl->EnumAdapterByGpuPreference(
-                     factory6, ai, pref, &IID_IDXGIAdapter1, (void**)&adapter)
-                     != DXGI_ERROR_NOT_FOUND; ai++) {
+            for (UINT ai = 0; SUCCEEDED(factory6->lpVtbl->EnumAdapterByGpuPreference(
+                     factory6, ai, pref, &IID_IDXGIAdapter1, (void**)&adapter)); ai++) {
                 DXGI_ADAPTER_DESC1 ad;
                 adapter->lpVtbl->GetDesc1(adapter, &ad);
                 if (!(ad.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) &&
@@ -1960,6 +1959,68 @@ static u32 dr_cube_mask(const D3D12DrawRecord* dr)
     return m;
 }
 
+/* ===========================================================================
+ * Fragment pipeline cache.
+ *
+ * Replaces the linear scan + FIFO eviction. FIFO guarantees a 100% miss rate
+ * the moment the per-frame working set exceeds the array, which is the
+ * classic "it recompiles the same shader every draw" symptom.
+ *
+ * Open addressing, 16384 slots (~1 MB), never evicts. The 64-bit hash only
+ * picks the slot; the full key tuple is compared on hit, so a hash collision
+ * cannot hand back the wrong pipeline.
+ * =========================================================================== */
+
+typedef struct {
+    u32 ucode_len, vs_hash, gen, blend, rtfmt, uhash, cmask, cull, cube_mask;
+    s32 vs_idx, nrt, exp32;
+} FPKey;                      /* 12 x 4 bytes, no padding: memcmp-safe */
+
+typedef struct { u64 h; FPKey k; ID3D12PipelineState* pso; u32 dbg_fp_addr; } FPCEnt;
+
+#define FPC_BITS 14
+#define FPC_SIZE (1u << FPC_BITS)
+#define FPC_MASK (FPC_SIZE - 1u)
+
+static FPCEnt* s_fpc = NULL;
+static int     s_fpc_live = 0, s_fpc_hit = 0, s_fpc_miss = 0, s_fpc_full = 0;
+
+static inline u64 fpc_mix(u64 h, u32 v) 
+{
+    h ^= (u64)v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+    return h;
+}
+
+static u64 fpc_hash(const FPKey* k) 
+{
+    const u32* w = (const u32*)k;
+    u64 h = 0xCBF29CE484222325ull;
+    for (size_t i = 0; i < sizeof(FPKey) / 4; i++) h = fpc_mix(h, w[i]);
+    return h ? h : 1;                     /* 0 marks an empty slot */
+}
+
+/* Returns the slot holding this key, or the slot to insert into (pso == NULL).
+ * NULL only when the table is genuinely full. */
+static FPCEnt* fpc_slot(u64 h, const FPKey* k)
+{
+    if (!s_fpc) {
+        s_fpc = (FPCEnt*)calloc(FPC_SIZE, sizeof(FPCEnt));
+        if (!s_fpc) return NULL;
+    }
+    u32 i = (u32)(h >> 40) & FPC_MASK;
+    for (u32 n = 0; n < FPC_SIZE; n++) {
+        FPCEnt* e = &s_fpc[(i + n) & FPC_MASK];
+        if (e->h == 0) return e;                                   /* free slot */
+        if (e->h == h && memcmp(&e->k, k, sizeof(FPKey)) == 0) return e;  /* hit */
+    }
+    if (!s_fpc_full) {
+        s_fpc_full = 1;
+        ps3_log("[FPC] pipeline cache FULL (%u entries) - raise FPC_BITS%c", FPC_SIZE, 10);
+    }
+    return NULL;
+}
+
+
 static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, int nrt,
                                           DXGI_FORMAT rtfmt, int exp32, u32 cmask, u32 cull,
                                           u32 cube_mask)
@@ -1990,11 +2051,13 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
      * constant buffer the compiled shader is invariant under constant changes,
      * so hashing them made the pipeline key move every draw. */
     u32 uhash;
+    u32 usz = rsx_fp_program_size(vm_base + off, 4096);
+    if (usz == 0) usz = 64;
     {
-        u32 usz = rsx_fp_program_size(vm_base + off, 4096);
-        if (usz == 0) usz = 64;
         s_perf_pso_hashbytes += (int)usz;
-        if (getenv("FP_CONSTBUF") && getenv("FP_CONSTBUF")[0] == '0') {
+        static int _cbuf = -1;
+        if (_cbuf < 0) { const char* e = getenv("FP_CONSTBUF"); _cbuf = (e && e[0] == '0') ? 0 : 1; }
+        if (!_cbuf) {
             uhash = 2166136261u;
             const u8* up = vm_base + off;
             for (u32 i = 0; i < usz; i++) { uhash ^= up[i]; uhash *= 16777619u; }
@@ -2003,18 +2066,50 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
         }
     }
 
-    s_perf_pso_calls++;
-    for (int i = 0; i < s_d3d.vp_fp_n; i++)
-        if (s_d3d.vp_fp[i].fp_addr != fp_addr) continue;   /* cheap reject first */
-        else if (s_d3d.vp_fp[i].vs_idx == vs_idx &&
-            s_d3d.vp_fp[i].vs_hash == vs_hash && s_d3d.vp_fp[i].gen == s_d3d.vp_gen &&
-            s_d3d.vp_fp[i].blend == blend && s_d3d.vp_fp[i].nrt == nrt &&
-            s_d3d.vp_fp[i].rtfmt == (u32)rtfmt && s_d3d.vp_fp[i].exp32 == exp32 &&
-            s_d3d.vp_fp[i].ucode_hash == uhash && s_d3d.vp_fp[i].cmask == cmask &&
-            s_d3d.vp_fp[i].cull == cull &&
-            s_d3d.vp_fp[i].cube_mask == cube_mask)
-            return s_d3d.vp_fp[i].pso;
-    s_perf_pso_miss++;      /* falls through to a full decompile + D3DCompile */
+    /* CMASK_FORCE must be applied BEFORE the key is built -- the old code
+      * applied it after the lookup and stored the modified value, so every
+      * masked draw missed forever and inserted a duplicate each time. */
+    {
+        static int _cf = -1; if (_cf < 0) _cf = getenv("CMASK_FORCE") ? 1 : 0;
+        if (_cf) cmask = 0xF;
+    }
+
+    FPKey key;
+    memset(&key, 0, sizeof key);          /* zero padding-free struct for memcmp */
+
+    key.ucode_len = usz;                    /* address is NOT identity: the title ring-allocates
+                                             * the program to a new address every draw */
+    key.vs_idx = (s32)vs_idx;
+    key.vs_hash = vs_hash;
+    key.gen = s_d3d.vp_gen;
+    key.blend = blend;
+    key.nrt = (s32)nrt;
+    key.rtfmt = (u32)rtfmt;
+    key.exp32 = 0;                    /* (void)exp32 below: dead key field */
+    key.uhash = uhash;
+    key.cmask = cmask;
+    key.cull = cull;
+    key.cube_mask = cube_mask;
+
+    const u64 khash = fpc_hash(&key);
+    FPCEnt* slot = fpc_slot(khash, &key);
+    if (slot && slot->pso) 
+    { 
+        s_fpc_hit++; 
+        return slot->pso; 
+    }
+
+    s_perf_pso_miss++; s_fpc_miss++;
+    {
+        static int _n = 0;
+        if ((++_n % 64) == 0)
+            ps3_print("[FPC] hits=%d misses=%d live=%d gen=%u fp=0x%X len=%u uhash=%08X vs=%d/%08X (%.1f%% hit)%c",
+                s_fpc_hit, s_fpc_miss, s_fpc_live, s_d3d.vp_gen, fp_addr, usz, uhash,
+                (int)key.vs_idx, key.vs_hash,
+                (s_fpc_hit + s_fpc_miss) ? 100.0 * s_fpc_hit / (s_fpc_hit + s_fpc_miss) : 0.0,
+                10);
+    }
+
     /* PSOMISSDBG=1: on a miss, name the key field that differs from an existing
      * entry for the same program. "the cache misses" is not actionable; "it
      * misses on ucode_hash" is. */
@@ -2033,21 +2128,27 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
                     fp_addr, cnt[idx], 10); } } }
     { static int md = -1;
       if (md < 0) { const char* e = getenv("PSOMISSDBG"); md = e ? atoi(e) : 0; }
-      if (md) { static int n = 0;
-        for (int i = 0; i < s_d3d.vp_fp_n && n < 12; i++) {
-            VPFPEntry* q = &s_d3d.vp_fp[i];
-            if (q->fp_addr != fp_addr) continue;
-            n++;
-            ps3_log("[PSOMISS] fp=0x%X differs:%s%s%s%s%s%s%s%s%c", fp_addr,
-                    q->vs_idx != vs_idx        ? " vs_idx"     : "",
-                    q->vs_hash != vs_hash      ? " vs_hash"    : "",
-                    q->gen != s_d3d.vp_gen     ? " gen"        : "",
-                    q->blend != blend          ? " blend"      : "",
-                    q->nrt != nrt              ? " nrt"        : "",
-                    q->rtfmt != (u32)rtfmt     ? " rtfmt"      : "",
-                    q->ucode_hash != uhash     ? " ucode_hash" : "",
-                    q->cube_mask != cube_mask  ? " cube_mask"  : "", 10);
-            break;
+      if (md && s_fpc) { int shown = 0;
+        for (u32 i = 0; i < FPC_SIZE && shown < 2; i++) {
+            FPCEnt* q = &s_fpc[i];
+            if (!q->pso || q->k.uhash != key.uhash) continue;
+            shown++;
+            ps3_log("[PSOMISS] fp=0x%X differs:%s%s%s%s%s%s%s%s%s%c", q->dbg_fp_addr,
+                    q->k.vs_idx    != key.vs_idx    ? " vs_idx"    : "",
+                    q->k.vs_hash   != key.vs_hash   ? " vs_hash"   : "",
+                    q->k.gen       != key.gen       ? " gen"       : "",
+                    q->k.blend     != key.blend     ? " blend"     : "",
+                    q->k.nrt       != key.nrt       ? " nrt"       : "",
+                    q->k.rtfmt     != key.rtfmt     ? " rtfmt"     : "",
+                    q->k.uhash     != key.uhash     ? " uhash"     : "",
+                    q->k.cmask     != key.cmask     ? " cmask"     : "",
+                    q->k.cull      != key.cull      ? " cull"      : "", 10);
+            ps3_log("[PSOMISS]   old vs=%d/%08X gen=%u blend=%08X nrt=%d rtfmt=%u uhash=%08X cmask=%X cull=%X cube=%X%c",
+                    q->k.vs_idx, q->k.vs_hash, q->k.gen, q->k.blend, q->k.nrt,
+                    q->k.rtfmt, q->k.uhash, q->k.cmask, q->k.cull, q->k.cube_mask, 10);
+            ps3_log("[PSOMISS]   new vs=%d/%08X gen=%u blend=%08X nrt=%d rtfmt=%u uhash=%08X cmask=%X cull=%X cube=%X%c",
+                    key.vs_idx, key.vs_hash, key.gen, key.blend, key.nrt,
+                    key.rtfmt, key.uhash, key.cmask, key.cull, key.cube_mask, 10);
         } } }
     /* CUBEKEYDBG=1: which (program, cube mask) pairs are being compiled. If one
      * program shows several masks, the mask is unstable and is the reason the
@@ -2325,11 +2426,6 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
      * therefore means the guest EXPLICITLY masked every channel -- a depth-only
      * pass (e.g. DeferredShading's shadow-map generation). Honour it: forcing 0
      * back to 0xF splatters the depth pass's fragment colour onto the target. */
-    /* CMASK_FORCE=1: ignore the guest colour mask (write RGBA on every draw).
-     * A mis-decoded mask makes geometry rasterize correctly and write nothing,
-     * which is indistinguishable from "the draw never happened". */
-    { static int _cf = -1; if (_cf < 0) _cf = getenv("CMASK_FORCE") ? 1 : 0;
-      if (_cf) cmask = 0xF; }
     for (int _r = 0; _r < nrt; _r++)
         pd.BlendState.RenderTarget[_r].RenderTargetWriteMask = (UINT8)(cmask & 0xF);
     pd.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
@@ -2358,26 +2454,12 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
     }
     { static int _ok=0; if (_ok++<32) ps3_log("[FP] guest FP pipeline ready (fp=0x%08X)\n", fp_addr); }
 
-    /* insert (evict oldest when full) */
-    if (s_d3d.vp_fp_n >= VP_FP_CACHE) {
-        if (s_d3d.vp_fp[0].pso) s_d3d.vp_fp[0].pso->lpVtbl->Release(s_d3d.vp_fp[0].pso);
-        memmove(&s_d3d.vp_fp[0], &s_d3d.vp_fp[1], sizeof(VPFPEntry) * (VP_FP_CACHE - 1));
-        s_d3d.vp_fp_n = VP_FP_CACHE - 1;
+    /* insert -- no eviction; a compiled pipeline is kept for the process life */
+    if (slot) {
+        slot->h = khash; slot->k = key; slot->pso = pso;
+        slot->dbg_fp_addr = fp_addr; s_fpc_live++;
     }
-    s_d3d.vp_fp[s_d3d.vp_fp_n].fp_addr = fp_addr;
-    s_d3d.vp_fp[s_d3d.vp_fp_n].vs_idx  = vs_idx;
-    s_d3d.vp_fp[s_d3d.vp_fp_n].vs_hash = vs_hash;
-    s_d3d.vp_fp[s_d3d.vp_fp_n].gen     = s_d3d.vp_gen;
-    s_d3d.vp_fp[s_d3d.vp_fp_n].blend   = blend;
-    s_d3d.vp_fp[s_d3d.vp_fp_n].nrt     = nrt;
-    s_d3d.vp_fp[s_d3d.vp_fp_n].rtfmt   = (u32)rtfmt;
-    s_d3d.vp_fp[s_d3d.vp_fp_n].exp32   = exp32;
-    s_d3d.vp_fp[s_d3d.vp_fp_n].ucode_hash = uhash;
-    s_d3d.vp_fp[s_d3d.vp_fp_n].cmask   = cmask;
-    s_d3d.vp_fp[s_d3d.vp_fp_n].cull    = cull;
-    s_d3d.vp_fp[s_d3d.vp_fp_n].cube_mask = cube_mask;
-    s_d3d.vp_fp[s_d3d.vp_fp_n].pso     = pso;
-    s_d3d.vp_fp_n++;
+
     return pso;
 }
 
