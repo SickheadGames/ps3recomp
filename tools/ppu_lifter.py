@@ -3699,8 +3699,10 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts
         if cb:
             tables[all_insns[i].addr] = cb
             continue
-        # the indexed table load
-        lwzx = next((w for w in reversed(win) if w.mnemonic == 'lwzx'), None)
+        # the indexed table load: `lwzx`, or `lwax` (the sign-extending load
+        # some compilers use for signed offset tables; the entries are treated
+        # as signed below either way)
+        lwzx = next((w for w in reversed(win) if w.mnemonic in ('lwzx', 'lwax')), None)
         # 64-bit offset-table idiom emits `sldi rIdx,idx,2; add rT,rIdx,rBase;
         # lwz rEnt,0(rT)` instead of `lwzx rEnt,rIdx,rBase` (gcc -O2 PPC64).
         # Synthesize the equivalent lwzx operands (rEnt,rA,rB) so the base/offset
