@@ -611,6 +611,10 @@ class SPULifter:
         # emitted comment does not claim an ELF read that did not happen.
         self.entry_addr = None
         self.entry_src = "unknown"
+        # True for a position-independent module the GUEST loads into another
+        # image's local store (a DSP/codec overlay). It has no fingerprint of
+        # its own and is never dispatched as a workload -- see emit_source().
+        self.overlay = False
 
     # ------------------------------------------------------------------ #
     def lift_function(self, insns: list[SPUInstruction],
@@ -1129,7 +1133,11 @@ class SPULifter:
         lines.append("""extern "C" void spu_register_function(uint32_t addr, void (*fn)(spu_context*));""")
         lines.append("/* Call once at init to register this image's functions for")
         lines.append(" * indirect-branch dispatch (spu_indirect_branch). */")
-        lines.append(f"void {self.prefix}spu_recomp_register(void);")
+        if self.overlay:
+            lines.append(f"extern const uint32_t {self.prefix}overlay_entry;")
+            lines.append(f"void {self.prefix}spu_recomp_register_into(int image_id);")
+        else:
+            lines.append(f"void {self.prefix}spu_recomp_register(void);")
         lines.append("")
         return "\n".join(lines)
 
@@ -1211,6 +1219,26 @@ class SPULifter:
         lines.append("    { 0, NULL, NULL }")
         lines.append("};")
         lines.append("")
+        if self.overlay:
+            # An overlay is NOT a workload. The guest DMAs it into the local
+            # store of an image that is already running and reaches it with an
+            # ordinary bisl to an absolute LS address, so there is no
+            # fingerprint to dispatch on and no image of its own to create.
+            # Its functions have to land in the HOST image's table, which means
+            # the image id is only known at run time -- hence the parameter.
+            ent = ("0x%08X" % self.entry_addr) if self.entry_addr is not None \
+                  else ("0x%08X" % self.functions[0].start_addr)
+            lines.append(f"/* Overlay entry point, for the runtime to check the")
+            lines.append(f" * module landed where it was expected. */")
+            lines.append(f"const uint32_t {self.prefix}overlay_entry = {ent}u;")
+            lines.append("")
+            lines.append(f"void {self.prefix}spu_recomp_register_into(int image_id) {{")
+            lines.append("    for (const spu_func_entry* e = spu_function_table; e->func; ++e)")
+            lines.append("        spu_register_function_img(image_id, e->addr, e->func);")
+            lines.append("}")
+            lines.append("")
+            return "\n".join(lines)
+
         lines.append(f"void {self.prefix}spu_recomp_register(void) {{")
         if is_workload:
             # Register EVERY lifted entry, and register it against THIS image's
@@ -1316,6 +1344,26 @@ def main() -> None:
                         "tail from seeding spurious entries.")
     p.add_argument("--workload", action="store_true",
                    help="Enables registration as a spu job workload.")
+    p.add_argument("--overlay", action="store_true",
+                   help="This image is a position-independent module the guest "
+                        "DMAs into ANOTHER image's local store and calls with a "
+                        "plain bisl (a DSP/codec .pic). It has no fingerprint, "
+                        "so instead of registering a workload the generated "
+                        "source exports spu_recomp_register_into(int image_id), "
+                        "which the runtime calls with the id of the image that "
+                        "loaded the overlay. Use with --reloc. Not compatible "
+                        "with --workload.")
+    p.add_argument("--reloc", type=lambda x: int(x, 0), default=0,
+                   help="Offset added to EVERY address the ELF reports -- load "
+                        "base, function bounds and e_entry together -- for a "
+                        "position-independent module the guest loads somewhere "
+                        "other than its link address. A .pic whose image starts "
+                        "at vaddr 0 but is DMA'd so it begins at local store "
+                        "0x33900 needs --reloc 0x33900. Requires "
+                        "--auto-functions. Addresses YOU pass (--entry, "
+                        "--extra-funcs, --code-end) are taken as FINAL "
+                        "post-relocation local-store addresses, not link-time "
+                        "ones.")
     p.add_argument("--entry", type=lambda x: int(x, 0), default=None,
                    help="Local-store address of the image entry point, "
                         "published as the workload entry. Read automatically "
@@ -1328,6 +1376,17 @@ def main() -> None:
 
     entry_addr = None
     entry_src = "unknown"
+
+    if args.overlay and args.workload:
+        p.error("--overlay and --workload are different registration models: a "
+                "workload is dispatched by fingerprint and owns an image, an "
+                "overlay is called by absolute local-store address inside "
+                "someone else's image. Pick one.")
+
+    if args.reloc and not args.auto_functions:
+        p.error("--reloc relocates addresses read from an ELF header, so it "
+                "requires --auto-functions. For a raw image, --base already "
+                "says where it lives.")
 
     if args.auto_functions:
         from find_spu_functions import detect_functions, parse_elf, pick_text
@@ -1344,7 +1403,25 @@ def main() -> None:
             sys.stderr.write("[spu_lifter] ELF e_entry=0x%08X (text base=0x%08X "
                              "size=%d)\n" % (entry_addr, base, size))
         if args.base != 0:
-            base = args.base  # caller override
+            # --base swaps the load address but leaves `funcs` and e_entry in the
+            # ELF's own vaddr space, so every function keeps a link-time name at a
+            # run-time address -- it compiles, links, and runs the wrong code with
+            # no diagnostic. Relocating an ELF is --reloc's job.
+            p.error("--base cannot relocate an ELF: it moves the load address "
+                    "without moving the function bounds or e_entry with it, "
+                    "which silently mislabels every function. Use "
+                    "--reloc 0x<delta> instead (it shifts base, bounds and "
+                    "entry together), or drop --auto-functions for a raw read.")
+        if args.reloc:
+            base += args.reloc
+            funcs = [(s + args.reloc, e + args.reloc) for (s, e) in funcs]
+            if entry_addr is not None:
+                entry_addr += args.reloc
+            sys.stderr.write("[spu_lifter] --reloc 0x%X: load base -> 0x%08X, "
+                             "entry -> %s, %d bound(s) shifted\n"
+                             % (args.reloc, base,
+                                ("0x%08X" % entry_addr) if entry_addr is not None
+                                else "unknown", len(funcs)))
         bounds = funcs
     else:
         with open(args.input, "rb") as f:
@@ -1443,6 +1520,7 @@ def main() -> None:
     lifter = SPULifter(trace=args.trace, prefix=args.symbol_prefix)
     lifter.entry_addr = entry_addr
     lifter.entry_src = entry_src
+    lifter.overlay = args.overlay
     lifter.bi_r0_jump = compute_bi_r0_jumps(insns, bounds)
     if lifter.bi_r0_jump:
         print(f"  {len(lifter.bi_r0_jump)} `bi $r0` computed-jump site(s) "
