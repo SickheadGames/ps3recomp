@@ -1118,3 +1118,15 @@ s32 cellAudioUnsetPersonalDevice(s32 iPersonalStream)
     ps3_print("[cellAudio] UnsetPersonalDevice(stream=%d) - stub\n", iPersonalStream);
     return CELL_OK;
 }
+
+/*
+s32 cellAudioOutGetState(u32 audioOut, s32 iDevice, CellAudioOutState** state)
+{
+    if (!s_audio_initialized)
+        return CELL_AUDIO_ERROR_NOT_INIT;
+
+    ps3_print("[cellAudio] cellAudioOutGetState(audioOut=%d,iDevice=%d) - stub\n", audioOut, iDevice);
+
+    return CELL_OK;
+}
+*/

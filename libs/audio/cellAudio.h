@@ -65,6 +65,22 @@ typedef struct CellAudioPortConfig {
     u64 portAddr;           /* guest address of the port audio buffer */
 } CellAudioPortConfig;
 
+typedef struct {
+    uint8_t type;
+    uint8_t channel;
+    uint8_t fs;
+    uint8_t reserved;
+    uint32_t layout;
+} CellAudioOutSoundMode;
+
+typedef struct {
+    uint8_t state;
+    uint8_t encoder;
+    uint8_t reserved[6];
+    uint32_t downMixer;
+    CellAudioOutSoundMode soundMode;
+} CellAudioOutState;
+
 /* ---------------------------------------------------------------------------
  * Functions
  * -----------------------------------------------------------------------*/
@@ -114,6 +130,9 @@ s32 cellAudioSetPersonalDevice(s32 iPersonalStream, s32 iDevice);
 
 /* NID: 0x28BC1409 */
 s32 cellAudioUnsetPersonalDevice(s32 iPersonalStream);
+
+/* NID: 0XF4E3CAA0 */
+s32 cellAudioOutGetState(u32 audioOut, s32 iDevice, CellAudioOutState** state);
 
 #ifdef __cplusplus
 }

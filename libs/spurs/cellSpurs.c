@@ -1762,6 +1762,11 @@ static DWORD WINAPI spurs_kernel_thread(LPVOID p)
             u8 maxcont = *(vm_base + ea + SPURS_WKL_MAXCONT + wid);
             if (maxcont < 1) maxcont = 1;
             if (maxcont > 6) maxcont = 6;
+
+            // never dispatch spuNum >= nSpus
+            if (maxcont > si->nspus) 
+                maxcont = (u8)si->nspus;
+
             /* Do NOT exceed the workload's own contention: per-SPU rows in
              * the WWS sync struct live at +0x40+16*spuNum, and dispatching
              * spuNum >= nSpus made virtual SPU 3 write its bookkeeping row
@@ -1817,7 +1822,11 @@ static DWORD WINAPI spurs_kernel_thread(LPVOID p)
              * kernel for MORE work before exiting (selectWorkload calls >0);
              * an idle module exits immediately with polls==0. Grow the idle
              * streak on the latter, reset on the former. */
-            if (g_spurs_pm_polls == 0) { if (s_idle[wid] < 8) s_idle[wid]++; }
+            if (g_spurs_pm_polls == polls_before) 
+            { 
+                if (s_idle[wid] < 8) 
+                    s_idle[wid]++; 
+            }
             else s_idle[wid] = 0;
             }
         }
@@ -2263,7 +2272,14 @@ static struct {
     u32 spurs_ea;     /* owning SPURS instance; 0 = unknown (legacy caller) */
     int run_count;
     volatile long running;   /* 1 while a host thread walks this chain */
-    volatile long rerun; // Rerun dropped jobs.
+
+    volatile long rerun;      /* PENDING RUN COUNT (not a flag): the guest can
+                               * queue several runs while one walk is in flight,
+                               * and collapsing them to a bit drops frames. */
+    volatile long last_jobs;  /* jobs run by the most recent walk; 0 means the
+                               * walk parked without doing anything and has not
+                               * satisfied any pending request. */
+
 } s_jobchains[MAX_JOBCHAINS];
 
 static void jc_dump_commands(const char* tag, u32 ea, int max_words)
@@ -2761,10 +2777,17 @@ static void jc_signal_done(u32 jc_ea, int job_index)
     u32 qs[MAX_SPURS_QUEUES];
     int qn = jc_completion_queues(spurs_ea, qs, MAX_SPURS_QUEUES);
     if (qn == 0) {
+        /* Print the lookup key, the chain, and the registry as this thread sees
+         * it. If the table is non-empty here but holds a different spurs EA, it
+         * is eviction or a key mismatch; if it is EMPTY while the attach log
+         * clearly registered one, the table is per-thread. */
         static int warned = 0;
-        if (warned++ < 4)
+        if (warned++ < 16) {
             ps3_log("[cellSpurs] chain 0x%08X job %d done -- no completion queue "
-                   "for spurs 0x%08X (event dropped)\n", jc_ea, job_index, spurs_ea);
+                "for spurs 0x%08X (event dropped)\n",
+                jc_ea, job_index, spurs_ea);
+            //jc_dump_queue_registry();
+        }
         return;
     }
 
@@ -2795,8 +2818,9 @@ static void jc_execute(int slot)
     u32 ret_pc = s_jobchains[slot].ret_pc;
 
 /* Park the walk so the next RunJobChain resumes here. */
-#define JC_PARK(at) do { s_jobchains[slot].pc     = (at); \
-                         s_jobchains[slot].ret_pc = ret_pc; } while (0)
+#define JC_PARK(at) do { s_jobchains[slot].pc        = (at); \
+                         s_jobchains[slot].ret_pc    = ret_pc; \
+                         s_jobchains[slot].last_jobs = jobs; } while (0)
 
     int jobs = 0;
     /* Bound IDLE steps, not total steps. A SPURS job chain is frequently a
@@ -2809,10 +2833,18 @@ static void jc_execute(int slot)
     int idle = 0;
     for (;; idle++) {
         if (idle > 4096) {
-            ps3_log("[cellSpurs] chain 0x%08X: 4096 commands with no job run "
-                    "after %d job(s) -- malformed? (parked at 0x%08X)\n",
-                    jc_ea, jobs, pc);
-            JC_PARK(pc);
+            /* Park at the ENTRY, not at the runaway pc. Saving the bogus pc made
+             * each retry resume 0x8000 further into unrelated memory: this chain
+             * walked 0x3101D2E8 -> 0x38D2CFF0, 123 MB, across 4,002 bails in
+             * four seconds. Throttled, because 4,002 lines through a locked
+             * logger is a stall in its own right. */
+            static int _n = 0;
+            if (_n++ < 8)
+                ps3_log("[cellSpurs] chain 0x%08X: 4096 commands with no job run "
+                    "after %d job(s) -- malformed, resetting to entry 0x%08X "
+                    "(was at 0x%08X)\n", jc_ea, jobs, entry_ea, pc);
+            ret_pc = 0;
+            JC_PARK(entry_ea);
             return;
         }
         u64 cmd = vm_read64(pc);
@@ -2832,9 +2864,27 @@ static void jc_execute(int slot)
             jc_signal_done(jc_ea, idx);
             pc += 8; continue;
         }
-        if (op == 1) { pc = (u32)(cmd & ~7ull); continue; }   /* RESET_PC */
-        if (op == 3) { pc = (u32)(cmd & ~7ull); continue; }   /* NEXT     */
-        if (op == 4) { ret_pc = pc + 8; pc = (u32)(cmd & ~7ull); continue; }  /* CALL */
+        /* One garbage command word teleports the walker anywhere in guest
+         * memory, and nothing downstream notices. A NEXT that lands megabytes
+         * from the chain's entry is not a NEXT. */
+#define JC_PC_OK(t)  ((uint32_t)((t) - entry_ea) < 0x100000u)
+        if (op == 1 || op == 3 || op == 4) {
+            u32 tgt = (u32)(cmd & ~7ull);
+            if (!JC_PC_OK(tgt)) {
+                static int _n = 0;
+                if (_n++ < 8)
+                    ps3_log("[cellSpurs] chain 0x%08X: bogus branch target 0x%08X "
+                        "at pc=0x%08X (entry 0x%08X) -- resetting\n",
+                        jc_ea, tgt, pc, entry_ea);
+                ret_pc = 0;
+                JC_PARK(entry_ea);
+                return;
+            }
+            if (op == 4) ret_pc = pc + 8;
+            pc = tgt;
+            continue;
+        }
+
         if (op == 7) {
             if (ext == (7 | (15 << 3))) {                     /* END */
                 ps3_log("[cellSpurs] chain 0x%08X: END after %d job(s) "
@@ -2872,8 +2922,16 @@ static void jc_execute(int slot)
 #undef JC_PARK
 }
 
+static inline void spu_thread_set_fp_mode(void)
+{
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);          /* denormal results  -> 0 */
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);  /* denormal operands -> 0 */
+}
+
 static DWORD WINAPI jc_thread(LPVOID p)
 {
+    spu_thread_set_fp_mode();
+
     int slot = (int)(intptr_t)p;
     /* TIMING PROBE (SPURS_JC_DELAY=ms): the real jm2 chain walker is async and
      * picks up jobs as the PPU appends them + fills their descriptors. Our walk
@@ -2883,13 +2941,58 @@ static DWORD WINAPI jc_thread(LPVOID p)
     { const char* d = getenv("SPURS_JC_DELAY");
       if (d && *d) Sleep((unsigned)atoi(d)); }
 
+    /* The old loop lost run requests two ways. (1) It cleared `running` BEFORE
+     * taking the rerun token, so a RunJobChain landing in that window spawned a
+     * second walker while this one stole its token -- two threads sharing one
+     * slot's non-atomic pc. (2) jc_execute parks ON the END by design, so a
+     * rerun consumed before the PPU overwrites that slot runs zero jobs and
+     * spends the token on nothing. AC1 died there: one deferral and the chain
+     * never ran again, leaving the PPU barrier at obj+0x1D8 stuck at 5 of 9.
+     *
+     * So: pending runs are a count, a walk that ran no jobs may not consume
+     * one, and `running` is only released in the same window where the count is
+     * proven empty. */
+    long pending = 0;
+    int  stall = 0;
     for (;;) {
         jc_execute(slot);
+
+        pending += _InterlockedExchange(&s_jobchains[slot].rerun, 0);
+
+        if (pending > 0) {
+            if (s_jobchains[slot].last_jobs > 0) 
+            {
+                pending--;              /* this walk earned one request */
+                stall = 0;
+                continue;               /* still holding `running` */
+            }
+            /* Parked on an END the guest has not yet overwritten, or on a guard
+             * that is still closed. The real SPURS kernel polls here; exiting
+             * is what wedged the boot. */
+            if (++stall > 4000) {       /* ~4 s */
+                ps3_log("[cellSpurs] chain 0x%08X: %ld pending run(s) but no job "
+                    "ran in 4 s (parked at 0x%08X) -- giving up\n",
+                    s_jobchains[slot].jc_ea, pending, s_jobchains[slot].pc);
+                break;
+            }
+#ifdef _WIN32
+            Sleep(1);
+#else
+            usleep(1000);
+#endif
+            continue;
+        }
+
+        /* Nothing pending: publish not-running, then re-check, so a request
+         * that lands in the window is re-claimed here instead of spawning a
+         * racing second walker over the same slot. */
         _InterlockedExchange(&s_jobchains[slot].running, 0);
         if (_InterlockedExchange(&s_jobchains[slot].rerun, 0) == 0)
             break;
         if (_InterlockedCompareExchange(&s_jobchains[slot].running, 1, 0) != 0)
-            break;
+            break;                      /* a fresh walker took over */
+        pending++;
+        stall = 0;
     }
 
     /* Tell the application the chain is done. Without this the walk finishes
@@ -2933,12 +3036,13 @@ static s32 jc_start(u64 jc_ea, const char* who)
         }
         else
         {
+            long q = _InterlockedIncrement(&s_jobchains[i].rerun);
             {
                 static int _n = 0;
-                if (_n++ < 8)
-                    ps3_log("[cellSpurs] RunJobChain(jc=0x%08X): walker busy -- deferred\n", (u32)jc_ea);
+                if (_n++ < 32)
+                    ps3_log("[cellSpurs] RunJobChain(jc=0x%08X): walker busy -- "
+                        "LATCHED (%ld pending)\n", (u32)jc_ea, q);
             }
-            _InterlockedExchange(&s_jobchains[i].rerun, 1);
         }
         return CELL_OK;
     }

@@ -267,7 +267,61 @@ static inline u128 spu_rotmi(u128 a, int i7)  { u128 r; int sh=(0-i7)&0x3F; for(
 static inline u128 spu_rotmai(u128 a, int i7) { u128 r; int sh=(0-i7)&0x3F; for(int i=0;i<4;i++) r._s32[i]=(sh>31)?(a._s32[i]>>31):(a._s32[i]>>sh); return r; }
 static inline u128 spu_rotmhi(u128 a, int i7) { u128 r; int sh=(0-i7)&0x1F; for(int i=0;i<8;i++) r._u16[i]=(sh>15)?0:(uint16_t)(a._u16[i]>>sh); return r; }
 static inline u128 spu_shlqbyi(u128 a, int sh) { u128 r=spu_zero(); sh&=0x1F; for(int i=0;i<16;i++){ int s=i+sh; if(s<16) r._u8[SPU_W(i)]=a._u8[SPU_W(s)]; } return r; }
-static inline u128 spu_rotqbyi(u128 a, int sh) { u128 r; sh&=0x0F; for(int i=0;i<16;i++) r._u8[SPU_W(i)]=a._u8[SPU_W((i+sh)&0x0F)]; return r; }
+
+
+/* ---------------------------------------------------------------------------
+ * rotqby / rotqbyi.  SPU: rt byte i = ra byte (i + s) mod 16 (rotate LEFT).
+ *
+ * s = 4/8/12 are pure WORD rotations, so with SPU_W(p)=p^3 storage they need
+ * no byte work at all -- one pshufd. Other counts are one pshufb against a
+ * precomputed mask. Verified bit-exact vs the byte loop over all 16 counts.
+ * --------------------------------------------------------------------------- */
+static const uint8_t g_rotqby_mask[16][16] = {
+    {  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15 },
+    {  7,  0,  1,  2, 11,  4,  5,  6, 15,  8,  9, 10,  3, 12, 13, 14 },
+    {  6,  7,  0,  1, 10, 11,  4,  5, 14, 15,  8,  9,  2,  3, 12, 13 },
+    {  5,  6,  7,  0,  9, 10, 11,  4, 13, 14, 15,  8,  1,  2,  3, 12 },
+    {  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,  0,  1,  2,  3 },
+    { 11,  4,  5,  6, 15,  8,  9, 10,  3, 12, 13, 14,  7,  0,  1,  2 },
+    { 10, 11,  4,  5, 14, 15,  8,  9,  2,  3, 12, 13,  6,  7,  0,  1 },
+    {  9, 10, 11,  4, 13, 14, 15,  8,  1,  2,  3, 12,  5,  6,  7,  0 },
+    {  8,  9, 10, 11, 12, 13, 14, 15,  0,  1,  2,  3,  4,  5,  6,  7 },
+    { 15,  8,  9, 10,  3, 12, 13, 14,  7,  0,  1,  2, 11,  4,  5,  6 },
+    { 14, 15,  8,  9,  2,  3, 12, 13,  6,  7,  0,  1, 10, 11,  4,  5 },
+    { 13, 14, 15,  8,  1,  2,  3, 12,  5,  6,  7,  0,  9, 10, 11,  4 },
+    { 12, 13, 14, 15,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11 },
+    {  3, 12, 13, 14,  7,  0,  1,  2, 11,  4,  5,  6, 15,  8,  9, 10 },
+    {  2,  3, 12, 13,  6,  7,  0,  1, 10, 11,  4,  5, 14, 15,  8,  9 },
+    {  1,  2,  3, 12,  5,  6,  7,  0,  9, 10, 11,  4, 13, 14, 15,  8 },
+};
+
+#if defined(SPU_HAVE_SSE41)
+static inline u128 spu_rotqby(u128 a, u128 b) {
+    __m128i A, M; memcpy(&A, &a, 16);
+    memcpy(&M, g_rotqby_mask[b._u32[0] & 15], 16);
+    __m128i R = _mm_shuffle_epi8(A, M);
+    u128 o; memcpy(&o, &R, 16); return o;
+}
+static inline u128 spu_rotqbyi(u128 a, int imm) {
+    __m128i A, R; memcpy(&A, &a, 16);
+    switch (imm & 15) {
+    case 0:  R = A; break;
+    case 4:  R = _mm_shuffle_epi32(A, _MM_SHUFFLE(0, 3, 2, 1)); break;
+    case 8:  R = _mm_shuffle_epi32(A, _MM_SHUFFLE(1, 0, 3, 2)); break;
+    case 12: R = _mm_shuffle_epi32(A, _MM_SHUFFLE(2, 1, 0, 3)); break;
+    default: {
+        __m128i M; memcpy(&M, g_rotqby_mask[imm & 15], 16);
+        R = _mm_shuffle_epi8(A, M);
+    } break;
+    }
+    u128 o; memcpy(&o, &R, 16); return o;
+}
+#else
+static inline u128 spu_rotqby(u128 a, u128 b) { int sh = b._u32[0] & 0x0F; u128 r; for (int i = 0; i < 16; i++) r._u8[SPU_W(i)] = a._u8[SPU_W((i + sh) & 0x0F)]; return r; }
+static inline u128 spu_rotqbyi(u128 a, int sh) { u128 r; sh &= 0x0F; for (int i = 0; i < 16; i++) r._u8[SPU_W(i)] = a._u8[SPU_W((i + sh) & 0x0F)]; return r; }
+#endif
+
+
 /* Bit-level quadword shifts/rotates operate on the WHOLE 128-bit big-endian
  * value. Our _u64[0]/_u64[1] are word-SCRAMBLED (host-LE: _u64[0] = word0 |
  * word1<<32, but SPU's MS half is word0<<32 | word1), so native shifts on them
@@ -416,7 +470,6 @@ static inline u128 spu_rotqbi(u128 a, u128 b){ int sh=b._u32[0]&7; if(!sh) retur
     uint64_t nhi=(hi<<sh)|(lo>>(64-sh)), nlo=(lo<<sh)|(hi>>(64-sh));
     u128 r; r._u32[0]=(uint32_t)(nhi>>32); r._u32[1]=(uint32_t)nhi; r._u32[2]=(uint32_t)(nlo>>32); r._u32[3]=(uint32_t)nlo; return r; }
 static inline u128 spu_shlqby(u128 a, u128 b){ int sh=b._u32[0]&0x1F; u128 r=spu_zero(); if(sh>=16) return r; for(int i=0;i<16;i++){ int s=i+sh; if(s<16) r._u8[SPU_W(i)]=a._u8[SPU_W(s)]; } return r; }
-static inline u128 spu_rotqby(u128 a, u128 b){ int sh=b._u32[0]&0x0F; u128 r; for(int i=0;i<16;i++) r._u8[SPU_W(i)]=a._u8[SPU_W((i+sh)&0x0F)]; return r; }
 static inline u128 spu_shlqbybi(u128 a, u128 b){ int sh=(b._u32[0]>>3)&0x1F; u128 r=spu_zero(); if(sh>=16) return r; for(int i=0;i<16;i++){ int s=i+sh; if(s<16) r._u8[SPU_W(i)]=a._u8[SPU_W(s)]; } return r; }
 static inline u128 spu_rotqbybi(u128 a, u128 b){ int sh=(b._u32[0]>>3)&0x0F; u128 r; for(int i=0;i<16;i++) r._u8[SPU_W(i)]=a._u8[SPU_W((i+sh)&0x0F)]; return r; }
 

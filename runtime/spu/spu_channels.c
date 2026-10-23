@@ -174,6 +174,8 @@ void spu_dbg_e60(spu_context* ctx)
     fflush(stderr);
 }
 
+void spu_mfc_release(spu_context* ctx);
+
 /* SPU `stop` / stop-and-signal. A real SPU stop HALTS the core; the previous
  * lifted emission only did `status=...; return;`, which unwound ONE frame and
  * let the caller's service loop keep running -- so a SPURS policy doing
@@ -217,6 +219,7 @@ int spu_run_with_halt(void (*entry)(spu_context*), spu_context* ctx)
      * contexts are stack locals, so the address recurs and a stale save from
      * an earlier run would be restored over this job's arguments. */
     { extern void spu_irq_regs_forget(spu_context*); spu_irq_regs_forget(ctx); }
+    spu_mfc_release(ctx);
     ctx->steps = 0;   /* fresh run: step 0 is the entry */
     /* The host stack is empty here by definition, so no lifted caller frame
      * is live. A persistent context (a SPURS policy module re-entered every
@@ -273,6 +276,7 @@ int spu_run_with_halt(void (*entry)(spu_context*), spu_context* ctx)
     yz_lockstep_unregister(ctx);   /* leave the ring; hand the token onward */
     s_spu_halt_armed = outer_armed;
     if (outer_armed) memcpy(s_spu_halt_env, outer_env, sizeof(jmp_buf));
+    spu_mfc_release(ctx);          /* run over: give the slot back */
     return halted;
 }
 
@@ -2109,6 +2113,96 @@ static int spu_smc_microstep(spu_context* ctx)
     return 0;
 }
 
+static void spu_report_unlifted(spu_context* ctx)
+{
+    const uint32_t pc = ctx->pc & SPU_LS_MASK;
+    const uint32_t lr = ctx->gpr[0]._u32[0] & SPU_LS_MASK;
+
+    char b[4096];
+    int  n = 0;
+#define EMIT(...) do {                                                   \
+        if (n < (int)sizeof b - 1) {                                         \
+            int r_ = snprintf(b + n, sizeof b - (size_t)n, __VA_ARGS__);     \
+            n = (r_ < 0) ? n                                                 \
+              : (n + r_ > (int)sizeof b - 1 ? (int)sizeof b - 1 : n + r_);   \
+        } } while (0)
+
+    EMIT("[spu] img=%d branched into unlifted LS 0x%05X (lr=0x%05X)"
+        " -- ending the job\n", ctx->image_id, pc, lr);
+
+    /* Ring. ASSUMES g_spu_pch_n is the total number of PCs ever pushed.
+     * The valid entries are the last min(n,8). The old loop started at
+     * (g_spu_pch_n + 0) and used `|| g_spu_pch[idx]` to skip holes, which
+     * printed un-filled slots as 0x00000 and would also hide a genuinely
+     * zero PC. That is where the leading "0x00000" in every log came from --
+     * it was never a dispatched address.
+     * If g_spu_pch_n is instead a write INDEX already masked to 0..7, the
+     * un-filled slots cannot be told from real ones; add a separate counter. */
+    {
+        const unsigned total = g_spu_pch_n;
+        const unsigned have = total < 8u ? total : 8u;
+        EMIT("      last %u dispatched PC(s), oldest first:", have);
+        for (unsigned q = 0; q < have; q++)
+            EMIT(" 0x%05X", g_spu_pch[(total - have + q) & 7u]);
+        EMIT("\n");
+    }
+
+    /* Eight words at the target and at the return address: separates
+     * "the lift missed a function" from "this branch should never have
+     * happened". */
+    {
+        const uint32_t at[2] = { pc, lr };
+        for (int k = 0; k < 2; k++) {
+            EMIT("      LS[0x%05X]:", at[k]);
+            for (uint32_t o = 0; o + 3 < 32u && at[k] + o + 3 < SPU_LS_SIZE; o += 4)
+                EMIT(" %02X%02X%02X%02X",
+                    ctx->ls[at[k] + o], ctx->ls[at[k] + o + 1],
+                    ctx->ls[at[k] + o + 2], ctx->ls[at[k] + o + 3]);
+            EMIT("\n");
+        }
+    }
+
+    /* The whole local store to a file, the way the job-dispatch MISS path
+     * already does for job binaries. 256 KB on a fatal path costs nothing and
+     * removes every guess about where to put a window: the module header
+     * (.SpuGUID, .note.spu_name) is what identified both previous images, and
+     * it sits below the branch target at an offset you do not know yet.
+     * Named by a content fingerprint so repeated failures collapse onto one
+     * file instead of one per occurrence. */
+    {
+        uint64_t fp = 1469598103934665603ull;             /* FNV-1a 64 */
+        for (uint32_t o = 0; o < SPU_LS_SIZE; o++)
+            fp = (fp ^ ctx->ls[o]) * 1099511628211ull;
+
+        const char* _dir = getenv("SPU_DUMP_MISS");
+
+        char path[512];
+        snprintf(path, sizeof path, "%s/spu_overlays/ls_%016llX_img%d_pc%05X.bin",
+            _dir, (unsigned long long)fp, ctx->image_id, pc);
+
+        FILE* f = fopen(path, "wb");
+        if (f && fwrite(ctx->ls, 1, SPU_LS_SIZE, f) == SPU_LS_SIZE) {
+            fclose(f);
+            EMIT("      wrote all %u bytes of local store to %s\n",
+                (unsigned)SPU_LS_SIZE, path);
+        }
+        else {
+            if (f) fclose(f);
+            EMIT("      could NOT write %s\n", path);
+        }
+    }
+
+    ps3_log("%s", b);          /* one call, one write, nothing can split it */
+#undef EMIT
+
+    /* And do not let the caller claim success. The async wrapper prints
+     * "RETURNED rc=0 (job ran to completion, did not loop)" immediately after
+     * this, which is why this exact failure has twice been indistinguishable
+     * from a missing image. Set whatever your context carries for a fault and
+     * make the wrapper propagate it. */
+     /* ctx->fault = SPU_FAULT_UNLIFTED_PC; */
+}
+
 void spu_indirect_branch(spu_context* ctx)
 {
     /* Real SPU bi/bisl mask the target to the 256 KB local store; the high bits
@@ -2348,30 +2442,7 @@ void spu_indirect_branch(spu_context* ctx)
         for (int i = 0; i < n_seen; i++) if (seen[i] == ctx->pc) { known = 1; break; }
         if (!known && n_seen < 16) {
             seen[n_seen++] = ctx->pc;
-            ps3_log("[spu] img=%d branched into unlifted LS 0x%05X "
-                    "(lr=0x%05X) -- ending the job\n",
-                    ctx->image_id, ctx->pc, ctx->gpr[0]._u32[0] & SPU_LS_MASK);
-            abort();
-            { ps3_log("      last dispatched PCs (oldest first):");
-              for (unsigned q = 0; q < 8; q++) {
-                  unsigned idx = (g_spu_pch_n + q) & 7u;
-                  if (g_spu_pch_n > q || g_spu_pch[idx]) ps3_log(" 0x%05X", g_spu_pch[idx]);
-              }
-              ps3_log("%c", 10); }
-            /* Is there real code at the target, or is the pc garbage? Eight
-             * words at the target and at the return address separate "the lift
-             * missed a function" from "this branch should never have happened". */
-            { uint32_t a[2]; a[0] = ctx->pc & SPU_LS_MASK;
-              a[1] = ctx->gpr[0]._u32[0] & SPU_LS_MASK;
-              for (int k = 0; k < 2; k++) {
-                  ps3_log("      LS[0x%05X]:", a[k]);
-                  for (uint32_t o = 0; o < 32 && a[k] + o + 3 < SPU_LS_SIZE; o += 4)
-                      ps3_log(" %02X%02X%02X%02X",
-                              ctx->ls[a[k]+o], ctx->ls[a[k]+o+1],
-                              ctx->ls[a[k]+o+2], ctx->ls[a[k]+o+3]);
-                  ps3_log("\n");
-              } }
-            fflush(stderr);
+            spu_report_unlifted(ctx);
         }
         /* SPU_INTERP_UNLIFTED=1: if real code is present at the target, run it
          * through the interpreter instead of ending the job. No lift can exist

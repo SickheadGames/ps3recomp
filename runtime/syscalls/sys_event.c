@@ -127,6 +127,7 @@ uint32_t sys_event_queue_create_direct(uint64_t key, int32_t size)
     q->active   = 1;
     q->key      = key;
     q->capacity = size;
+    q->waiters = 0;
     q->type     = SYS_PPU_QUEUE;
 
     /* The waiter primitives MUST be initialised here too. memset+fields is
@@ -298,6 +299,8 @@ void sys_event_queue_cancel_by_id(uint32_t queue_id)
 /* Diagnostic gates polled on every receive (~140k/s in GH3): read once. */
 static int s_ps3_waitbt = -1, s_ydkj_sputask = -1, s_ydkj_spurs_ready = -1, s_ydkj_fakecomplete = -1, s_ydkj_hle_draw = -1;
 
+static SPU_THREAD_LOCAL uint32_t s_spin_q = 0, s_spin_n = 0;
+
 int64_t sys_event_queue_receive(ppu_context* ctx)
 {
     uint32_t queue_id    = LV2_ARG_U32(ctx, 0);
@@ -324,20 +327,7 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
         }
     }
 
-    /* A guest that receives on a queue id it never initialised gets ESRCH
-     * straight back and, if it does not check, spins on it. That is the
-     * guest's bug, but returning instantly makes it ours: GT5P's Job Manager
-     * handler hit this and issued 2,323,673 receives in a 45-second boot,
-     * pinning a core and starving the very threads that would have made
-     * progress. Yield before answering -- it costs a mis-behaving caller
-     * nothing it was entitled to, and stops one bad loop deciding how much
-     * CPU every other thread gets. */
-    if (queue_id == 0 || queue_id > SYS_EVENT_QUEUE_MAX) {
-#ifdef _WIN32
-        SwitchToThread();
-#else
-        sched_yield();
-#endif
+
     /* WAITBT_EVERY=<n>: the same dump, but every nth wait per (tid,queue)
      * instead of once. The one-shot above names where a thread FIRST parks,
      * which is a boot-time answer; when a title runs for a while and then stops
@@ -357,7 +347,12 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
           }
       } }
 
-    if (queue_id == 0 || queue_id > SYS_EVENT_QUEUE_MAX)
+    if (queue_id == 0 || queue_id > SYS_EVENT_QUEUE_MAX) {
+#ifdef _WIN32
+        SwitchToThread();
+#else
+        sched_yield();
+#endif
         return (int64_t)(int32_t)CELL_ESRCH;
     }
 
@@ -484,9 +479,11 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
     EnterCriticalSection(&q->lock);
 
     if (timeout_us == 0) {
+        q->waiters++;
         while (q->count == 0 && q->active && !q->cancelled) {
             SleepConditionVariableCS(&q->not_empty, &q->lock, INFINITE);
         }
+        q->waiters--;
         if (q->count == 0 && q->cancelled) {
             LeaveCriticalSection(&q->lock);
             return (int64_t)(int32_t)CELL_ECANCELED;
@@ -505,14 +502,24 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
         }
     } else {
         DWORD ms = (DWORD)(timeout_us / 1000);
+
+        /* Registered as a waiter for the same reason as the infinite case. The
+         * decrement must also happen on the timeout return, or the count leaks
+         * and the queue permanently accepts one extra buffered event per leaked
+         * waiter. */
+        q->waiters++;
+
         while (q->count == 0 && q->active && !q->cancelled) {
             if (!SleepConditionVariableCS(&q->not_empty, &q->lock, ms)) {
                 if (GetLastError() == ERROR_TIMEOUT) {
                     LeaveCriticalSection(&q->lock);
+                    q->waiters--;
                     return (int64_t)(int32_t)CELL_ETIMEDOUT;
                 }
             }
         }
+
+        q->waiters--;
     }
 
     if (q->count == 0 && q->cancelled) {
@@ -525,7 +532,7 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
     }
 
     sys_event_t evt = q->buffer[q->head];
-    q->head = (q->head + 1) % q->capacity;
+    q->head = (q->head + 1) % SYS_EVENT_QUEUE_BUF_PHY;
     q->count--;
 
     LeaveCriticalSection(&q->lock);
@@ -533,9 +540,11 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
     pthread_mutex_lock(&q->lock);
 
     if (timeout_us == 0) {
+        q->waiters++;
         while (q->count == 0 && q->active && !q->cancelled) {
             pthread_cond_wait(&q->not_empty, &q->lock);
         }
+        q->waiters--;
     } else {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
@@ -545,13 +554,16 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
             ts.tv_sec++;
             ts.tv_nsec -= 1000000000L;
         }
+        q->waiters++;
         while (q->count == 0 && q->active && !q->cancelled) {
             int rc = pthread_cond_timedwait(&q->not_empty, &q->lock, &ts);
             if (rc == ETIMEDOUT) {
                 pthread_mutex_unlock(&q->lock);
+                q->waiters--;
                 return (int64_t)(int32_t)CELL_ETIMEDOUT;
             }
         }
+        q->waiters--;
     }
 
     if (q->count == 0 && q->cancelled) {
@@ -564,7 +576,7 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
     }
 
     sys_event_t evt = q->buffer[q->head];
-    q->head = (q->head + 1) % q->capacity;
+    q->head = (q->head + 1) % SYS_EVENT_QUEUE_BUF_PHY;
     q->count--;
 
     pthread_mutex_unlock(&q->lock);
@@ -645,7 +657,7 @@ int64_t sys_event_queue_tryreceive(ppu_context* ctx)
 
     while (received < max_count && q->count > 0) {
         sys_event_t evt = q->buffer[q->head];
-        q->head = (q->head + 1) % q->capacity;
+        q->head = (q->head + 1) % SYS_EVENT_QUEUE_BUF_PHY;
         q->count--;
 
         if (event_addr != 0) {
@@ -736,7 +748,7 @@ static int event_queue_push(sys_event_queue_info* q, const sys_event_t* evt)
     pthread_mutex_lock(&q->lock);
 #endif
 
-    if (q->count >= q->capacity) {
+    if (q->count >= q->capacity + q->waiters) {
 #ifdef _WIN32
         LeaveCriticalSection(&q->lock);
 #else
@@ -746,7 +758,7 @@ static int event_queue_push(sys_event_queue_info* q, const sys_event_t* evt)
     }
 
     q->buffer[q->tail] = *evt;
-    q->tail = (q->tail + 1) % q->capacity;
+    q->tail = (q->tail + 1) % SYS_EVENT_QUEUE_BUF_PHY;
     q->count++;
 
 #ifdef _WIN32
@@ -959,12 +971,8 @@ uint32_t sys_event_find_queue_by_key(uint64_t key)
     return 0;
 }
 
-int64_t sys_event_port_send(ppu_context* ctx)
+int64_t sys_event_port_send_(ppu_context* ctx, uint32_t port_id, uint64_t data1, uint64_t data2, uint64_t data3)
 {
-    uint32_t port_id = LV2_ARG_U32(ctx, 0);
-    uint64_t data1   = LV2_ARG_U64(ctx, 1);
-    uint64_t data2   = LV2_ARG_U64(ctx, 2);
-    uint64_t data3   = LV2_ARG_U64(ctx, 3);
     static int s_send_stack = -1; if (s_send_stack < 0) s_send_stack = getenv("PS3_EVT_SEND_STACK") != NULL;
     if (s_send_stack) { static unsigned char seen[8]={0}; unsigned pk=port_id&7;
         if(!seen[pk]){ seen[pk]=1; extern void ppu_dump_guest_stack(ppu_context*,const char*);
@@ -1042,13 +1050,44 @@ int64_t sys_event_port_send(ppu_context* ctx)
           return CELL_OK;
       g_spu_pending_evt_valid = 0; }
 
-    if (event_queue_push(q, &evt) < 0) {
-        ps3_log("[evt] port_send(port=%u): queue %d FULL -> EBUSY%c",
-                port_id, qidx, 10);
+    int spins = 0;
+    while (event_queue_push(q, &evt) < 0) 
+    {
+        if (!q->active)
+            return CELL_ESRCH;
+
+        if (q->cancelled)
+            return CELL_ESRCH;
+
+        if (++spins < 200)
+        {
+#ifdef _WIN32
+            SwitchToThread();
+#else
+            sched_yield();
+#endif
+            continue;
+        }
+
+        // We spun en busy now.
+        ps3_log("[evt] port_send: queue %u genuinely FULL after %d spins "
+            "(count=%u depth=%u waiters=%u) tid=%llu lr=%08X -- DROPPING\n",
+            port_id, spins, q->count, q->capacity, q->waiters,
+            (unsigned long long)ctx->thread_id, (uint32_t)ctx->lr);
+
         return (int64_t)(int32_t)CELL_EBUSY;
     }
 
     return CELL_OK;
+}
+
+int64_t sys_event_port_send(ppu_context* ctx)
+{
+    uint32_t port_id = LV2_ARG_U32(ctx, 0);
+    uint64_t data1 = LV2_ARG_U64(ctx, 1);
+    uint64_t data2 = LV2_ARG_U64(ctx, 2);
+    uint64_t data3 = LV2_ARG_U64(ctx, 3);
+    return sys_event_port_send_(ctx, port_id, data1, data2, data3);
 }
 
 /* =========================================================================

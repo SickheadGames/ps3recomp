@@ -7,6 +7,7 @@
 
 #include "lv2_syscall_table.h"
 #include "../ppu/ppu_context.h"
+#include "../runtime/syscalls/sys_ppu_thread.h"
 #include "../../include/ps3emu/ps3types.h"
 #include "../../include/ps3emu/error_codes.h"
 
@@ -40,6 +41,7 @@ typedef struct sys_event_t {
  * -----------------------------------------------------------------------*/
 #define SYS_EVENT_QUEUE_MAX       128
 #define SYS_EVENT_QUEUE_BUF_MAX   127   /* max events in queue buffer */
+#define SYS_EVENT_QUEUE_BUF_PHY   (127 + PPU_THREAD_MAX)  /* max events in queue buffer */
 
 /* Queue types */
 #define SYS_PPU_QUEUE   1
@@ -53,11 +55,18 @@ typedef struct sys_event_queue_info {
     uint64_t key;
 
     /* Circular buffer */
-    sys_event_t  buffer[SYS_EVENT_QUEUE_BUF_MAX];
-    int          capacity;
+    sys_event_t  buffer[SYS_EVENT_QUEUE_BUF_PHY];
     int          head;
     int          tail;
     int          count;
+
+    /* the guest's requested depth; EBUSY is measured against
+    * THIS and nothing else, so the guest sees hardware
+    * semantics. Max 127 per lv2. */
+    int capacity;
+
+    /* threads currently BLOCKED in receive on this queue */
+    int waiters;
 
     /* Set when the thing that feeds this queue is gone (SPURS finalize), so a
      * receive can no longer possibly be satisfied. Blocked receivers are woken

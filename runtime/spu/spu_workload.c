@@ -797,8 +797,15 @@ static void spu_async_run(spu_async_job* j)
     free(j);
 }
 
+static inline void spu_thread_set_fp_mode(void)
+{
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);          /* denormal results  -> 0 */
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);  /* denormal operands -> 0 */
+}
+
 #ifdef _WIN32
 static DWORD WINAPI spu_async_thread(LPVOID p) {
+    spu_thread_set_fp_mode();
     /* Reserve handler headroom so a stack overflow in lifted SPU code (e.g. a
      * runaway brsl recursion) can actually reach the STACKOVERFLOW reporter
      * instead of killing the process silently with 0x80000001. */

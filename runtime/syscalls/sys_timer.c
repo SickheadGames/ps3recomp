@@ -100,6 +100,64 @@ static void write_be64(uint32_t addr, uint64_t val)
     *p = val;
 }
 
+/* One timer per thread, created on first use and kept for the thread's life.
+ * The old code created and closed a kernel object on every single sleep. */
+static __declspec(thread) HANDLE t_sleep_timer = NULL;
+static __declspec(thread) int    t_sleep_timer_tried = 0;
+
+#if defined(_WIN32)
+static void ps3_precise_sleep_us(uint64_t usec)
+{
+    if (usec == 0) 
+        return;
+    ensure_qpc_init();
+
+    LARGE_INTEGER start;
+    QueryPerformanceCounter(&start);
+    const int64_t deadline = start.QuadPart +
+        (int64_t)((usec * (uint64_t)s_qpc_freq.QuadPart) / 1000000ULL);
+
+    /* A high-resolution waitable timer lands within roughly 100us of its due
+     * time on Win10 1803+, so sleep to (deadline - 100us) and spin the rest.
+     * Below that threshold there is nothing worth sleeping for. */
+    const uint64_t SPIN_TAIL_US = 100;
+
+    if (usec > SPIN_TAIL_US) {
+        if (!t_sleep_timer && !t_sleep_timer_tried) {
+            t_sleep_timer_tried = 1;
+            t_sleep_timer = CreateWaitableTimerExW(NULL, NULL,
+                CREATE_WAITABLE_TIMER_MANUAL_RESET |
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+            if (!t_sleep_timer)      /* pre-1803: plain timer, ~1ms granularity */
+                t_sleep_timer = CreateWaitableTimerW(NULL, TRUE, NULL);
+        }
+        if (t_sleep_timer) {
+            LARGE_INTEGER due;
+            due.QuadPart = -(LONGLONG)((usec - SPIN_TAIL_US) * 10);  /* 100ns, relative */
+            if (SetWaitableTimer(t_sleep_timer, &due, 0, NULL, NULL, FALSE))
+                WaitForSingleObject(t_sleep_timer, INFINITE);
+        }
+        else {
+            Sleep((DWORD)((usec - SPIN_TAIL_US) / 1000));
+        }
+    }
+
+    /* Tail: pause-spin to the exact deadline. _mm_pause costs tens of cycles,
+     * stays out of the kernel, and tells the core this is a spin so a sibling
+     * SMT thread gets the pipeline. Yield rarely so a host thread the guest is
+     * waiting on can still run, without a context switch per loop. */
+    LARGE_INTEGER now;
+    unsigned spins = 0;
+    for (;;) {
+        QueryPerformanceCounter(&now);
+        if (now.QuadPart >= deadline) break;
+        _mm_pause();
+        if ((++spins & 0x3FF) == 0)
+            SwitchToThread();
+    }
+}
+#endif // WIN32
+
 /* ---------------------------------------------------------------------------
  * sys_timer_usleep
  *
@@ -214,37 +272,7 @@ int64_t sys_timer_usleep(ppu_context* ctx)
         ppu_log_host_chain("usleep1ms"); } }
 
 #ifdef _WIN32
-    /* Use high-resolution sleep via waitable timer for better precision */
-    if (usec >= 1000) {
-        HANDLE timer = CreateWaitableTimerW(NULL, TRUE, NULL);
-        if (timer) {
-            LARGE_INTEGER due;
-            due.QuadPart = -((LONGLONG)usec * 10); /* 100ns units, negative = relative */
-            SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE);
-            WaitForSingleObject(timer, INFINITE);
-            CloseHandle(timer);
-        } else {
-            Sleep((DWORD)(usec / 1000));
-        }
-    } else if (usec > 0) {
-        /* Sub-millisecond sleep. Sleep()/waitable timers round up to the
-         * ~0.5-1 ms scheduler quantum, far too coarse for a guest that relies
-         * on accurate microsecond pacing -- a short usleep() spin waiting on
-         * another thread to make progress otherwise collapses to a single yield
-         * and busy-spins at full speed (so the wait is effectively a no-op).
-         * Busy-wait to a precise QPC deadline, yielding inside the spin
-         * (SwitchToThread) so a sibling host thread the guest may be waiting on
-         * still gets the core. Mirrors RPCS3's "Usleep Only" TSC busy-tail. */
-        ensure_qpc_init();
-        LARGE_INTEGER qpc_start, qpc_now;
-        QueryPerformanceCounter(&qpc_start);
-        const int64_t qpc_deadline = qpc_start.QuadPart +
-            (int64_t)((usec * (uint64_t)s_qpc_freq.QuadPart) / 1000000ULL);
-        do {
-            SwitchToThread();
-            QueryPerformanceCounter(&qpc_now);
-        } while (qpc_now.QuadPart < qpc_deadline);
-    }
+    ps3_precise_sleep_us(usec);
 #else
     if (usec > 0) {
         struct timespec ts;

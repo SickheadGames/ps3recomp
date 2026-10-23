@@ -372,8 +372,13 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
     g_spurs_job_mbox_intr = spu_channel_has_data(&ctx.ch_out_intr_mbox)
                           ? ctx.ch_out_intr_mbox.value : 0;
     g_spurs_job_mbox_valid = g_spurs_job_mbox || g_spurs_job_mbox_intr;
-    { uint32_t _cb = g32(job_ea + 0x4C);
-      g_spurs_job_cmd = _cb ? (g32(_cb) >> 16) : 0; }
+    g_spurs_job_cmd = 0;
+    if (job_desc_size >= 0x50)
+    { 
+        uint32_t _cb = g32(job_ea + 0x4C);
+        if (_cb)
+            g_spurs_job_cmd = g32(_cb) >> 16;
+    }
     { static int s_t = -1; if (s_t < 0) s_t = getenv("SPURS_JOB_MBOX") ? 1 : 0;
       static int n = 0;
       if (s_t && n++ < 16 && g_spurs_job_mbox_valid)

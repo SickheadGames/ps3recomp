@@ -1238,6 +1238,30 @@ int64_t sys_ppu_thread_get_join_state(ppu_context* ctx)
     return CELL_OK;
 }
 
+BOOL ps3_is_ppu_stack_address(uint32_t addr)
+{
+    BOOL in_stack = FALSE;
+
+    table_lock();
+
+    for (int i = 0; i < PPU_THREAD_MAX; i++)
+    {
+        const ppu_thread_info* t = &g_ppu_threads[i];
+        if (t->state == PPU_THREAD_STATE_FREE)
+            continue;
+
+        if (addr >= t->stack_addr && addr < t->stack_addr + t->stack_size)
+        {
+            in_stack = TRUE;
+            break;
+        }
+    }
+
+    table_unlock();
+
+    return in_stack;
+}
+
 /* ---------------------------------------------------------------------------
  * sys_ppu_thread_get_stack_information
  *

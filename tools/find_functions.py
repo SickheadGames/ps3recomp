@@ -207,42 +207,58 @@ class FunctionFinder:
                 i += 1
                 continue
 
-            # The PPC64 ELFv1 prologue may allocate the frame *before* saving
-            # LR, i.e. `stdu r1,-X(r1)` then `mflr r0`. In that case the true
-            # function entry (and the address used as a bl target) is the stdu,
-            # one instruction earlier — anchoring on mflr registers the start
-            # 4 bytes late, which later makes find_leaf_functions discard the
-            # real entry as a sub-min_size sliver. Back up to the stdu so the
-            # start matches the actual call target.
+            # Walk back to the instruction FOLLOWING the nearest preceding
+            # terminator -- the real entry, however many setup instructions the
+            # compiler scheduled ahead of the `mflr`.
+            #
+            # The old walk stopped at the first instruction that wasn't a
+            # recognised "filler", which any scheduled subf/rlwinm/cmpwi breaks.
+            # AC1's func_00E7EC08 is `mfcr r11; stdu r1,-0x6E0(r1)` with 36
+            # instructions of interleaved saves and arithmetic before its
+            # `mflr r0`: the walk hit a `subf` at 0x00E7EC50 and registered the
+            # start 0x90 bytes late, leaving the stdu outside the function. The
+            # body then read every local 1760 bytes too high and leaked r1 by
+            # +1760 per call.
+            _TERM = ("blr", "b", "ba", "bctr", "rfid", "rfi")
+            _MAX_PRO = 64                     # insns; no prologue is longer
             start_idx = i
             _alloc_idx = None
+            _entry_idx = None
             k = i - 1
-            while k >= 0:
+            while k >= 0 and (i - k) <= _MAX_PRO:
+                if self.instructions[k].mnemonic in _TERM:
+                    _entry_idx = k + 1
+                    break
                 if _is_stack_alloc(self.instructions[k]):
                     _alloc_idx = k
-                    break
-                if not _is_prologue_filler(self.instructions[k]):
-                    break
                 k -= 1
+            if k < 0:
+                _entry_idx = 0                # start of the segment
+
             if _alloc_idx is not None:
-                start_idx = _alloc_idx
-                k = start_idx - 1
-                while k >= 0 and _is_prologue_filler(self.instructions[k]):
-                    start_idx = k
-                    k -= 1
-                # A known .opd start just before the frame alloc is the real
-                # entry: SNC emits argument tests (`cmpdi r5,0`) between the
-                # entry and the stdu, which the filler walk stops at.
-                for k in range(max(0, start_idx - 4), start_idx):
-                    if self.instructions[k].addr in self.seeds:
-                        start_idx = k
+                if _entry_idx is not None and _entry_idx <= _alloc_idx:
+                    # Skip inter-function padding the compiler left after the
+                    # previous function's terminator.
+                    while (_entry_idx < _alloc_idx and
+                           (self.instructions[_entry_idx].mnemonic in ("nop", "lnop")
+                            or self.instructions[_entry_idx].mnemonic.startswith("."))):
+                        _entry_idx += 1
+                    start_idx = _entry_idx
+                else:
+                    # No terminator within reach: fall back to the old, narrower
+                    # behaviour rather than guessing.
+                    start_idx = _alloc_idx
+                # An .opd seed inside the prologue window wins outright.
+                for _s in range(start_idx, _alloc_idx + 1):
+                    if self.instructions[_s].addr in self.seeds:
+                        start_idx = _s
                         break
                 ops = self.instructions[_alloc_idx].operands.replace(" ", "")
                 try:
                     stack_size = abs(int(ops.split(",")[1].split("(")[0], 0))
                 except (ValueError, IndexError):
                     pass
-
+                    
             func_start = self.instructions[start_idx].addr
             func = Function(start=func_start, stack_size=stack_size,
                             has_prologue=True)
@@ -665,13 +681,18 @@ class FunctionFinder:
             if i < 0:
                 continue
             seed = seed_sorted[i]
-            if seed == start or start - seed > 32:
+            # A prologue can be long: the compiler schedules saves and arithmetic
+            # between the entry and the `mflr`, and AC1's Bink decoder puts 0x90
+            # bytes there. The terminator scan below is what actually decides
+            # this -- the distance cap is only a guard against pathological
+            # ranges, so it needs to be generous.
+            if seed == start or start - seed > 512:
                 continue
             idx0 = self._addr_to_idx.get(seed)
             idx1 = self._addr_to_idx.get(start)
             if idx0 is None or idx1 is None:
                 continue
-            if any(self.instructions[k].mnemonic in ("blr", "b", "rfid")
+            if any(self.instructions[k].mnemonic in ("blr", "b", "ba", "bctr", "rfid", "rfi")
                    for k in range(idx0, idx1)):
                 continue
             del self.functions[start]

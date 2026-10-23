@@ -113,6 +113,7 @@ static inline void spu_ls_watch_hit(uint32_t lsa, int is_write, const uint8_t* p
 #define MFC_GETLB_CMD       0x45
 #define MFC_GETLF_CMD       0x46
 #define MFC_SNDSIG_CMD      0xA0
+#define MFC_SDCRZ_CMD       0x89   /* storage-control range zero (no LS operand) */
 #define MFC_BARRIER_CMD     0xC0
 #define MFC_EIEIO_CMD       0xC8
 #define MFC_SYNC_CMD        0xCC

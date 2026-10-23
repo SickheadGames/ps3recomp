@@ -132,12 +132,14 @@ static void sys_time_get_system_time(ppu_context* ctx)
 #endif
 }
 
+extern "C" BOOL ps3_is_ppu_stack_address(uint32_t addr);
+
 /* sys_process_is_stack(u32 addr) -> 1 if addr is in the stack region. We model
  * a single stack just below the TLS region; good enough for boot checks. */
 static void sys_process_is_stack(ppu_context* ctx)
 {
     uint32_t a = (uint32_t)ctx->gpr[3];
-    ctx->gpr[3] = (a >= 0x0E000000u && a < 0x10000000u) ? 1 : 0;
+    ctx->gpr[3] = ps3_is_ppu_stack_address(a);
 }
 
 /* ---------------------------------------------------------------------------

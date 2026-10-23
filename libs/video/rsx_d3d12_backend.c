@@ -547,13 +547,13 @@ static int init_d3d12(u32 width, u32 height)
     /* Enable debug layer in debug builds */
     /* Debug layer: on in debug builds, or in any build when D3D12_DBG is set
      * (so a Release run can capture exact PSO/validation errors). */
-    if (
+    BOOL enable_debug = FALSE;
 #ifdef NDEBUG
-        getenv("D3D12_DBG")
+    enable_debug = getenv("D3D12_DBG");
 #else
-        1
+    enable_debug = FALSE; // TRUE;
 #endif
-    ) {
+    if (enable_debug) {
         ID3D12Debug* debug_controller = NULL;
         hr = D3D12GetDebugInterface(&IID_ID3D12Debug, (void**)&debug_controller);
         if (SUCCEEDED(hr) && debug_controller) {
@@ -614,6 +614,16 @@ static int init_d3d12(u32 width, u32 height)
             return -1;
         }
         ps3_log("[D3D12] Device created on default adapter (feature level 11.0)\n");
+    }
+
+    if (enable_debug)
+    {
+        ID3D12InfoQueue* iq = NULL;
+        if (SUCCEEDED(s_d3d.device->lpVtbl->QueryInterface(
+            s_d3d.device, &IID_ID3D12InfoQueue, (void**)&iq)) && iq) {
+            UINT64 n = iq->lpVtbl->SetBreakOnSeverity(iq, D3D12_MESSAGE_SEVERITY_ERROR, TRUE);
+            iq->lpVtbl->Release(iq);
+        }
     }
 
     /* Create command queue */

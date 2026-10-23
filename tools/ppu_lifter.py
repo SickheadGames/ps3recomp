@@ -371,6 +371,9 @@ def _reg_idx(token: str) -> str:
 # Callee-saved register save/restore (r14-r31) to/from the frame, for the
 # robust ABI-preservation pass in lift_function. Group order: SAVE -> (off, reg);
 # RESTORE -> (reg, off), so a save and its restore pair on matching (off, reg).
+# Any write of a GPR in emitted C: `ctx->gpr[N] = ...`, `ctx->gpr[N] += ...` etc.,
+# anywhere in the line (not `==`). Used to find a register's first redefinition.
+_CS_ANY_DEF_RE = re.compile(r'ctx->gpr\[(\d+)\]\s*(?:[-+*/|&^%]|<<|>>)?=(?!=)')
 _CS_SAVE_RE = re.compile(
     r'vm_write64\(ctx->gpr\[1\] \+ (-?0x[0-9A-Fa-f]+|-?\d+), ctx->gpr\[(1[4-9]|2[0-9]|3[01])\]\);')
 _CS_REST_RE = re.compile(
@@ -776,10 +779,15 @@ class PPULifter:
         # stores went through a stale pointer (missing/torn cube polygons).
         # Track each callee-save register's first redefinition and only accept
         # saves that precede it.
+        #
+        # Every assignment counts, not only a line that starts with one. The
+        # carry forms (addic/addc/adde/addze/subfc/subfic) are emitted as
+        # `{ uint64_t _a = ...; ctx->gpr[N] = _r; ... }`, so they were invisible: a
+        # single spill/reload of a register set by one of them passed as a callee-save
+        # and the reload became the register's value at entry.
         _first_def = {}
         for _i, _l in enumerate(func.body_lines):
-            _dm = re.match(r'\s*ctx->gpr\[(\d+)\] = ', _l)
-            if _dm:
+            for _dm in _CS_ANY_DEF_RE.finditer(_l):
                 _r = int(_dm.group(1))
                 if _r not in _first_def:
                     _first_def[_r] = _i
@@ -4286,43 +4294,55 @@ def main() -> None:
                           or _by_addr[_ordered[k]].mnemonic.startswith(".")):
             k -= 1
         return _by_addr[_ordered[k]] if k >= 0 else None
+
     # Every function-entry prologue: a primary frame allocation (stdu r1,-N),
-    # adjusted back to a preceding mflr r0 (the real entry of an mflr-first
-    # function). A function allocates its primary frame exactly once at its
-    # prologue, so EVERY such site is a distinct function start -- the complete
-    # set of boundaries. Used both to split merged ranges below and to route a
-    # `b`/cond-`b` to one as a tail call (see the `b` handler).
+    # walked back to the instruction that FOLLOWS the nearest preceding
+    # terminator -- that is the real entry however many setup instructions
+    # (mfcr, mflr, std r14..r31) the compiler scheduled ahead of the stdu.
+    # AC1's func_00E7EC08 is `mfcr r11; stdu r1,-0x6E0(r1)` with eight saves
+    # AFTER the stdu; the old 3-instruction cap found that one only by luck.
+    #
+    # Requiring a terminator is what makes this safe. A stdu NOT preceded by one
+    # within a prologue's reach is an alloca or a duplicated prologue INSIDE a
+    # body -- not an entry. Cutting there splits one function in two: the first
+    # half keeps the prologue, the second keeps the epilogue, every local in the
+    # second half is read N bytes too high, and r1 leaks +N per call (~600
+    # functions in AC1; the worst leaked 1760 bytes per call).
+    _TERM = ("b", "ba", "blr", "blrl", "bctr", "bctrl", "rfid", "rfi")
+    _MAX_PROLOGUE = 24
+
+    # A real function is called from somewhere -- a second witness for entries
+    # past a fall-through or across a data gap. Built ONCE, not per-stdu.
+    _call_targets = set()
+    for _ci in all_insns:
+        if _ci.mnemonic in ("bl", "bla"):
+            for _op in _parse_operands(_ci.operands):
+                if _op.startswith("0x"):
+                    try: _call_targets.add(int(_op, 16))
+                    except ValueError: pass
+
     _func_entries = set()
     for _a, _ins in _by_addr.items():
-        if _ins.mnemonic == "stdu":
-            _o = _ins.operands.replace(" ", "")
-            if _o.startswith("r1,-") and _o.endswith("(r1)"):
-                _pp = _by_addr.get(_a - 4)
-                if _pp is not None and _pp.mnemonic == "mflr" and _pp.operands.strip() == "r0":
-                    _ent = _a - 4
-                else:
-                    _ent = _a
-                # A function may start with a few setup instructions before its
-                # mflr/stdu prologue (e.g. `cmpwi r3,0` that sets cr for a later
-                # branch, or `mfcr r12` saving the condition register). The real
-                # entry is then a couple of insns before the prologue -- the first
-                # instruction after the PREVIOUS function's terminator. Walk back
-                # over the setup insns to it, so the prologue isn't taken as the
-                # entry and the setup insns orphaned into a dangling fragment.
-                # (Observed: libsre func_3000AF2C -> infinite 2-fragment loop that
-                # hung cellSpursInitialize; func_3000B504 -> a handler entry
-                # reached only via an OPD that was never lifted, so its SPURS
-                # handler thread returned instantly and cellSpurs rolled back the
-                # SPU thread group.) Stop at the previous terminator so we never
-                # absorb the previous function's body; bound the walk to 3 insns.
-                _TERM = ("b", "ba", "blr", "blrl", "bctr", "bctrl", "rfid", "rfi")
-                for _ in range(3):
-                    _prev = _by_addr.get(_ent - 4)
-                    if _prev is None or _prev.mnemonic in _TERM:
-                        break
-                    _ent -= 4
-                _func_entries.add(_ent)
-
+        if _ins.mnemonic != "stdu":
+            continue
+        _o = _ins.operands.replace(" ", "")
+        if not (_o.startswith("r1,-") and _o.endswith("(r1)")):
+            continue
+        _ent, _ok = _a, False
+        for _ in range(_MAX_PROLOGUE):
+            _j = _idx_of.get(_ent)
+            if _j is None:
+                break
+            _prev = _prev_nonnop(_j)
+            if _prev is None:
+                _ok = True; break                 # start of the segment
+            if _prev.mnemonic in _TERM:
+                _ok = True; break                 # boundary found
+            _ent = _prev.addr
+        if _ok or _ent in _call_targets:
+            _func_entries.add(_ent)
+            
+    
     _recovered = []
     _ncuts = 0
     for (_s, _e) in func_bounds:
@@ -4380,6 +4400,50 @@ def main() -> None:
         print(f"  Boundary recovery: split {_ncuts} merged function(s) via prologue scan")
         func_bounds = _recovered
 
+    # ---- merge pass: undo over-splits that arrived via functions.json -------
+    # A range that allocates a frame and never releases it, immediately followed
+    # by one that releases exactly that frame and never allocates, is ONE function
+    # the boundary source cut in half. The recovery pass above can only split, so
+    # it cannot undo this.
+    def _frame_delta(_s, _e):
+        _alloc = _free = 0
+        _k = _idx_of.get(_s)
+        if _k is None:
+            return (0, 0)
+        _j = _k
+        while _j < len(_ordered) and _ordered[_j] < _e:
+            _i2 = _by_addr[_ordered[_j]]
+            _o2 = _i2.operands.replace(" ", "")
+            if _i2.mnemonic == "stdu" and _o2.startswith("r1,-") and _o2.endswith("(r1)"):
+                try: _alloc = int(_o2[4:-4], 0)
+                except ValueError: pass
+            elif _i2.mnemonic == "addi" and _o2.startswith("r1,r1,"):
+                try:
+                    _v = int(_o2[6:], 0)
+                    if _v > 0: _free = _v
+                except ValueError: pass
+            _j += 1
+        return (_alloc, _free)
+
+    _sorted_bounds = sorted(func_bounds)
+    _merged, _nmerge, _bi = [], 0, 0
+    while _bi < len(_sorted_bounds):
+        _s, _e = _sorted_bounds[_bi]
+        while _bi + 1 < len(_sorted_bounds):
+            _s2, _e2 = _sorted_bounds[_bi + 1]
+            if _s2 != _e:
+                break
+            _a1, _f1 = _frame_delta(_s, _e)
+            _a2, _f2 = _frame_delta(_s2, _e2)
+            if not (_a1 and not _f1 and _f2 == _a1 and not _a2):
+                break
+            _e = _e2; _bi += 1; _nmerge += 1
+        _merged.append((_s, _e))
+        _bi += 1
+    if _nmerge:
+        print(f"  Boundary recovery: merged {_nmerge} over-split function(s) by frame balance")
+        func_bounds = _merged
+        
     # ----- jump-table (computed bctr) discovery ---------------------------
     # gcc switch dispatchers reach their case blocks via `mtctr; bctr` through
     # a data jump table — computed targets static analysis can't see, so the
