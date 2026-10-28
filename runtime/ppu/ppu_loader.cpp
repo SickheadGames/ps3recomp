@@ -53,6 +53,7 @@ extern "C" uint32_t ppu_prof_resolve_host(void* ra);
 
 #include "ps3emu/portable_builtins.h"
 
+#define FAST_MODE 1
 
 /* Resolve the GUEST function on the host stack (closest lifted entry below
  * each frame) -- the same trick the [BLOCK] profiler uses. */
@@ -1698,6 +1699,7 @@ uint8_t  vm_read8 (uint64_t a) { if (vm_oob((uint32_t)a,1)) return 0; vm_hotmap(
 #ifdef VM_SAMPLE_READS
     { static uint64_t c=0; if ((++c % 2000000ull)==0) ps3_log("[sample] read8  0x%08X ra0=%p ra1=%p\n", (uint32_t)a, PORT_RETURN_ADDRESS(), PORT_RETURN_ADDRESS_N(1)); }
 #endif
+#if !defined(FAST_MODE)
     /* PPU_FORCE_READ_ADDR also applies at byte width. The u32 path has had this
      * for a while; a title's own feature flags are usually BYTES, so the u32
      * hook could not reach the thing you most want to pin. Virtua Fighter 5's
@@ -1728,10 +1730,13 @@ uint8_t  vm_read8 (uint64_t a) { if (vm_oob((uint32_t)a,1)) return 0; vm_hotmap(
                   ppu_prof_resolve_host(PORT_RETURN_ADDRESS()));
           n=0; } }
       else { last=(uint32_t)a; n=0; } }
+#endif
     return vm_base[(uint32_t)a]; }
 uint16_t vm_read16(uint64_t a) { if (vm_oob((uint32_t)a,2)) return 0; ppu_rwatch_hit((uint32_t)a, 2, PORT_RETURN_ADDRESS()); vm_hotmap((uint32_t)a,2); uint16_t v; memcpy(&v, vm_base + (uint32_t)a, 2);
+#if !defined(FAST_MODE)
     { static PPU_THREAD_LOCAL uint32_t last=0xFFFFFFFFu; static PPU_THREAD_LOCAL uint32_t n=0;
       if ((uint32_t)a==last) { if (++n==200000) { ps3_log("[HOTREAD16] spinning on 0x%08X\n", (uint32_t)a); n=0; } } else { last=(uint32_t)a; n=0; } }
+#endif
     return PORT_BSWAP16(v); }
 uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0; ppu_rwatch_hit((uint32_t)a, 4, PORT_RETURN_ADDRESS());
     if ((uint32_t)a < 0x10000u) ppu_null_read_report((uint32_t)a, 4, PORT_RETURN_ADDRESS());
@@ -1740,6 +1745,7 @@ uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0; ppu_rwatch
      * thread keeps current, so it falls through to the plain load. */
     if (spu_raw_is_reg((uint32_t)a)) { uint32_t _rv;
         if (spu_raw_reg_load((uint32_t)a, &_rv)) return _rv; }
+#if !defined(FAST_MODE)
     /* PPU_FORCE_READ_ADDR=<hex>: force reads of one address to PPU_FORCE_READ_VAL (default 0)
      * -- diagnostic to break a completion spin and see whether the game proceeds.
      * (From eeff394; dropped by the runtime/spu consolidation, restored here.) */
@@ -1747,6 +1753,7 @@ uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0; ppu_rwatch
       if(_fa==-2){ const char* e=getenv("PPU_FORCE_READ_ADDR"); _fa=e?(int64_t)strtoul(e,0,16):-1;
                    const char* ev=getenv("PPU_FORCE_READ_VAL"); _fv=ev?(uint32_t)strtoul(ev,0,16):0; }
       if (_fa>=0 && (uint32_t)a==(uint32_t)_fa) return _fv; }
+#endif
     /* GCM_REFPOLL: read-driven RSX fence publication. A spin-read of the ref
      * register (GCM_CONTROL+8 = 0x03002008) advances one queued fence (paced
      * <=1/ms), so cellGcmFinish makes progress even when the 60 Hz present
@@ -1772,6 +1779,7 @@ uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0; ppu_rwatch
                         (uint32_t)a,(uint32_t)g_pt_val, g_pt_bt[i], rb); }
             g_pt_live[i]=0; break; } }
 #endif
+#if !defined(FAST_MODE)
     { static int64_t rw=-2; if (rw==-2) { const char* e=getenv("YDKJ_RWATCH"); rw=e?(int64_t)strtoul(e,0,0):-1; }
       if (rw>=0) { uint32_t ea=(uint32_t)a; if (ea>=(uint32_t)rw && ea<(uint32_t)rw+0x80) {
         static int _n=0; if (_n<40) {
@@ -1794,9 +1802,11 @@ uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0; ppu_rwatch
           for(uint64_t k=0;k<function_table_count;k++){ uintptr_t h=(uintptr_t)function_table[k].func; if(h<=tgt&&h>bh){bh=h;bg=function_table[k].addr;} }
           if(bg&&(tgt-bh)<0x1400) p+=snprintf(ln+p,sizeof(ln)-p," func_%08X+0x%llX",bg,(unsigned long long)(tgt-bh)); }
         ps3_log("%s\n",ln); } } }
+#endif
 #ifdef VM_SAMPLE_READS
     { static uint64_t c=0; if ((++c % 4000000ull)==0) ps3_log("[sample] read32 0x%08X = 0x%08X\n", (uint32_t)a, PORT_BSWAP32(v)); }
 #endif
+#if !defined(FAST_MODE)
     /* Frequency histogram (PPU_HOTMAP): find busy-loop polled addresses even
      * when the loop reads several addresses per iteration (so the consecutive
      * HOTREAD detector resets). Dumps the hottest addresses periodically. */
@@ -1845,12 +1855,14 @@ uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0; ppu_rwatch
 #endif
       } }
       else { last=(uint32_t)a; n=0; } }
+#endif // #if !defined(FAST_MODE)
     return PORT_BSWAP32(v); }
 uint64_t vm_read64(uint64_t a) { if (vm_oob((uint32_t)a,8)) return 0; vm_hotmap((uint32_t)a,8);
     if ((uint32_t)a < 0x10000u) ppu_null_read_report((uint32_t)a, 8, PORT_RETURN_ADDRESS()); uint64_t v; memcpy(&v, vm_base + (uint32_t)a, 8);
 #ifdef VM_SAMPLE_READS
     { static uint64_t c=0; if ((++c % 2000000ull)==0) ps3_log("[sample] read64 0x%08X\n", (uint32_t)a); }
 #endif
+#if !defined(FAST_MODE)
     { static PPU_THREAD_LOCAL uint32_t last=0xFFFFFFFFu; static PPU_THREAD_LOCAL uint32_t n=0;
       if ((uint32_t)a==last) { if (++n==200000) { ps3_log("[HOTREAD64] spinning on 0x%08X (=0x%016llX) guest-fn=0x%08X\n", (uint32_t)a, (unsigned long long)PORT_BSWAP64(v), ppu_prof_resolve_host(PORT_RETURN_ADDRESS())); n=0;
 #ifdef _WIN32
@@ -1872,6 +1884,7 @@ uint64_t vm_read64(uint64_t a) { if (vm_oob((uint32_t)a,8)) return 0; vm_hotmap(
             for(uint64_t k=0;k<function_table_count;k++){ uintptr_t h=(uintptr_t)function_table[k].func; if(h<=tgt&&h>bh){bh=h;bg=function_table[k].addr;} }
             if(bg&&(tgt-bh)<0x1400) p+=snprintf(ln+p,sizeof(ln)-p," func_%08X+0x%llX",bg,(unsigned long long)(tgt-bh)); }
           ps3_log("%s\n",ln); } } } }
+#endif
 #endif
     return PORT_BSWAP64(v); }
 /* Self-arming write-watch on the Bink SPURS sync area (skip-freeze debug).
