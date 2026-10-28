@@ -3025,9 +3025,13 @@ static void jc_execute(int slot)
             pc += 8; continue;
         }
         /* One garbage command word teleports the walker anywhere in guest
-         * memory, and nothing downstream notices. A NEXT that lands megabytes
-         * from the chain's entry is not a NEXT. */
-#define JC_PC_OK(t)  ((uint32_t)((t) - entry_ea) < 0x100000u)
+         * memory, and nothing downstream notices. Distance from the entry is
+         * no test, though: AC1 chains its job lists across heap blocks, and a
+         * NEXT from 0x105D5930 to 0x10D50088 (7.5 MB away) is real -- refusing
+         * it reset the stream-copy chain and wedged the Loading thread. Reject
+         * only what cannot be a command list: null page, unmapped, unaligned.
+         * A runaway walk through mapped memory still hits the idle bail. */
+#define JC_PC_OK(t)  ((t) >= 0x10000u && spurs_guest_range_valid((t), 8))
         if (op == 1 || op == 3 || op == 4) {
             u32 tgt = (u32)(cmd & ~7ull);
             if (!JC_PC_OK(tgt)) {
