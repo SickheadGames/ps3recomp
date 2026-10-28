@@ -15,6 +15,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include "ps3emu/log_first.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -81,10 +82,14 @@ static unsigned char s_coh_bitmap[SPU_COH_BITMAP_SZ];
  * one missed event on the very first reservation of the run. */
 static int s_coh_armed;
 
-/* The SPU contexts that have reserved a line. Sized to match the MFC engine
- * registry in spu_channels.c, which is the ceiling on live SPU contexts. */
-#define SPU_COH_MAX_CTX 8
-static spu_context* s_coh_ctxs[SPU_COH_MAX_CTX];
+/* Every live virtual context may retain a reservation between scheduling
+ * quanta; physical SPU count is not a bound on this set. All access is under
+ * the lock-line lock. Nodes are removed before their context's lifetime ends. */
+typedef struct spu_coh_entry {
+    spu_context* ctx;
+    struct spu_coh_entry* next;
+} spu_coh_entry;
+static spu_coh_entry* s_coh_ctxs;
 
 unsigned long g_spu_lr_raise = 0;
 
@@ -95,18 +100,17 @@ void spu_coh_reserve(spu_context* ctx, uint32_t ea)
     s_coh_armed = 1;
 
     if (!ctx) return;
-    for (int i = 0; i < SPU_COH_MAX_CTX; i++) {
-        if (s_coh_ctxs[i] == ctx) return;
-        if (s_coh_ctxs[i] == NULL) { s_coh_ctxs[i] = ctx; return; }
+    for (spu_coh_entry* entry = s_coh_ctxs; entry; entry = entry->next)
+        if (entry->ctx == ctx) return;
+    spu_coh_entry* entry = (spu_coh_entry*)malloc(sizeof(*entry));
+    if (!entry) {
+        ps3_log("[spu-coh] cannot register reservation holder %p\n", (void*)ctx);
+        fflush(stderr);
+        abort(); /* A missed holder loses invalidation events, including ABA. */
     }
-    /* More live SPU contexts than the registry holds. The ones already in it
-     * still get their events; this one would silently never wake, so say so. */
-    { static int warned = 0;
-      if (!warned) { warned = 1;
-          ps3_log("[spu-coh] more than %d reserving SPU contexts -- "
-                          "spu=0x%X will not receive lock-line events\n",
-                  SPU_COH_MAX_CTX, ctx->spu_id);
-          fflush(stderr); } }
+    entry->ctx = ctx;
+    entry->next = s_coh_ctxs;
+    s_coh_ctxs = entry;
 }
 
 /* Drop a context from the reserving set.
@@ -123,13 +127,18 @@ void spu_coh_unregister(spu_context* ctx)
 {
     if (!ctx) return;
     /* Under the lock-line lock, which every walker of s_coh_ctxs holds: a
-     * notifier that loaded this pointer just before the NULL store would
+     * notifier that loaded this pointer just before removal would
      * otherwise go on dereferencing it after the job returned and its stack
      * (or its whole async thread) was gone. GH3 at -O2 crashed that way in
      * spu_coh_notify_write, reading a freed thread stack. */
     spu_lockline_lock();
-    for (int i = 0; i < SPU_COH_MAX_CTX; i++)
-        if (s_coh_ctxs[i] == ctx) { s_coh_ctxs[i] = NULL; break; }
+    for (spu_coh_entry** link = &s_coh_ctxs; *link; link = &(*link)->next) {
+        if ((*link)->ctx != ctx) continue;
+        spu_coh_entry* entry = *link;
+        *link = entry->next;
+        free(entry);
+        break;
+    }
     spu_lockline_unlock();
 }
 
@@ -142,14 +151,18 @@ void spu_coh_unregister(spu_context* ctx)
 void spu_coh_forget_range(uintptr_t lo, uintptr_t hi)
 {
     spu_lockline_lock();
-    for (int i = 0; i < SPU_COH_MAX_CTX; i++) {
-        uintptr_t c = (uintptr_t)s_coh_ctxs[i];
+    for (spu_coh_entry** link = &s_coh_ctxs; *link;) {
+        spu_coh_entry* entry = *link;
+        uintptr_t c = (uintptr_t)entry->ctx;
         if (c >= lo && c < hi) {
             static int _n = 0;
-            if (_n++ < 16)
+            if (PS3_LOG_FIRST(_n, 16))
                 ps3_log("[spu-coh] leaked ctx %p (img=%d) dropped at thread exit\n",
-                        (void*)c, s_coh_ctxs[i]->image_id);
-            s_coh_ctxs[i] = NULL;
+                        (void*)c, entry->ctx->image_id);
+            *link = entry->next;
+            free(entry);
+        } else {
+            link = &entry->next;
         }
     }
     spu_lockline_unlock();
@@ -172,11 +185,26 @@ int spu_coh_is_reserved(uint32_t addr)
  *
  * The PUTLLC path already guards this case by dropping its own reservation
  * before notifying; this gives the DMA path the same ability. */
+/* ppu_loader.cpp, when linked. The loader is compiled per game, so the host,
+ * the fixtures and any build without it have no PPU reservations to break.
+ * POSIX: a weak no-op definition the loader's overrides (a weak undefined
+ * reference is not enough: ld64 only lets those stay unresolved for dylib
+ * symbols). link.exe/lld-link: the linker's own default (see ppu_gcm_pump in
+ * ppu_loader.cpp). */
+#if defined(_MSC_VER)
+void ppu_resv_break_line(uint32_t ea);
+void ppu_resv_break_line_absent(uint32_t ea) { (void)ea; }
+#pragma comment(linker, "/alternatename:ppu_resv_break_line=ppu_resv_break_line_absent")
+#else
+__attribute__((weak)) void ppu_resv_break_line(uint32_t ea) { (void)ea; }
+#endif
+
 void spu_coh_notify_write_except(uint32_t ea, const void* self)
 {
     uint32_t line = ea & ~127u;
-    for (int i = 0; i < SPU_COH_MAX_CTX; i++) {
-        spu_context* c = s_coh_ctxs[i];
+    ppu_resv_break_line(ea);
+    for (spu_coh_entry* entry = s_coh_ctxs; entry; entry = entry->next) {
+        spu_context* c = entry->ctx;
         if (!c || (const void*)c == self) continue;
         if (c->resv_valid && (c->resv_ea & ~127u) == line) {
             c->event_status |= SPU_EVENT_LR;
@@ -190,8 +218,9 @@ void spu_coh_notify_write_except(uint32_t ea, const void* self)
 void spu_coh_notify_write(uint32_t ea)
 {
     uint32_t line = ea & ~127u;
-    for (int i = 0; i < SPU_COH_MAX_CTX; i++) {
-        spu_context* c = s_coh_ctxs[i];
+    ppu_resv_break_line(ea);
+    for (spu_coh_entry* entry = s_coh_ctxs; entry; entry = entry->next) {
+        spu_context* c = entry->ctx;
         if (!c) continue;
         if (c->resv_valid && (c->resv_ea & ~127u) == line) {
             c->event_status |= SPU_EVENT_LR;

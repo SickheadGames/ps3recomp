@@ -1240,8 +1240,9 @@ class SPULifter:
 
     def emit_source(self,header_name: str, is_workload: bool) -> str:
         lines = [SOURCE_PREAMBLE.format(header_name=header_name), ""]
+        weak = "__attribute__((weak)) " if getattr(self, "weak_emit", False) else ""
         for f in self.functions:
-            lines.append(f"void {f.name}(spu_context* ctx) {{")
+            lines.append(f"void {weak}{f.name}(spu_context* ctx) {{")
             for b in f.body_lines:
                 lines.append(b if b.endswith(":") else f"    {b}")
             lines.append("}")
@@ -1356,6 +1357,7 @@ def main() -> None:
                         "targets + STT_FUNC symbols). When set, .text is "
                         "read from this ELF and the positional <input> arg "
                         "is ignored.")
+    p.add_argument("--report", help="Write machine-readable generation diagnostics JSON")
     p.add_argument("--trace", action="store_true",
                    help="Emit spu_trace_pc/spu_trace_rt around each instruction "
                         "for §3 diff-vs-RPCS3 validation. Output goes to stderr "
@@ -1463,11 +1465,11 @@ def main() -> None:
                 "says where it lives.")
 
     if args.auto_functions:
-        from find_spu_functions import detect_functions, parse_elf, pick_text
+        from find_spu_functions import detect_functions, parse_elf, pick_text, text_image
         with open(args.auto_functions, "rb") as f:
             elf_buf = f.read()
         funcs, (text_off, base, size) = detect_functions(elf_buf)
-        data = elf_buf[text_off:text_off + size]
+        data, _ = text_image(elf_buf, parse_elf(elf_buf)["phs"])
         entry_addr = read_elf_entry(elf_buf)
         entry_src = "ELF e_entry"
         if entry_addr is None:
@@ -1676,6 +1678,13 @@ def main() -> None:
         f.write(lifter.emit_header())
     with open(sp, "w") as f:
         f.write(lifter.emit_source(args.header_name, args.workload))
+
+    if args.report:
+        with open(args.report, "w", encoding="utf-8") as report:
+            json.dump({"functions": [[f.start_addr, f.end_addr] for f in lifter.functions],
+                       "unsupported": lifter.unsupported,
+                       "call_targets": sorted(lifter.call_targets),
+                       "branch_targets": sorted(lifter.branch_targets)}, report, indent=2)
 
     print(f"Wrote {hp}")
     print(f"Wrote {sp}")

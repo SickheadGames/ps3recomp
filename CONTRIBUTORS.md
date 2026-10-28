@@ -468,6 +468,15 @@ came from this work.
   `ps3_ms_now` (#244), real POSIX lwmutex/lwcond (#225), safe stack scans
   (#217), SPU disassembler `orbi`/`xorhi`/`xorbi` (#239), `--chunk-lines`
   (#216), `PS3_NULL_READ_STACK` (#226) and `g_ppu_main_ctx` (#228).
+- Depth bounds test in the draw engine and Vulkan (#319), measured on Twisted
+  Metal's deferred lighting.
+- **v0.16.0, 12 PRs.** In-stream flips that complete when the RSX reaches them
+  (#343), get across a JUMP (#347), FP16 transfers (#367) and pixel-wise row
+  conversion (#348); a cache of HLSL to SPIR-V translations (#346); Vulkan
+  feedback snapshots (#352) and a split present (#351); atomic task signal
+  bits (#340), job frames below cache buffers (#366), AVX2/SSE2 SPU float
+  (#369, #370), and AIO reads that keep the fd's position (#376).
+
 
 ### undecuple — [@undecuple](https://github.com/undecuple)
 - **Real video decode in cellVdec** (#215): H.264 and MPEG-2 through FFmpeg,
@@ -476,6 +485,18 @@ came from this work.
   reusable for cellAdec and cellDmux.
 - A detailed set of about 60 general fixes from a *Killzone 3* port (#214),
   each with a focused test against v0.13.0.
+- **v0.15.0, 33 PRs from the Killzone 2/3 ports.** In the lifter: VMX lane
+  order (#269), `lwax` jump tables (#285), `sc` fall-through (#297), carry-form
+  callee-save reloads (#320), and `--chunks` (#254). In the loader: TLS sizing
+  (#253), a per-coroutine call-depth guard (#270), and MinGW thread-locals
+  (#271). In cellGcm: IO table and leak (#255), `GET_REPORT` DMA context
+  (#256), user commands (#273), and in-FIFO flip (#275). Depth export,
+  depth-as-texture, Z16 clears, MSAA, predicated selects and sampler keys
+  (#278-#282, #321). cellFs (#257, #258), PSF saves (#322), UserAutoSave
+  (#276), cellHttp (#260, #261), NP (#259, #323), EDAT klicensee (#274),
+  lwcond layout (#277), cellFont (#324), SPURS argument ABI (#309, #310), SMC
+  `lqa`/`stqa` (#268), and the MFC table (#272).
+
 
 ### robbe1912 — [@robbe1912](https://github.com/robbe1912)
 - **D3D12 fragment-program source capacity** (#230): a 256-instruction program
@@ -485,6 +506,53 @@ came from this work.
 ### tekulvw — [@tekulvw](https://github.com/tekulvw)
 - **SPU interpreter `ILH`** (#234): it had shared `IL`'s case and repeated a
   32-bit immediate instead of a halfword. The test runs the real interpreter.
+- **v0.15.0, 34 PRs: a correctness sweep of the runtime and the Metal
+  backend**, each with a fixture that fails before the fix.
+  - SPURS policy scheduling with per-instance workers and contention limits
+    (#291), private per-context DMA and reservation state (#290), interpreter
+    hand-off (#266), and SPU ELF discovery in the build (#288). Also SDCRZ
+    (#295), FNMS (#318), the interrupt-enable bit (#289), and the SPURS
+    task/taskset fixes (#283, #284, #298, #306).
+  - argv/envp (#263) and HLE registration regeneration (#262).
+  - RSX: depth compare (#302), sRGB output (#304), texture gamma (#305),
+    colour-input clamp (#303), depth24 (#299), depth-export cache keys
+    (#301), and immediate vertices (#292). Metal: depth readback (#300),
+    colour snapshots (#307), clears (#293), window close (#308), and FPS
+    diagnostics (#294).
+  - cellFs directory entries and disc roots (#247, #249), GCM strict IO
+    mapping (#248), network (#250, #265), timezone (#264), sysmodules (#267),
+    dialogs (#251), and Sail (#252).
+- Guest spinlocks with a 32-bit atomic on LP64 hosts, an arm64 fault
+  (#326, v0.16.0).
+
+
+### Noah Peterson — [@NoahBPeterson](https://github.com/NoahBPeterson)
+Runs the *inFAMOUS* port.
+- **Hardware-exact SPU float semantics** (#287): extended range, truncation,
+  denormal flush, `frest`'s table, and an exact-arithmetic referee. NEON paths
+  are bit-identical and 1.6-4x faster. Replaces the old GPL-derived float code.
+- **Exact VMX and branch decode in the PPU lifter** (#286): about 45 VMX ops
+  that were no-ops, VSCR/CR6, BO/BI decoding, and 64-bit CTR.
+- Both are pieces of the LLE firmware and conformance work in #213.
+
+### erikomis — [@erikomis](https://github.com/erikomis)
+Fixes found bringing up *inFAMOUS 2* on the inFamous branch, sent to master as
+well:
+- jump tables behind a tail-call epilogue (#311);
+- a parked FIFO given time to be patched (#312);
+- the `SPU_RdDec` 231 s wrap (#313);
+- NV40 pack/unpack opcodes (#314);
+- cellGem/cellCamera imports (#315);
+- Metal command-buffer errors reported (#316).
+- **v0.16.0, 21 PRs.** 3D textures (#335); FACING/TC8/TC9 (#328),
+  perspective-correct texcoords (#329), `_bx2` and biased-remap fetches (#331),
+  Y16_X16/HILO8 crossbars (#332); flips that complete in order (#354), a
+  bounded semaphore acquire (#327), GCM callbacks at timer sleeps (#353),
+  unscaled NV3089 rows (#334); Metal MRT masks (#330), anisotropy (#373),
+  FXAA and sharpening (#374), gamma (#355) and `precise::` math (#356);
+  sparse texture re-hashing (#375) and per-draw vertex spans (#357);
+  `PS3_FTRACE` (#339), FP debug knobs (#336), `PS3_LANG` (#333),
+  `PS3_GAMEDATA_ROOT` (#338) and full-strength rumble (#372).
 
 ### deucebucket — [@deucebucket](https://github.com/deucebucket)
 - Reported that `fw_spu/` was tracking decrypted firmware PRXs and lifted C,
@@ -493,6 +561,23 @@ came from this work.
 ### bojogon7 — [@bojogon7](https://github.com/bojogon7)
 - Added [AnyPS5](https://github.com/boykopovar/AnyPS5) to the README's list of
   sibling recompilation projects (#209).
+
+### n0madic — [@n0madic](https://github.com/n0madic)
+Fixes from a *SoulCalibur II HD* port
+([n0madic/Soulcalibur2HD-recomp](https://github.com/n0madic/Soulcalibur2HD-recomp)):
+- **An SPU thread runs the image its own bytes identify** (#362), not
+  whichever registered image has code at its entry point. SPU user events
+  find the port the PPU binds (#363).
+- **NV3089's 12.4 source origin** (#358): copies were 256 times too short.
+- The D3D12 vertex program cache keyed on the program (#361), which took
+  most D3DCompile calls off the FIFO thread.
+- `cellGameBootCheck` game type from PARAM.SFO (#359), and the msg-dialog
+  NONE/INVALID button codes (#360).
+
+### kalpakprod — [@kalpakprod](https://github.com/kalpakprod)
+- `CELL_FS_O_*` flag values corrected so `O_CREAT` creates (#349).
+- `/dev_hdd1` maps to a writable host root with its cache directory (#350).
+- Syscall 14 classifies lock-line addresses by guest segment (#341).
 
 ---
 

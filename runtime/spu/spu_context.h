@@ -13,6 +13,7 @@
 #include "../../include/ps3emu/ps3types.h"
 #include "../../include/ps3emu/portable_builtins.h"
 #include "ps3emu/logging.h"
+#include "../../include/ps3emu/log_first.h"
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
@@ -419,6 +420,11 @@ typedef struct spu_context {
 /* ---------------------------------------------------------------------------
  * Initialization
  * -----------------------------------------------------------------------*/
+/* Release private DMA state only when the execution owner has stopped using
+ * the context. Pair with spu_coh_unregister before a reset or destruction. */
+void spu_mfc_release(spu_context* ctx);
+void spu_mfc_forget_range(uintptr_t lo, uintptr_t hi);
+
 static inline void spu_context_init(spu_context* ctx, uint32_t spu_id)
 {
     memset(ctx, 0, sizeof(*ctx));
@@ -605,7 +611,7 @@ static /*__attribute__((noinline, cold))*/ void spu_ls_write_probe_smc(spu_conte
         const char* h = getenv("SPU_SMC_HI"); hi = h ? (uint32_t)strtoul(h,0,0) : 0x3700; }
       if (s >= 0 && (uint32_t)ctx->image_id == img && lsa >= lo && lsa < hi) {
           static int _n = 0;
-          if (_n++ < 48)
+          if (PS3_LOG_FIRST(_n, 48))
               ps3_log("[spu-SMC] img=%d WROTE CODE @0x%05X (pc=0x%05X) = %02X%02X%02X%02X\n",
                       ctx->image_id, lsa, (uint32_t)ctx->pc & SPU_LS_MASK,
                       p[0], p[1], p[2], p[3]);

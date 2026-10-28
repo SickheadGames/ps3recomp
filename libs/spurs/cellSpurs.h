@@ -85,6 +85,7 @@ typedef struct CellSpursTaskset CellSpursTaskset;
 typedef struct CellSpursTasksetAttribute CellSpursTasksetAttribute;
 typedef struct CellSpursTask CellSpursTask;
 typedef struct CellSpursTaskAttribute CellSpursTaskAttribute;
+typedef struct CellSpursTaskExitCode CellSpursTaskExitCode;
 typedef struct CellSpursEventFlag CellSpursEventFlag;
 typedef struct CellSpursWorkloadAttribute CellSpursWorkloadAttribute;
 
@@ -127,7 +128,8 @@ struct CellSpursTasksetAttribute {
     u32  flags;
     u64  args;
     u8   priority[CELL_SPURS_MAX_SPU];
-    u8   _padding[64];
+    u32  tasksetSize; /* host-layout attribute; retained through creation */
+    u8   _padding[60];
 };
 
 /* Task -- represents a unit of SPU work */
@@ -155,6 +157,18 @@ struct CellSpursTaskAttribute {
     u32  lsPattern_ea;
     u32  argument_ea;
     u8   _padding[48];
+};
+
+/* Guest-owned exit container: unlike the legacy host records above, both its
+ * 128-byte size and its guest address alignment are part of the API. */
+struct CellSpursTaskExitCode {
+#if defined(_MSC_VER)
+    __declspec(align(128)) u8 reserved[128];
+#elif defined(__cplusplus)
+    alignas(128) u8 reserved[128];
+#else
+    _Alignas(128) u8 reserved[128];
+#endif
 };
 
 /* Event flag -- SPURS-level event synchronization */
@@ -239,6 +253,7 @@ s32 cellSpursJoinTask(CellSpursTaskset* taskset, CellSpursTaskId taskId,
 s32 cellSpursSendSignal(CellSpursTaskset* taskset, CellSpursTaskId taskId);
 
 s32 cellSpursTaskAttributeInitialize(CellSpursTaskAttribute* attr);
+s32 cellSpursTaskExitCodeInitialize(CellSpursTaskExitCode* exitCode);
 
 /* ---------------------------------------------------------------------------
  * Workload functions
@@ -288,6 +303,7 @@ s32 cellSpursBarrierInitialize(u64 taskset_ea, u64 barrier_ea, u32 total);
 s32 cellSpursGetTasksetInfo(u64 taskset_ea, u64 info_ea);
 s32 cellSpursTasksetAttributeSetTasksetSize(CellSpursTasksetAttribute* attr, u32 size);
 s32 cellSpursQueueAttachLv2EventQueue(u64 queue_ea);
+s32 cellSpursQueueSize(u64 queue_ea, u64 size_ea);
 s32 _cellSpursLFQueueInitialize(u64 owner_ea, u64 queue_ea, u64 buffer_ea,
                                 u32 size, u32 depth, u32 direction);
 s32 cellSpursLFQueueAttachLv2EventQueue(u64 queue_ea);

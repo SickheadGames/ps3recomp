@@ -121,6 +121,27 @@ int rsx_fp_decompile_buffered_ex(
     const u8* ucode, u32 max_bytes, u32 ctrl, u32 tex_cube_mask,
     char* out, u32 out_size, u32* out_constant_count);
 
+/* Native depth texture comparison metadata. Disabled descriptors preserve the
+ * original shader byte-for-byte. enabled=2 marks an active unsupported layout.
+ * RSX ADDRESS zfunc0/7 and texture alpha-kill bypass comparison; modes1..6
+ * compare the source reference against stored depth. R32 color snapshots are
+ * sampled explicitly, so no native depth texture/SampleCmp binding is needed.
+ * Supported: decoded D24_D8/D16, 2D TEX/TXP, one level, matching nearest or
+ * linear min/mag filters. Float-depth formats, cubes/3D, multiple levels and
+ * other texture opcodes reject translation when comparison is active.
+ * The shared engine and legacy Metal supply this state; other legacy backend
+ * paths retain their existing behavior until they adopt the metadata API. */
+typedef struct rsx_fp_shadow_desc {
+    u8 enabled, func, linear, unnormalized;
+} rsx_fp_shadow_desc;
+void rsx_fp_shadow_desc_from_texture(rsx_fp_shadow_desc* out, u32 format,
+    u32 dimension, u32 cube, u32 mips, u32 filter, u32 address, u32 control0);
+u32 rsx_fp_texture_units(const u8* ucode, u32 max_bytes);
+int rsx_fp_decompile_buffered_shadow_ex(
+    const u8* ucode, u32 max_bytes, u32 ctrl, u32 tex_cube_mask,
+    const rsx_fp_shadow_desc shadow[16],
+    char* out, u32 out_size, u32* out_constant_count);
+
 /* Extract the exact runtime inline-CONST payload. Returns the slot count on
  * success or -1 for an unterminated/truncated/oversized program. */
 int rsx_fp_collect_constants(
@@ -154,6 +175,55 @@ int rsx_fp_constant_ring_plan(
  * draw would leave a multi-buffered display surface on an older generation. */
 int rsx_vertex_constant_ring_plan(
     u32 used, u32 capacity, u32 block_bytes, u32* out_offset);
+
+/* Integer framebuffer sRGB conversion (NV4097_SET_SHADER_PACKER / 0x1FEC).
+ * Pass the decoded surface color format. Any nonzero packer enables it for
+ * half exports; floating surfaces and 32-bit exports bypass conversion. */
+int rsx_fp_srgb_output_enabled(u32 packer, u32 ctrl, u32 color_format);
+
+/* Apply RGB-only linear-to-sRGB conversion to all emitted color targets,
+ * before output quantization. Alpha and optional depth exports are preserved.
+ * Returns 1, or -1 without mutation for malformed source/insufficient space.
+ * Apply before alpha-test wrapping; disabled draws should skip this helper. */
+int rsx_fp_apply_srgb_output(char* hlsl, u32 capacity);
+
+/* Gamma metadata is a post-filter/post-remap RGBA lane mask, with formats
+ * validated by rsx_texture_gamma_mask. EXP_TEX overrides gamma per fetch.
+ * Old entry points pass NULL and preserve their source byte for byte. */
+u32 rsx_fp_texture_gamma_units(const u8* ucode, u32 max_bytes,
+                                const u8 gamma_masks[16]);
+int rsx_fp_decompile_buffered_color_ex(
+    const u8* ucode, u32 max_bytes, u32 ctrl, u32 tex_cube_mask,
+    const u8 gamma_masks[16], char* out, u32 out_size, u32* out_constant_count);
+/* Both: depth comparison per unit and post-filter gamma per unit. */
+/* Texture sign expansion (SET_TEXTURE_ADDRESS UNSIGNED_REMAP_BIASED):
+ * expand_masks[u] is a post-remap RGBA lane mask of the lanes unit u
+ * re-centres, plus bit 4 for 16-bit channels (rsx_texture_expand_mask).
+ * Every TEX/TXP/TXB/TXL from such a unit returns (round(x*255)-128)/127 on
+ * those lanes, less gamma lanes. A fetch carrying EXP_TEX (OPDEST bit 21,
+ * the _bx2 modifier) returns x*2-1 on every lane on any unit and skips gamma
+ * (RPCS3 _process_texel), from every entry point. The units whose fetches
+ * expand are part of the pipeline's identity. */
+u32 rsx_fp_texture_expand_units(const u8* ucode, u32 max_bytes,
+                                 const u8 expand_masks[16]);
+u32 rsx_fp_texture_bx2_units(const u8* ucode, u32 max_bytes);
+int rsx_fp_decompile_buffered_shadow_color_expand_ex(
+    const u8* ucode, u32 max_bytes, u32 ctrl, u32 tex_cube_mask,
+    const rsx_fp_shadow_desc shadow[16], const u8 gamma_masks[16],
+    const u8 expand_masks[16],
+    char* out, u32 out_size, u32* out_constant_count);
+/* As above, with tex_vol_mask naming the units bound to a 3D texture: they
+ * are declared Texture3D and sampled with three coordinates (TXP divides
+ * all three by w), like cube units on their own t-register. */
+int rsx_fp_decompile_buffered_shadow_color_expand_vol_ex(
+    const u8* ucode, u32 max_bytes, u32 ctrl, u32 tex_cube_mask, u32 tex_vol_mask,
+    const rsx_fp_shadow_desc shadow[16], const u8 gamma_masks[16],
+    const u8 expand_masks[16],
+    char* out, u32 out_size, u32* out_constant_count);
+int rsx_fp_decompile_buffered_shadow_color_ex(
+    const u8* ucode, u32 max_bytes, u32 ctrl, u32 tex_cube_mask,
+    const rsx_fp_shadow_desc shadow[16], const u8 gamma_masks[16],
+    char* out, u32 out_size, u32* out_constant_count);
 
 /* Return the mnemonic for an NV40 fragment opcode (or "?" if unknown).
  * Useful for disassembly/logging. */

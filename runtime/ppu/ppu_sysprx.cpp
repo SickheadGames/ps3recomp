@@ -10,6 +10,7 @@
  * NIDs are computed from the names (ps3_compute_nid), so this stays correct
  * without hand-written NID literals.
  */
+#define PPU_NO_INLINE_LOADS   /* declares its own out-of-line vm_read* below */
 #include "ppu_recomp.h"     /* ppu_context */
 #include "ps3emu/nid.h"     /* ps3_compute_nid */
 #include "ps3emu/logging.h"
@@ -21,6 +22,7 @@
  * lwmutex exclusion) and the POSIX shims elsewhere -- Sleep, DWORD, QPC. */
 #include "../platform/win32_compat.h"
 #include "../memory/vm.h"   /* VM_HLE_INJECT_BASE -- not platform-specific */
+#include "ps3emu/log_first.h"
 
 extern "C" uint8_t* vm_base;
 extern "C" void ps3_hle_register_ctx(uint32_t nid, const char* name, void (*fn)(ppu_context*));
@@ -387,15 +389,16 @@ static void sys_lwmutex_unlock(ppu_context* ctx)
  * EAs (the generic adapter would pass them raw and the C sysPrxForUser impl
  * deref'd them as host pointers -> AV during cellSpurs init). A no-op wait is
  * adequate here: the CRT/SPURS paths that reach us use these for one-shot init
- * handshakes, not long-term blocking. sys_lwcond_t: +0x00 lwmutex EA (be64),
- * +0x08 lwcond_queue id. */
+ * handshakes, not long-term blocking. sys_lwcond_t is 8 bytes: +0x00 u32
+ * lwmutex EA, +0x04 u32 lwcond queue id. Titles read +0x00 themselves (an
+ * lwcond whose lwmutex reads 0 is treated as invalid). */
 static void sys_lwcond_create(ppu_context* ctx)
 {
     static uint32_t s_lwcond_id = 0x4C000000u;
     uint32_t lwcond  = (uint32_t)ctx->gpr[3];
     uint32_t lwmutex = (uint32_t)ctx->gpr[4];
-    vm_write64(lwcond + 0x00, (uint64_t)lwmutex);
-    vm_write32(lwcond + 0x08, ++s_lwcond_id);
+    vm_write32(lwcond + 0x00, lwmutex);
+    vm_write32(lwcond + 0x04, ++s_lwcond_id);
     ctx->gpr[3] = 0;
 }
 static void sys_lwcond_destroy(ppu_context* ctx)    { ctx->gpr[3] = 0; }
@@ -409,7 +412,7 @@ static void sys_lwcond_signal_to(ppu_context* ctx)  { ctx->gpr[3] = 0; }
 static void sys_lwcond_wait(ppu_context* ctx)
 {
     uint32_t lwcond  = (uint32_t)ctx->gpr[3];
-    uint32_t lwmutex = (uint32_t)vm_read64(lwcond + 0x00);
+    uint32_t lwmutex = vm_read32(lwcond + 0x00);
     HANDLE s = lwm_sem(lwmutex);
     if (s) {
         uint32_t own = vm_read32(lwmutex + LWM_OWNER);
@@ -583,6 +586,8 @@ static void hle_cellGcmInitBody(ppu_context* ctx)
 #define SYS_NET_EWOULDBLOCK_V 35
 extern "C" void ps3_net_host_register(unsigned int (*guest_alloc)(unsigned int, unsigned int));
 extern "C" void np_score_register_ctx(void);   /* libs/network/sceNpScore.c */
+extern "C" void cellSaveData_register_ctx_handlers(void); /* libs/system/cellSaveData.c */
+extern "C" void avconf_register_ctx(void);     /* libs/misc/cellAvconfExt.c */
 static uint32_t g_net_errno_ea = 0;
 static void hle_net_errno_loc(ppu_context* ctx)
 {
@@ -799,9 +804,10 @@ static void hle_sys_spu_image_import(ppu_context* ctx)
  */
 #define SPINLOCK_BE1  0x01000000u          /* be32(1) */
 
-static inline volatile long* spin_word(uint32_t ea)
+static inline volatile LONG* spin_word(uint32_t ea)
 {
-    return (volatile long*)(vm_base + ea);
+    /* LONG stays 32-bit on LP64 hosts, unlike native long. */
+    return (volatile LONG*)(vm_base + ea);
 }
 
 /* Test-and-set, not compare-and-swap: writing "locked" over an already-locked
@@ -809,7 +815,7 @@ static inline volatile long* spin_word(uint32_t ea)
  * Exchange is the one RMW the POSIX shim in win32_compat.h already provides. */
 static inline int spin_try(uint32_t ea)
 {
-    return _InterlockedExchange(spin_word(ea), (long)SPINLOCK_BE1) == 0;
+    return _InterlockedExchange(spin_word(ea), (LONG)SPINLOCK_BE1) == 0;
 }
 
 static void sys_spinlock_initialize(ppu_context* ctx)
@@ -869,9 +875,8 @@ static void sys_spinlock_lock(ppu_context* ctx)
             unsigned long owner = spin_owner_of(ea);
             unsigned long me    = GetCurrentThreadId();
             static int reported = 0;
-            if (reported++ < 8)
-                ps3_log(
-                        "[spinlock] STUCK on 0x%08X after 200k spins: guest lr=0x%08X, "
+            if (PS3_LOG_FIRST(reported, 8))
+                ps3_log("[spinlock] STUCK on 0x%08X after 200k spins: guest lr=0x%08X, "
                         "held by tid %lu, this is tid %lu%s\n",
                         ea, (uint32_t)ctx->lr, owner, me,
                         (owner && owner == me)
@@ -912,6 +917,12 @@ extern "C" void ppu_sysprx_register(void)
     /* sceNpScore ranking calls take up to 15 arguments: the ones past r10
      * come off the stack, so they need the full context. */
     np_score_register_ctx();
+    /* cellSaveDataUserAutoLoad/UserAutoSave take nine arguments; the ninth
+     * (userdata) is on the guest stack, so they need the full context too.
+     * Registered here so no project has to remember the call. */
+    cellSaveData_register_ctx_handlers();
+    /* cellVideoOutSetGamma's float argument is in f1. */
+    avconf_register_ctx();
     /* sys_net offline model (NIDs from PSL1GHT libnet exports). Covers every
      * sys_net NID LBP imports so none fall to the unresolved-NID default. */
     ps3_hle_register_ctx(0x6005CDE1u, "_sys_net_errno_loc",     hle_net_errno_loc);

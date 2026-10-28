@@ -52,6 +52,8 @@ typedef struct sys_timer_info {
     int32_t  event_queue_id;   /* connected event queue */
     uint64_t source;           /* event source value */
     uint64_t data1;            /* event data1 */
+    uint64_t data2;            /* event data2 (connect's fifth argument) */
+    uint64_t next_expire;      /* next expiration, us on the timer clock */
 
 #ifdef _WIN32
     HANDLE   timer_handle;
@@ -72,6 +74,7 @@ extern sys_timer_info g_sys_timers[SYS_TIMER_MAX];
 int64_t sys_timer_usleep(ppu_context* ctx);
 int64_t sys_timer_sleep(ppu_context* ctx);
 int64_t sys_time_get_current_time(ppu_context* ctx);
+int64_t sys_time_get_timezone(ppu_context* ctx);
 int64_t sys_time_get_timebase_frequency(ppu_context* ctx);
 int64_t sys_timer_create(ppu_context* ctx);
 int64_t sys_timer_destroy(ppu_context* ctx);

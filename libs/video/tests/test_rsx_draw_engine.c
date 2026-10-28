@@ -72,6 +72,7 @@ typedef struct {
     int n_color_create, n_color_release, n_color_seeded;
     int n_depth_create, n_depth_snapshot;
     int n_pipeline_create;
+    rsx_be_render_state pipeline_rs;   /* the last pipeline's render state */
     int n_draw, n_clear_color, n_clear_ds, n_present;
     u32 cleared[STUB_MAX_CLEARED];
 
@@ -83,14 +84,20 @@ typedef struct {
     u32 pipeline_rt_count;
     u32 bound_surface, bound_depth, bound_pipeline;
     u32 draw_vertices, draw_indices, draw_stride;
+    float captured_vertices[16][64];
+    u32 captured_indices[24];
     float draw_first_vertex[4];   /* ATTR0 of the first vertex handed over */
     rsx_topology draw_topology;
     u32 scissor[4];
     u32 stencil_ref;
+    float depth_bounds[2];
+    int n_depth_bounds;
     u32 last_created_texture, last_created_color;
     u32 last_released;
     float last_clear_depth;
     int n_depth_readback;
+    u32 color_w, color_h;         /* size of the last colour surface created */
+    float vp_xf[8];               /* viewport epilogue after the VS constants */
 } StubState;
 
 static StubState stub;
@@ -138,8 +145,9 @@ static void stub_texture_release(void* u, u32 handle)
 static u32 stub_color_create(void* u, rsx_be_format f, u32 w, u32 h,
                              const void* seed, u32 seed_row)
 {
-    (void)u; (void)f; (void)w; (void)h; (void)seed_row;
+    (void)u; (void)f; (void)seed_row;
     stub.n_color_create++;
+    stub.color_w = w; stub.color_h = h;
     if (seed) stub.n_color_seeded++;
     stub.last_created_color = stub_handle();
     return stub.last_created_color;
@@ -166,6 +174,7 @@ static u32 stub_pipeline_create(void* u, const char* vs, const char* ps,
     if (!vs || !ps || !*vs || !*ps) return 0;
     stub.n_pipeline_create++;
     stub.pipeline_rt_count = rt_count;
+    stub.pipeline_rs = *rs;
     return stub_handle();
 }
 
@@ -181,7 +190,12 @@ static void stub_bind_targets(void* u, const u32* s, u32 count, u32 d)
     stub.bound_depth = d;
 }
 static void stub_bind_pipeline(void* u, u32 p) { (void)u; stub.bound_pipeline = p; }
-static void stub_bind_vs(void* u, const void* d, u32 n) { (void)u; (void)d; (void)n; }
+static void stub_bind_vs(void* u, const void* d, u32 n)
+{
+    (void)u;
+    if (d && n >= RSX_DSP_NUM_CONSTANTS * 16u + sizeof stub.vp_xf)
+        memcpy(stub.vp_xf, (const u8*)d + RSX_DSP_NUM_CONSTANTS * 16u, sizeof stub.vp_xf);
+}
 static void stub_bind_ps(void* u, const void* d, u32 n) { (void)u; (void)d; (void)n; }
 
 static void stub_bind_textures(void* u, const u32* tex,
@@ -207,6 +221,12 @@ static void stub_scissor(void* u, u32 x, u32 y, u32 w, u32 h)
 }
 
 static void stub_stencil_ref(void* u, u32 r) { (void)u; stub.stencil_ref = r; }
+static void stub_depth_bounds(void* u, float lo, float hi)
+{
+    (void)u;
+    stub.depth_bounds[0] = lo; stub.depth_bounds[1] = hi;
+    stub.n_depth_bounds++;
+}
 
 static void stub_draw(void* u, rsx_topology topology, const void* verts,
                       u32 count, u32 stride, const u32* indices,
@@ -217,6 +237,14 @@ static void stub_draw(void* u, rsx_topology topology, const void* verts,
     memset(stub.draw_first_vertex, 0, sizeof stub.draw_first_vertex);
     if (verts && stride >= sizeof stub.draw_first_vertex)
         memcpy(stub.draw_first_vertex, verts, sizeof stub.draw_first_vertex);
+    memset(stub.captured_vertices, 0, sizeof stub.captured_vertices);
+    memset(stub.captured_indices, 0, sizeof stub.captured_indices);
+    if (verts && stride <= sizeof stub.captured_vertices[0])
+        for (u32 i = 0; i < count && i < 16; i++)
+            memcpy(stub.captured_vertices[i], (const u8*)verts + i * stride, stride);
+    if (indices)
+        memcpy(stub.captured_indices, indices,
+               (index_count < 24 ? index_count : 24) * sizeof(u32));
     stub.draw_topology = topology;
     stub.draw_vertices = count;
     stub.draw_stride = stride;
@@ -240,14 +268,29 @@ static void stub_present(void* u, u32 s) { (void)u; presented_surface = s; stub.
 /* One pixel of a surface, in the R,G,B,A order rsx_texture_decode produces:
  * the readback hook has to put those back into the guest's A8R8G8B8. */
 static u8 g_stub_pixel[4] = { 0x11, 0x22, 0x33, 0x44 };
+/* An FP16 surface's pixel: R,G,B,A halves 1.0, 2.0, 3.0, 4.0, little-endian
+ * as a host GPU hands them back. */
+static const u8 g_stub_pixel16[8] = { 0x00, 0x3C, 0x00, 0x40, 0x00, 0x42, 0x00, 0x44 };
 
+/* With g_stub_ramp set, pixel (c, r) reads back as R,G,B,A = 4c+1, 4c+2,
+ * 4c+3, 0x80+r instead, so every byte of a row is distinct. */
+static int g_stub_ramp;
+
+/* The engine asks for rows packed at the surface's own pixel size, so the
+ * pitch tells the two formats apart. */
 static void stub_readback(void* u, u32 s, u32 x, u32 y, u32 w, u32 h,
                           void* out, u32 pitch)
 {
     (void)u; (void)s; (void)x; (void)y;
+    const u32 bpp = pitch >= w * 8u ? 8u : 4u;
     for (u32 r = 0; r < h; r++)
-        for (u32 c = 0; c < w; c++)
-            memcpy((u8*)out + (size_t)r * pitch + c * 4u, g_stub_pixel, 4);
+        for (u32 c = 0; c < w; c++) {
+            u8* p = (u8*)out + (size_t)r * pitch + c * bpp;
+            if (bpp == 8u) { memcpy(p, g_stub_pixel16, 8); continue; }
+            if (!g_stub_ramp) { memcpy(p, g_stub_pixel, 4); continue; }
+            p[0] = (u8)(4u * c + 1u); p[1] = (u8)(4u * c + 2u); p[2] = (u8)(4u * c + 3u);
+            p[3] = (u8)(0x80u + r);
+        }
 }
 
 /* Every depth target reads back as 0.5, which Z24S8 stores as 0x800000. */
@@ -262,8 +305,9 @@ static int stub_depth_readback(void* u, u32 d, u32 x, u32 y, u32 w, u32 h,
     return 0;
 }
 
-/* The last rectangle pushed into a colour target, and its first pixel. */
-static struct { int n; u32 surface, x, y, w, h; u8 first[4]; } g_written;
+/* The last rectangle pushed into a colour target, its first pixel and the
+ * first 64 bytes of its first row. */
+static struct { int n; u32 surface, x, y, w, h; u8 first[4]; u8 row[64]; } g_written;
 
 static void stub_color_write(void* u, u32 s, u32 x, u32 y, u32 w, u32 h,
                              const void* rows, u32 row_bytes)
@@ -273,6 +317,7 @@ static void stub_color_write(void* u, u32 s, u32 x, u32 y, u32 w, u32 h,
     g_written.surface = s; g_written.x = x; g_written.y = y;
     g_written.w = w; g_written.h = h;
     memcpy(g_written.first, rows, 4);
+    memcpy(g_written.row, rows, w * 4u < sizeof g_written.row ? w * 4u : sizeof g_written.row);
 }
 
 static const rsx_draw_backend g_stub_backend = {
@@ -301,6 +346,7 @@ static const rsx_draw_backend g_stub_backend = {
     .set_viewport = stub_viewport,
     .set_scissor = stub_scissor,
     .set_stencil_ref = stub_stencil_ref,
+    .set_depth_bounds = stub_depth_bounds,
     .draw = stub_draw,
     .clear_color = stub_clear_color,
     .clear_depth_stencil = stub_clear_ds,
@@ -340,6 +386,9 @@ static const rsx_draw_backend g_stub_backend = {
 #define M_INLINE_ARRAY        0x1818
 #define M_TEX_UNIT            0x1A00   /* + unit * 0x20 */
 #define M_STENCIL_FUNC_REF    0x0334
+#define M_DEPTH_BOUNDS_ENABLE 0x0380
+#define M_DEPTH_BOUNDS_MIN    0x0384
+#define M_DEPTH_BOUNDS_MAX    0x0388
 #define M_CLEAR_BUFFERS       0x1D94
 #define M_VP_UPLOAD_CONST_ID  0x1EFC
 #define M_VP_UPLOAD_CONST     0x1F00
@@ -618,6 +667,86 @@ static void test_texture_cache(void)
     engine_down();
 }
 
+/* A 128x128 A8R8G8B8 linear texture on unit 0: 64 KB, past the size that is
+ * hashed in full every frame. */
+#define BIG_TEX_OFFSET 0x00100000u
+#define BIG_TEX_DIM    128u
+#define BIG_TEX_BYTES  (BIG_TEX_DIM * BIG_TEX_DIM * 4u)
+static void bind_big_texture(void)
+{
+    m(M_TEX_UNIT + 0x00, BIG_TEX_OFFSET);
+    m(M_TEX_UNIT + 0x04, 2u | (2u << 4) | ((0x85u | 0x20u) << 8) | (1u << 16));
+    m(M_TEX_UNIT + 0x0C, 0x80000000u);
+    m(M_TEX_UNIT + 0x10, 0xAAE4u);
+    m(M_TEX_UNIT + 0x18, (BIG_TEX_DIM << 16) | BIG_TEX_DIM);
+    m(0x1840 /* control3: pitch */, BIG_TEX_DIM * 4u);
+}
+
+/* Draw once a frame until the cache re-decodes the texture: how many
+ * presents that took, or -1 if not within `limit`. */
+static int frames_to_notice(int limit)
+{
+    const int before = stub.n_texture_create;
+    for (int f = 0; f <= limit; f++) {
+        draw_triangle();
+        if (stub.n_texture_create != before) return f;
+        rsx_draw_engine_present();
+    }
+    return -1;
+}
+
+static void test_texture_sparse_rehash(void)
+{
+    printf("-- texture re-hash\n");
+    u8* tex = vm_base + BIG_TEX_OFFSET;
+    engine_up();
+    bind_big_texture();
+    memset(tex, 0x11, BIG_TEX_BYTES);
+    draw_triangle();
+    CHECK(stub.n_texture_create == 1, "the big texture is uploaded");
+
+    /* What the per-frame sparse check sees is noticed in the next frame:
+     * a whole rewrite, a byte inside one of the sampled 64-byte blocks (one
+     * per 2 KB), a byte of the tail. */
+    rsx_draw_engine_present();
+    memset(tex, 0x22, BIG_TEX_BYTES);
+    CHECK(frames_to_notice(0) == 0, "a rewrite of the whole texture is noticed at once");
+    rsx_draw_engine_present();
+    tex[3 * 2048 + 5] ^= 0xFF;
+    CHECK(frames_to_notice(0) == 0, "a write in a sampled block is noticed at once");
+    rsx_draw_engine_present();
+    tex[BIG_TEX_BYTES - 1] ^= 0xFF;
+    CHECK(frames_to_notice(0) == 0, "a write to the last 64 bytes is noticed at once");
+
+    /* A byte between the sampled blocks waits for the full hash, which comes
+     * 8 frames after the last one: the last full hash was the frame above,
+     * so this one is seen 7 presents later, and not before. */
+    rsx_draw_engine_present();
+    tex[3 * 2048 + 100] ^= 0xFF;
+    const int late = frames_to_notice(10);
+    CHECK(late == 7, "a write between the sampled blocks is noticed by the full hash (%d frames)", late);
+
+    /* A small texture is still hashed in full every frame. */
+    rsx_draw_engine_present();
+    bind_texture_unit(RSX_LOCATION_MAIN, TEX_OFFSET);
+    draw_triangle();
+    rsx_draw_engine_present();
+    vm_base[TEX_OFFSET + 37] ^= 0xFF;
+    CHECK(frames_to_notice(0) == 0, "a small texture is hashed in full every frame");
+    engine_down();
+
+    /* PS3RECOMP_ENG_TEXHASH_FULL=1: the full hash every frame, as before. */
+    setenv("PS3RECOMP_ENG_TEXHASH_FULL", "1", 1);
+    engine_up();
+    bind_big_texture();
+    draw_triangle();
+    rsx_draw_engine_present();
+    tex[5 * 2048 + 100] ^= 0xFF;
+    CHECK(frames_to_notice(0) == 0, "PS3RECOMP_ENG_TEXHASH_FULL=1 hashes everything every frame");
+    engine_down();
+    unsetenv("PS3RECOMP_ENG_TEXHASH_FULL");
+}
+
 /* ---- 4. the pipeline key ------------------------------------------------- */
 
 static void test_pipeline_key(void)
@@ -656,6 +785,22 @@ static void test_pipeline_key(void)
     CHECK(rsx_draw_engine_hash_render_state(&b, 1469598103934665603ull) != base,
           "so is an FP16 render target");
 
+    b = a; b.depth_bounds_test = 1;
+    CHECK(rsx_draw_engine_hash_render_state(&b, 1469598103934665603ull) != base,
+          "so is the depth bounds test");
+
+    /* MRT targets 1..3 carry their own colour mask (COLOR_MASK_MRT, 0x0370)
+     * and blend enable (BLEND_ENABLE_MRT, 0x036C). inFAMOUS 2's light volumes
+     * add into target 0 with targets 1 and 2 masked off; giving them target
+     * 0's state added every light into the G-buffer. */
+    b = a; b.color_mask_mrt = 0x0DF0u;
+    CHECK(rsx_draw_engine_hash_render_state(&b, 1469598103934665603ull) != base,
+          "so is the MRT colour mask");
+
+    b = a; b.blend_mrt = 0x2u;
+    CHECK(rsx_draw_engine_hash_render_state(&b, 1469598103934665603ull) != base,
+          "so is the MRT blend enable");
+
     /* And through the engine: transform constants change every draw of every
      * frame, and must not multiply pipelines. */
     engine_up();
@@ -677,6 +822,36 @@ static void test_pipeline_key(void)
     CHECK(stub.n_pipeline_create == 1 && stub.stencil_ref == 0x7Fu,
           "nor does the stencil reference, which reaches the encoder (%u)",
           stub.stencil_ref);
+
+    /* The depth bounds test is pipeline state; its bounds are not. A deferred
+     * renderer draws its lights in [0, 0.999984] and its sky in
+     * [0.999984, 1] with the same programs. */
+    m(M_DEPTH_BOUNDS_ENABLE, 1u);
+    draw_triangle();
+    CHECK(stub.n_pipeline_create == 2,
+          "enabling the depth bounds test builds another pipeline (%d)",
+          stub.n_pipeline_create);
+    m(M_DEPTH_BOUNDS_MIN, 0x00000000u);      /* 0.0  */
+    m(M_DEPTH_BOUNDS_MAX, 0x3F7FFEF9u);      /* 0.999984 */
+    draw_triangle();
+    CHECK(stub.depth_bounds[0] == 0.0f && stub.depth_bounds[1] > 0.99998f &&
+          stub.depth_bounds[1] < 0.99999f,
+          "the bounds reach the backend as floats (%g, %g)",
+          stub.depth_bounds[0], stub.depth_bounds[1]);
+    m(M_DEPTH_BOUNDS_MIN, 0x3F7FFEF9u);
+    m(M_DEPTH_BOUNDS_MAX, 0x3F800000u);      /* 1.0  */
+    draw_triangle();
+    CHECK(stub.n_pipeline_create == 2 && stub.depth_bounds[1] == 1.0f,
+          "and moving them does not build a pipeline (%d)",
+          stub.n_pipeline_create);
+    m(M_DEPTH_BOUNDS_ENABLE, 0u);
+
+    /* The decode carries the two MRT registers through to the backend. */
+    m(0x0370, 0x0DF0);
+    m(0x036C, 0x2);
+    draw_triangle();
+    CHECK(stub.pipeline_rs.color_mask_mrt == 0x0DF0u && stub.pipeline_rs.blend_mrt == 0x2u,
+          "the pipeline is built with COLOR_MASK_MRT and BLEND_ENABLE_MRT");
 
     engine_down();
 }
@@ -983,6 +1158,89 @@ static void test_transfer_coherence(void)
     engine_down();
 }
 
+/* Whole rows, every pixel different, both ways: a byte swapped between two
+ * pixels, or a row converted only in part, shows up here. */
+static void test_transfer_rows(void)
+{
+    printf("-- transfer rows\n");
+    engine_up();
+    m(M_COLOR_A_PITCH, 1024u);
+    draw_triangle();
+
+    /* Guest A,R,G,B -> surface R,G,B,A, 13 pixels (not a multiple of a vector). */
+    u8* px = vm_base + GUEST_LOCAL_EA + 0x40000u + 5u * 1024u;
+    for (u32 c = 0; c < 13; c++) {
+        px[4 * c + 0] = (u8)(0xA0 + c); px[4 * c + 1] = (u8)(4 * c + 1);
+        px[4 * c + 2] = (u8)(4 * c + 2); px[4 * c + 3] = (u8)(4 * c + 3);
+    }
+    memset(&g_written, 0, sizeof g_written);
+    rsx_draw_engine_guest_wrote(RSX_LOCATION_LOCAL, 0x40000u + 5u * 1024u, 1024u, 13u, 2u);
+    int ok = g_written.n == 1 && g_written.w == 13;
+    for (u32 c = 0; ok && c < 13; c++)
+        ok = g_written.row[4 * c + 0] == 4 * c + 1 && g_written.row[4 * c + 1] == 4 * c + 2 &&
+             g_written.row[4 * c + 2] == 4 * c + 3 && g_written.row[4 * c + 3] == 0xA0 + c;
+    CHECK(ok, "13 distinct A8R8G8B8 pixels arrive as R,G,B,A in order");
+
+    /* Surface R,G,B,A -> guest A,R,G,B, 3 rows of 13 pixels, and nothing past them. */
+    u8* rd = vm_base + GUEST_LOCAL_EA + 0x40000u + 8u * 1024u;
+    for (u32 r = 0; r < 4; r++) memset(rd + r * 1024u, 0xEE, 14 * 4);
+    g_stub_ramp = 1;
+    rsx_draw_engine_guest_read(RSX_LOCATION_LOCAL, 0x40000u + 8u * 1024u, 1024u, 13u, 3u);
+    g_stub_ramp = 0;
+    ok = 1;
+    for (u32 r = 0; ok && r < 3; r++)
+        for (u32 c = 0; ok && c < 13; c++) {
+            const u8* p = rd + r * 1024u + 4 * c;
+            ok = p[0] == 0x80 + r && p[1] == 4 * c + 1 && p[2] == 4 * c + 2 && p[3] == 4 * c + 3;
+        }
+    CHECK(ok, "3 rows of 13 distinct R,G,B,A pixels land as A8R8G8B8 in order");
+    CHECK(rd[13 * 4] == 0xEE && rd[3 * 1024u] == 0xEE,
+          "the pixel after each row and the row after the rectangle are untouched");
+    engine_down();
+}
+
+/* An HDR pass renders into an FP16 RGBA target, and the title copies it out
+ * with a 2D transfer that counts 32-bit pixels: Twisted Metal's bloom and
+ * flames reach its SPU post-FX that way. The copy has to get the GPU's
+ * pixels, as big-endian halves, and only the bytes it names. */
+static void test_transfer_reads_fp16(void)
+{
+    printf("-- transfer reads an FP16 surface\n");
+    engine_up();
+    m(M_SURFACE_FORMAT, 0xBu);                 /* F_W16Z16Y16X16 */
+    m(M_COLOR_A_PITCH, 2048u);                 /* 256 pixels of 8 bytes */
+    draw_triangle();
+
+    const u32 row = 0x40000u + 3u * 2048u;
+    u8* rd = vm_base + GUEST_LOCAL_EA + row;
+    static const u8 px[8] = { 0x3C, 0x00, 0x40, 0x00, 0x42, 0x00, 0x44, 0x00 };
+
+    /* Four 32-bit pixels from surface pixel 2: two FP16 pixels. */
+    memset(rd, 0xEE, 64);
+    rsx_draw_engine_guest_read(RSX_LOCATION_LOCAL, row + 2u * 8u, 2048u, 4u, 1u);
+    CHECK(memcmp(rd + 16, px, 8) == 0 && memcmp(rd + 24, px, 8) == 0,
+          "two FP16 pixels land as big-endian R,G,B,A halves (%02X %02X %02X %02X)",
+          rd[16], rd[17], rd[18], rd[19]);
+    CHECK(rd[15] == 0xEE && rd[32] == 0xEE, "and nothing around them is written");
+
+    /* One 32-bit pixel starting half way into a surface pixel: its B,A. */
+    memset(rd, 0xEE, 64);
+    rsx_draw_engine_guest_read(RSX_LOCATION_LOCAL, row + 5u * 8u + 4u, 2048u, 1u, 1u);
+    CHECK(memcmp(rd + 44, px + 4, 4) == 0 && rd[43] == 0xEE && rd[48] == 0xEE,
+          "a transfer starting mid-pixel gets exactly the bytes it names");
+
+    /* The last pixel of the row, asked for past the surface's width. */
+    memset(rd + 2040, 0xEE, 8);
+    rsx_draw_engine_guest_read(RSX_LOCATION_LOCAL, row + 255u * 8u, 2048u, 8u, 1u);
+    CHECK(memcmp(rd + 2040, px, 8) == 0, "a transfer past the width stops at the surface's edge");
+
+    /* Bytes copied INTO an FP16 target are not pushed as A8R8G8B8 rows. */
+    memset(&g_written, 0, sizeof g_written);
+    rsx_draw_engine_guest_wrote(RSX_LOCATION_LOCAL, row, 2048u, 4u, 1u);
+    CHECK(g_written.n == 0, "a transfer into an FP16 surface does not write it as A8R8G8B8");
+    engine_down();
+}
+
 static unsigned custom_reads;
 static const u8* custom_guest_read(void* user, u32 location, u32 offset, u32 bytes)
 {
@@ -1077,6 +1335,56 @@ static void test_depth_clear_value(void)
     engine_down();
 }
 
+/* ---- 9b. antialiased surfaces at sample resolution ------------------------ */
+
+#define M_VIEWPORT_TRANSLATE  0x0A20
+#define M_VIEWPORT_SCALE      0x0A30
+
+static void mf(u32 method, float f) { u32 w; memcpy(&w, &f, 4); m(method, w); }
+
+/* An antialiased surface holds its sample grid in memory (SURFACE_FORMAT
+ * bits 12-15: 3 = 2x1, 4 and 5 = 2x2), so a texture reading it sees that
+ * size. The surface is created at sample resolution; the viewport and
+ * scissor registers stay in guest pixels and are scaled to match. */
+static void test_antialiased_surface(void)
+{
+    printf("-- antialiased surface\n");
+    static const struct { u32 aa, w, h, sx, sy; } cases[] = {
+        { 0, 128,  64, 1, 1 },     /* CENTER_1 */
+        { 3, 256,  64, 2, 1 },     /* DIAGONAL_CENTERED_2 */
+        { 4, 256, 128, 2, 2 },     /* SQUARE_CENTERED_4 */
+        { 5, 256, 128, 2, 2 },     /* SQUARE_ROTATED_4 */
+    };
+    for (u32 i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        engine_up();
+        m(M_SURFACE_FORMAT, 8u | (cases[i].aa << 12));
+        m(M_SURFACE_CLIP_H, 128u << 16);
+        m(M_SURFACE_CLIP_V, 64u << 16);
+        m(M_COLOR_A_OFFSET, 0x80000u);
+        m(M_SCISSOR_H, 8u | (32u << 16));
+        m(M_SCISSOR_V, 4u | (16u << 16));
+        /* The whole 128x64-pixel viewport. */
+        mf(M_VIEWPORT_TRANSLATE + 0, 64.0f); mf(M_VIEWPORT_TRANSLATE + 4, 32.0f);
+        mf(M_VIEWPORT_SCALE + 0, 64.0f);     mf(M_VIEWPORT_SCALE + 4, -32.0f);
+        draw_triangle();
+        CHECK(stub.color_w == cases[i].w && stub.color_h == cases[i].h,
+              "antialias %u: a 128x64 surface is created at %ux%u (got %ux%u)",
+              cases[i].aa, cases[i].w, cases[i].h, stub.color_w, stub.color_h);
+        CHECK(stub.scissor[0] == 8u * cases[i].sx && stub.scissor[1] == 4u * cases[i].sy &&
+              stub.scissor[2] == 32u * cases[i].sx && stub.scissor[3] == 16u * cases[i].sy,
+              "antialias %u: scissor 8,4 32x16 covers %u,%u %ux%u samples (got %u,%u %ux%u)",
+              cases[i].aa, 8u * cases[i].sx, 4u * cases[i].sy, 32u * cases[i].sx,
+              16u * cases[i].sy, stub.scissor[0], stub.scissor[1], stub.scissor[2],
+              stub.scissor[3]);
+        CHECK(stub.vp_xf[0] == 1.0f && stub.vp_xf[1] == 1.0f &&
+              stub.vp_xf[4] == 0.0f && stub.vp_xf[5] == 0.0f,
+              "antialias %u: the full-pixel viewport still maps to the whole surface "
+              "(scale %g,%g offset %g,%g)", cases[i].aa, stub.vp_xf[0], stub.vp_xf[1],
+              stub.vp_xf[4], stub.vp_xf[5]);
+        engine_down();
+    }
+}
+
 /* ---- 10. a zeta or a target read in a texture format of its own --------- */
 
 static void test_depth_read_as_color(void)
@@ -1148,6 +1456,143 @@ static void test_color_read_as_float(void)
     engine_down();
 }
 
+/* The register-based fullscreen compositor has no array or inline stream.
+ * Capture each position completion with the attributes current at that time. */
+static void immediate_vertex(float x, float y, float u, float v)
+{
+    m(0x18C0, f32_bits(u)); m(0x18C4, f32_bits(v)); /* ATTR8 DATA2F */
+    m(0x1500, f32_bits(x)); m(0x1504, f32_bits(y));
+    m(0x1508, f32_bits(-1.0f));                    /* ATTR0 DATA3F */
+}
+
+static void test_immediate_compositor(void)
+{
+    engine_up();
+    /* Leave array declarations pointing outside readable guest memory. */
+    m(M_VTXBUF_OFFSET, 0xFFFFFFF0u);
+    m(0x1738, 0x7FFFFFF0u); m(0x173C, 0x7FFFFFF0u);
+    m(M_VTXFMT, 2u | (4u << 4) | (16u << 8) | (7u << 16));
+    immediate_vertex(99, 98, 97, 96); /* constants outside BEGIN do not draw */
+    m(M_BEGIN_END, 6u);              /* retail fullscreen TRIANGLE_STRIP */
+    immediate_vertex(-1, -1, 0, 1);
+    immediate_vertex(3, -1, 2, 1);
+    immediate_vertex(-1, 3, 0, -1);
+    m(M_BEGIN_END, 0);
+    CHECK(stub.n_draw == 1, "register fullscreen triangle issues a draw");
+    CHECK(stub.draw_vertices == 3 && stub.draw_indices == 3,
+          "register triangle uploads 3 vertices/indices, got %u/%u",
+          stub.draw_vertices, stub.draw_indices);
+    CHECK(stub.draw_topology == RSX_TOPOLOGY_TRIANGLES, "strip rebuilt as triangles");
+    const float expected[3][4] = {{-1,-1,0,1}, {3,-1,2,1}, {-1,3,0,-1}};
+    for (u32 i = 0; i < 3; i++) {
+        CHECK(stub.captured_vertices[i][0] == expected[i][0] &&
+              stub.captured_vertices[i][1] == expected[i][1] &&
+              stub.captured_vertices[i][2] == -1 && stub.captured_vertices[i][3] == 1,
+              "immediate position %u preserved independently of arrays", i);
+        CHECK(stub.captured_vertices[i][32] == expected[i][2] &&
+              stub.captured_vertices[i][33] == expected[i][3] &&
+              stub.captured_vertices[i][34] == 0 && stub.captured_vertices[i][35] == 1,
+              "immediate UV %u preserved at position completion", i);
+        CHECK(stub.captured_indices[i] == i, "immediate strip index %u", i);
+    }
+    m(M_BEGIN_END, 8u);
+    immediate_vertex(-1,-1,0,0); immediate_vertex(1,-1,1,0);
+    immediate_vertex(1,1,1,1); immediate_vertex(-1,1,0,1);
+    m(M_BEGIN_END, 0);
+    CHECK(stub.n_draw == 2 && stub.draw_vertices == 4 && stub.draw_indices == 6,
+          "immediate quad rebuilt without previous group vertices");
+    m(M_BEGIN_END, 6u);
+    m(0x18C0, f32_bits(8)); m(0x18C4, f32_bits(9));
+    m(0x1500, f32_bits(8)); m(0x1504, f32_bits(9)); /* incomplete position */
+    m(M_BEGIN_END, 0);
+    CHECK(stub.n_draw == 2, "UV and incomplete position do not emit a vertex");
+    /* DATA4F completes on W and preserves an explicit W. */
+    m(M_BEGIN_END, 5u);
+    for (u32 i = 0; i < 3; i++) {
+        m(0x1C00, f32_bits((float)i)); m(0x1C04, f32_bits(2));
+        m(0x1C08, f32_bits(3)); m(0x1C0C, f32_bits(4));
+    }
+    m(M_BEGIN_END, 0);
+    CHECK(stub.n_draw == 3 && stub.draw_vertices == 3 &&
+          stub.captured_vertices[2][0] == 2 && stub.captured_vertices[2][3] == 4,
+          "DATA4F position emits once at W with explicit W preserved");
+    m(M_BEGIN_END, 5u);
+    immediate_vertex(1,2,3,4);
+    m(M_DRAW_ARRAYS, 2u << 24);
+    m(M_BEGIN_END, 0);
+    CHECK(stub.n_draw == 3, "mixed immediate and arrays reject the entire group");
+    m(M_BEGIN_END, 5u);
+    for (u32 i = 0; i < 4098; i++) immediate_vertex(1,2,3,4);
+    m(M_BEGIN_END, 0);
+    CHECK(stub.n_draw == 3, "oversized immediate group never draws a truncated prefix");
+    m(M_BEGIN_END, 6u);
+    immediate_vertex(-1,-1,0,1); immediate_vertex(3,-1,2,1);
+    immediate_vertex(-1,3,0,-1);
+    m(M_BEGIN_END, 0);
+    CHECK(stub.n_draw == 4 && stub.draw_vertices == 3,
+          "BEGIN recovers after oversized or mixed groups");
+    m(M_BEGIN_END, 5u);
+    for (u32 attr = 0; attr < 16; attr++)
+        for (u32 lane = 0; lane < 4; lane++) m(0x1C00 + attr * 16 + lane * 4, 0);
+    /* The ATTR0 above emits the first vertex, then emit two more zero positions. */
+    for (u32 v = 0; v < 2; v++)
+        for (u32 lane = 0; lane < 4; lane++) m(0x1C00 + lane * 4, 0);
+    m(M_BEGIN_END, 0);
+    CHECK(stub.n_draw == 5 && stub.captured_vertices[1][3] == 0 &&
+          stub.captured_vertices[1][35] == 0,
+          "explicit all-zero DATA4F preserves position W and attribute alpha");
+    engine_down();
+}
+
+static void test_immediate_packed_zero_and_inline(void)
+{
+    const u32 packed[] = {0x194Cu, 0x1998u, 0x0A98u};
+    for (u32 k = 0; k < 3; k++) {
+        engine_up();
+        m(packed[k], 0);
+        if (k) m(packed[k] + 4, 0);
+        m(M_BEGIN_END, RSX_PRIMITIVE_TRIANGLES);
+        immediate_vertex(0,0,0,0); immediate_vertex(1,0,0,0);
+        immediate_vertex(0,1,0,0);
+        m(M_BEGIN_END, 0);
+        CHECK(stub.n_draw == 1 && stub.captured_vertices[0][15] == 0,
+              "packed all-zero method 0x%X preserves explicit alpha", packed[k]);
+        engine_down();
+    }
+    engine_up();
+    m(M_BEGIN_END, RSX_PRIMITIVE_TRIANGLES);
+    m(M_INLINE_ARRAY, 0); /* shorter than declared stride */
+    immediate_vertex(0,0,0,0); immediate_vertex(1,0,0,0);
+    immediate_vertex(0,1,0,0);
+    m(M_BEGIN_END, 0);
+    CHECK(stub.n_draw == 0, "short inline stream mixed with immediate rejects group");
+    m(M_VTXFMT, 0); /* no enabled inline attribute */
+    m(M_BEGIN_END, RSX_PRIMITIVE_TRIANGLES);
+    m(M_INLINE_ARRAY, 0);
+    immediate_vertex(0,0,0,0); immediate_vertex(1,0,0,0);
+    immediate_vertex(0,1,0,0);
+    m(M_BEGIN_END, 0);
+    CHECK(stub.n_draw == 0, "undeclared inline stream mixed with immediate rejects group");
+    m(M_BEGIN_END, RSX_PRIMITIVE_TRIANGLES);
+    immediate_vertex(0,0,0,0); immediate_vertex(1,0,0,0);
+    immediate_vertex(0,1,0,0);
+    m(M_BEGIN_END, 0);
+    CHECK(stub.n_draw == 1, "BEGIN clears rejected inline source state");
+    m(M_BEGIN_END, RSX_PRIMITIVE_TRIANGLES);
+    immediate_vertex(0,0,0,0); immediate_vertex(1,0,0,0);
+    immediate_vertex(0,1,0,0);
+    for (u32 i = 0; i <= RSX_DSP_INLINE_MAX_BYTES / 4u; i++)
+        m(M_INLINE_ARRAY, 0);
+    m(M_BEGIN_END, 0);
+    CHECK(stub.n_draw == 1, "overflowed inline stream mixed with immediate rejects group");
+    m(M_BEGIN_END, RSX_PRIMITIVE_TRIANGLES);
+    immediate_vertex(0,0,0,0); immediate_vertex(1,0,0,0);
+    immediate_vertex(0,1,0,0);
+    m(M_BEGIN_END, 0);
+    CHECK(stub.n_draw == 2, "BEGIN recovers after mixed inline overflow");
+    engine_down();
+}
+
 int main(void)
 {
     vm_base = (u8*)calloc(1, GUEST_BYTES);
@@ -1164,6 +1609,7 @@ int main(void)
     test_surface_aliasing();
     test_mrt_set();
     test_texture_cache();
+    test_texture_sparse_rehash();
     test_pipeline_key();
     test_restart_expansion();
     test_indexed_draws();
@@ -1172,10 +1618,15 @@ int main(void)
     test_custom_guest_mapping();
     test_queued_flip_buffer();
     test_transfer_coherence();
+    test_transfer_rows();
+    test_transfer_reads_fp16();
     test_inline_array();
     test_depth_clear_value();
+    test_antialiased_surface();
     test_depth_read_as_color();
     test_color_read_as_float();
+    test_immediate_compositor();
+    test_immediate_packed_zero_and_inline();
 
     free(vm_base);
     printf(g_failures ? "\n%d check(s) FAILED\n" : "\nall checks passed\n",

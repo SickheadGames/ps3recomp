@@ -17,6 +17,7 @@
 #include "spu_helpers.h"   /* spu_splat_u32 / spu_ls_read128 (SMC microstep) */
 #include "spu_lockstep.h"
 #include "spu_interp.h"    /* spu_lifted_fn / spu_lifted_lookup -- defined below */
+#include "ps3emu/ps3_ftrace.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,6 +28,7 @@
 #endif
 #include <time.h>
 #include "../platform/win32_compat.h"
+#include "ps3emu/log_first.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -164,7 +166,7 @@ void spu_dbg_e60(spu_context* ctx)
 {
     static int s_e = -1; if (s_e < 0) s_e = getenv("YDKJ_E60") ? 1 : 0;
     if (!s_e) return;
-    static int _d = 0; if (_d++ >= 6) return;
+    static int _d = 0; if (!PS3_LOG_FIRST(_d, 6)) return;
     const uint8_t* L = ctx->ls;
     #define RD(o) (((uint32_t)L[(o)]<<24)|((uint32_t)L[(o)+1]<<16)|((uint32_t)L[(o)+2]<<8)|L[(o)+3])
     ps3_log("[E60] r20=%08X r24=%08X | run2700=%08X ready2710=%08X pend2720=%08X en2730=%08X sig2740=%08X wait2750=%08X x2770=%08X\n",
@@ -281,115 +283,134 @@ int spu_run_with_halt(void (*entry)(spu_context*), spu_context* ctx)
 }
 
 /* ===========================================================================
- * Per-context MFC engine registry
- *
- * One MFC engine per live SPU context, in a small table. A thread group starts
- * all of its threads at once and each one arrives here on its first DMA, so the
- * table is written concurrently by as many host threads as the group has.
- *
- * Two rules keep that safe without putting a lock on the lookup, which every
- * MFC channel access goes through:
- *
- *   - A slot's owner field is written only by the thread that owns the context
- *     in it: the claim below, and the release when that context is done. Every
- *     reader is comparing the field against ITS OWN context pointer, so a read
- *     that races a claim either matches (its own slot, which only it can have
- *     written) or does not, and can never be handed another context's engine.
- *   - Choosing which free slot to claim is done under a lock. It used to be a
- *     scan followed by a store, and two threads that scanned before either
- *     stored both took the same slot and then shared one engine's queue and tag
- *     state -- one SPU's tag wait satisfied by the other SPU's transfer.
+ * One private MFC engine per live virtual context. Persistent policy contexts
+ * outnumber physical SPUs even when their scheduling quanta run sequentially.
+ * Registry nodes have stable addresses and survive a quantum, including stalled
+ * lists and tag state. The registry lock protects lookup/publication/removal;
+ * the context's single execution owner protects its engine after lookup.
+ * Release is permitted only after that owner has stopped using the context.
  * ===========================================================================*/
-
-/* 8 was too few. Policy-module contexts are persistent per (workload, lane) and
- * never release their slot, so a title with 11 WWS workloads plus SPU thread groups ran the rest on
- * the shared fallback engine, where one context's DMA clears a tag bit another context is waiting
- * on (Killzone 3: a PM looping forever on an incomplete tag, the intermittent early stops). */
-#define SPU_MAX_CONTEXTS 64
-
-typedef struct {
-    spu_context* volatile ctx;
-    mfc_engine   mfc;
+typedef struct spu_mfc_slot {
+    spu_context* ctx;
+    mfc_engine mfc;
+    struct spu_mfc_slot* next;
 } spu_mfc_slot;
 
-static spu_mfc_slot s_mfc_slots[SPU_MAX_CONTEXTS];
-static SRWLOCK      s_mfc_claim_lock = SRWLOCK_INIT;
+static spu_mfc_slot* s_mfc_slots;
+static SRWLOCK s_mfc_claim_lock = SRWLOCK_INIT;
 
-/* Per-thread cache of the last lookup (the table is now 64 long and this runs on
- * every MFC channel access). Only the owning thread releases a slot (spu_mfc_release), and it clears
- * its own cache there; a slot's ctx never changes while it is claimed. */
+/* SPU_PCSAMPLE=<secs>: every <secs>, print image and pc of every context
+ * holding an MFC slot -- i.e. every live SPU that has done DMA. Answers
+ * "which SPU task never returned, and where is it" without a debugger. */
+static DWORD WINAPI spu_pcsample_thread(LPVOID p)
+{
+    const DWORD ms = (DWORD)(uintptr_t)p;
+    for (;;) {
+        Sleep(ms);
+        int i = 0;
+        AcquireSRWLockShared(&s_mfc_claim_lock);
+        for (spu_mfc_slot* slot = s_mfc_slots; slot; slot = slot->next, i++) {
+            spu_context* c = slot->ctx;
+            if (c) ps3_log("[pcsample] slot=%d img=%d spu=0x%X pc=0x%05X lr=0x%05X"
+                                   " r3=0x%08X r81=0x%08X r84=0x%X r13=0x%08X r14=0x%08X\n",
+                           i, c->image_id, c->spu_id, (unsigned)(c->pc & SPU_LS_MASK),
+                           (unsigned)(c->gpr[0]._u32[0] & SPU_LS_MASK), c->gpr[3]._u32[0],
+                           c->gpr[81]._u32[0], c->gpr[84]._u32[0], c->gpr[13]._u32[0], c->gpr[14]._u32[0]);
+        }
+        ReleaseSRWLockShared(&s_mfc_claim_lock);
+        fflush(stderr);
+    }
+}
+
+/* Per-thread cache of the last lookup (this runs on every MFC channel access,
+ * and the registry walk takes a lock). Slots are freed on release, and a
+ * context may run on more than one host thread over its life, so another
+ * thread's cache can name a freed slot -- or a new context allocated at the
+ * same address. Every release/forget bumps s_mfc_gen; a cached entry is only
+ * trusted while its generation is current. */
+static volatile LONG s_mfc_gen;
 static SPU_THREAD_LOCAL spu_context * t_mfc_ctx;
 static SPU_THREAD_LOCAL mfc_engine * t_mfc_eng;
+static SPU_THREAD_LOCAL LONG t_mfc_gen;
 
 static mfc_engine * mfc_for_slow(spu_context * ctx);
 static mfc_engine* mfc_for(spu_context* ctx)
 {
-    if (t_mfc_ctx == ctx && t_mfc_eng) return t_mfc_eng;
+    if (t_mfc_ctx == ctx && t_mfc_eng && t_mfc_gen == s_mfc_gen) return t_mfc_eng;
+    LONG gen = s_mfc_gen;
     mfc_engine * e = mfc_for_slow(ctx);
-    t_mfc_ctx = ctx; t_mfc_eng = e;
-    return e;    
+    t_mfc_ctx = ctx; t_mfc_eng = e; t_mfc_gen = gen;
+    return e;
 }
 
 static mfc_engine * mfc_for_slow(spu_context * ctx)
 {
-    for (int i = 0; i < SPU_MAX_CONTEXTS; i++)
-        if (s_mfc_slots[i].ctx == ctx)
-            return &s_mfc_slots[i].mfc;
-
-    /* No slot yet: take one. The engine is initialized before the slot is
-     * published, so it is never visible to anyone in a half-reset state. */
-    mfc_engine* e = NULL;
-    AcquireSRWLockExclusive(&s_mfc_claim_lock);
-    for (int i = 0; i < SPU_MAX_CONTEXTS && !e; i++) {
-        if (s_mfc_slots[i].ctx != NULL) continue;
-        mfc_engine_init(&s_mfc_slots[i].mfc);
-        s_mfc_slots[i].ctx = ctx;
-        e = &s_mfc_slots[i].mfc;
-        { static int s_hw = 0;   /* high-water mark of claimed slots */
-        if (i + 1 > s_hw) {
-            s_hw = i + 1;
-            if (s_hw % 8 == 0) { fprintf(stderr, "[SPU] %d MFC engine slots in use\n", s_hw); fflush(stderr); } } }
-    }
-    if (!e) {
-        /* Out of slots: fall back to a shared engine (correct for single-SPU).
-         * Reachable only with more than SPU_MAX_CONTEXTS contexts running at
-         * the same time, which is more SPUs than the machine has -- and the
-         * sharing is silent, so say it once. Its one-time init is inside the
-         * lock as well, or two threads arriving together would each memset an
-         * engine the other is already using. */
-        static mfc_engine fallback;
-        static int fallback_init = 0;
-        if (!fallback_init) {
-            mfc_engine_init(&fallback);
-            fallback_init = 1;
-            ps3_log("[SPU] more than %d contexts hold an MFC engine at "
-                    "once; the rest share one\n", SPU_MAX_CONTEXTS);
-            fflush(stderr);
+    { static volatile LONG started = 0; const char* e;
+      if (!started && (e = getenv("SPU_PCSAMPLE")) && !InterlockedExchange(&started, 1))
+          CreateThread(NULL, 0, spu_pcsample_thread, (LPVOID)(uintptr_t)(atoi(e) * 1000), 0, NULL); }
+    AcquireSRWLockShared(&s_mfc_claim_lock);
+    for (spu_mfc_slot* slot = s_mfc_slots; slot; slot = slot->next) {
+        if (slot->ctx == ctx) {
+            ReleaseSRWLockShared(&s_mfc_claim_lock);
+            return &slot->mfc;
         }
-        e = &fallback;
     }
+    ReleaseSRWLockShared(&s_mfc_claim_lock);
+
+    /* A concurrent miss may publish while the read lock is released. Recheck
+     * under the writer lock before creating this context's private engine. */
+    AcquireSRWLockExclusive(&s_mfc_claim_lock);
+    for (spu_mfc_slot* slot = s_mfc_slots; slot; slot = slot->next) {
+        if (slot->ctx == ctx) {
+            ReleaseSRWLockExclusive(&s_mfc_claim_lock);
+            return &slot->mfc;
+        }
+    }
+    spu_mfc_slot* slot = (spu_mfc_slot*)malloc(sizeof(*slot));
+    if (!slot) {
+        ps3_log("[SPU] cannot allocate private MFC engine for context %p\n", (void*)ctx);
+        fflush(stderr);
+        abort(); /* Shared fallback state would silently corrupt DMA completion. */
+    }
+    slot->ctx = ctx;
+    mfc_engine_init(&slot->mfc);
+    slot->next = s_mfc_slots;
+    s_mfc_slots = slot;
     ReleaseSRWLockExclusive(&s_mfc_claim_lock);
-    return e;
+    return &slot->mfc;
 }
 
-/* Give the slot `ctx` holds back to the table, called when its context is done.
- * Slots used to be claimed and never released, so a title with more SPU
- * contexts over its life than there are slots ran the rest of them on the
- * shared fallback engine -- and by then it is not a fresh engine but whatever
- * tag and queue state the previous owners left in it.
- *
- * Only the owner calls this, and only after its SPU has stopped, so the engine
- * is idle. The next claimant re-initializes it. A context that never issued a
- * DMA holds no slot and this is a scan that finds nothing. */
 void spu_mfc_release(spu_context* ctx)
 {
     if (!ctx) return;
     if (t_mfc_ctx == ctx) { t_mfc_ctx = NULL; t_mfc_eng = NULL; }
+    InterlockedIncrement(&s_mfc_gen);
     AcquireSRWLockExclusive(&s_mfc_claim_lock);
-    for (int i = 0; i < SPU_MAX_CONTEXTS; i++) {
-        if (s_mfc_slots[i].ctx != ctx) continue;
-        s_mfc_slots[i].ctx = NULL;
+    for (spu_mfc_slot** link = &s_mfc_slots; *link; link = &(*link)->next) {
+        if ((*link)->ctx != ctx) continue;
+        spu_mfc_slot* slot = *link;
+        *link = slot->next;
+        free(slot);
         break;
+    }
+    ReleaseSRWLockExclusive(&s_mfc_claim_lock);
+}
+
+/* Exit safety net for contexts unwound off a departing thread's stack.
+ * Pointer comparisons suffice: the abandoned context need not be readable. */
+void spu_mfc_forget_range(uintptr_t lo, uintptr_t hi)
+{
+    InterlockedIncrement(&s_mfc_gen);
+    AcquireSRWLockExclusive(&s_mfc_claim_lock);
+    for (spu_mfc_slot** link = &s_mfc_slots; *link;) {
+        spu_mfc_slot* slot = *link;
+        uintptr_t owner = (uintptr_t)slot->ctx;
+        if (owner >= lo && owner < hi) {
+            *link = slot->next;
+            free(slot);
+        } else {
+            link = &slot->next;
+        }
     }
     ReleaseSRWLockExclusive(&s_mfc_claim_lock);
 }
@@ -461,13 +482,13 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
     { static int s_at = -1;
       if (s_at < 0) { const char* e = getenv("SPU_ATOMTRACE");
                       int v = e ? atoi(e) : 0; s_at = e ? (v > 1 ? v : 40) : 0; }
-      if (s_at) { static int _a=0; if (_a++ < s_at)
+      if (s_at) { static int _a=0; if (PS3_LOG_FIRST(_a, s_at))
         ps3_log("[atom] cmd=0x%02X ea=0x%08X (img=%d)\n", cmd, ea, ctx->image_id); } }
     /* cri task (img22) atomic on the taskset: dump the loaded bitset line so we can
      * see if the task reads MY taskset (0x4005E000) with my READY bit, or elsewhere. */
     { static int s_ct=-1; if(s_ct<0) s_ct=getenv("SPU_ATOMTRACE")?1:0;
       if(s_ct && ctx->image_id==22 && cmd==0xD0 && mfc_ea_range_committed(ea,16)) {
-        static int _c=0; if(_c++<24){
+        static int _c=0; if(PS3_LOG_FIRST(_c, 24)){
           uint8_t* m=vm_base+ea;
           #define BW(o) (((uint32_t)m[o]<<24)|((uint32_t)m[o+1]<<16)|((uint32_t)m[o+2]<<8)|m[o+3])
           ps3_log("[cri-atom] GETLLAR ea=0x%08X line[0..0x30]: %08X %08X %08X %08X | %08X %08X %08X %08X | %08X %08X %08X %08X\n",
@@ -481,7 +502,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
     { static int s_td = -1; if (s_td < 0) s_td = (getenv("YDKJ_CRI_CHAIN") && getenv("SPU_ATOMTRACE")) ? 1 : 0;
       if (s_td && ea >= 0x0F000000u && ea < 0x0F001900u) {
         extern uint8_t* vm_base;
-        static int _t=0; if (vm_base && _t++ < 24) {
+        static int _t=0; if (vm_base && PS3_LOG_FIRST(_t, 24)) {
             uint8_t* t = vm_base + 0x0F000000u;
             #define TW(o) (((uint32_t)t[o]<<24)|((uint32_t)t[o+1]<<16)|((uint32_t)t[o+2]<<8)|t[o+3])
             ps3_log("[tset] %s run=%08X rdy=%08X pnd=%08X ena=%08X sig=%08X wait=%08X | wid=%08X last=%02X\n",
@@ -496,7 +517,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
      * the host. GETLLAR returns a zeroed line (no reservation); PUTLLC fails. */
     if (!mfc_ea_range_committed(ea, MFC_ATOMIC_LINE)) {
         static int s_w = 0;
-        if (s_w++ < 16)
+        if (PS3_LOG_FIRST(s_w, 16))
             ps3_log("[spu-atomic] cmd=0x%X ea=0x%08X pc=0x%05X img=%d uncommitted -- skipped\n",
                     cmd, ea, (uint32_t)ctx->pc & SPU_LS_MASK, ctx->image_id);
         if (cmd == MFC_GETLLAR_CMD) {
@@ -523,7 +544,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
           static int _n = 0, s_cap = -1;
           /* SPU_ATOM_EA_MAX=<n>: lines to print (default 48, 0 = unlimited). */
           if (s_cap < 0) { const char* m = getenv("SPU_ATOM_EA_MAX"); s_cap = m ? atoi(m) : 48; }
-          if (!s_cap || _n++ < s_cap) {
+          if (!s_cap || PS3_LOG_FIRST(_n, s_cap)) {
               extern uint8_t* vm_base;
               const uint8_t* r = vm_base + ((uint32_t)ea & ~127u);
               static int s_af = -1;
@@ -554,7 +575,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
       uint32_t b = g_barrier_sync_watch;
       if (b && ea >= (b & ~127u) && ea < ((b + 0xC0 + 127) & ~127u)) {
           static int _n = 0;
-          if (_n++ < 64)
+          if (PS3_LOG_FIRST(_n, 64))
               ps3_log("[sync-atomic] %s img=%d pc=0x%05X ea=0x%08X\n",
                       cmd == MFC_GETLLAR_CMD ? "GETLLAR" :
                       cmd == MFC_PUTLLC_CMD ? "PUTLLC" : "PUTLLUC",
@@ -752,7 +773,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
           uint32_t b = g_barrier_sync_watch;
           if (b && ea >= (b & ~127u) && ea < ((b + 0xC0 + 127) & ~127u)) {
               static int _n = 0;
-              if (_n++ < 96 && ctx->atomic_stat == 0) {
+              if (PS3_LOG_FIRST(_n, 96) && ctx->atomic_stat == 0) {
                   uint32_t sn = ((uint32_t)ctx->ls[0x1C8]<<24)|((uint32_t)ctx->ls[0x1C9]<<16)|
                                 ((uint32_t)ctx->ls[0x1CA]<<8)|ctx->ls[0x1CB];
                   extern uint8_t* vm_base;
@@ -992,10 +1013,31 @@ void spu_ch_wake(spu_context* ctx)
     WakeAllConditionVariable((CONDITION_VARIABLE*)&ctx->ch_wait_cv);
 }
 
+/* PS3_FTRACE: when this SPU thread last left a blocking wait. The time between
+ * two waits is a busy span, tagged with the lifted image and the SPURS workload
+ * id the kernel keeps at LS 0x1DC (SpursKernelContext.wklCurrentId) when it
+ * goes idle. Waits shorter than PS3_FTRACE_MIN_US do not split a busy span. */
+static SPU_TLS uint64_t t_ft_busy0;
+
+static void spu_ft_wait_span(spu_context* ctx, uint32_t channel, uint64_t t0)
+{
+    const uint64_t t1 = ps3_ft_now();
+    if (t1 - t0 < ps3_ft_min_ns()) return;
+    if (t_ft_busy0 && t0 > t_ft_busy0) {
+        const uint8_t* w = ctx->ls + 0x1DC;
+        ps3_ft_span(PS3_FT_SPU_BUSY, ctx->spu_id, (uint32_t)ctx->image_id,
+                    ((uint32_t)w[0] << 24) | ((uint32_t)w[1] << 16) | ((uint32_t)w[2] << 8) | w[3],
+                    t_ft_busy0, t0);
+    }
+    ps3_ft_span(PS3_FT_SPU_WAIT, ctx->spu_id, channel, ctx->pc & SPU_LS_MASK, t0, t1);
+    t_ft_busy0 = t1;
+}
+
 /* Block the calling SPU host thread until `channel` is readable. */
 static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
 {
     if (!yz_ch_block() || spu_ch_ready(ctx, channel)) return;
+    const uint64_t ft_t0 = PS3_FT_ON() ? ps3_ft_now() : 0;
 
     { static unsigned long bn = 0; unsigned long n = ++bn;
       if (n <= 50 || (n % 512) == 0)
@@ -1025,6 +1067,7 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
         }
     }
     yz_lockstep_block_end(ctx);            /* rejoin the rotation, reacquire the token */
+    if (ft_t0) spu_ft_wait_span(ctx, channel, ft_t0);
     ctx->status = SPU_STATUS_RUNNING;
 }
 
@@ -1096,14 +1139,22 @@ u128 spu_rdch(spu_context* ctx, uint32_t channel)
          * read the decrementer before writing it. */
         if (!ctx->dec_base_ns) ctx->dec_base_ns = spu_host_ns();
         uint64_t elapsed = spu_host_ns() - ctx->dec_base_ns;
-        uint32_t ticks   = (uint32_t)((elapsed * SPU_DECREMENTER_HZ)
-                                      / 1000000000ull);
+        /* Split seconds from the remainder before scaling: elapsed_ns * 79.8M
+         * overflows 64 bits 231 s after the base stamp, and a context that
+         * never writes its decrementer (the SPURS kernel's) keeps the stamp
+         * from boot, so every timed loop on that SPU saw the counter jump
+         * forward by ~16 s of ticks at 231 s, 462 s, 693 s... */
+        const uint64_t secs = elapsed / 1000000000ull, rem = elapsed % 1000000000ull;
+        uint32_t ticks   = (uint32_t)(secs * SPU_DECREMENTER_HZ +
+                                      (rem * SPU_DECREMENTER_HZ) / 1000000000ull);
         v = ctx->decrementer - ticks;
         break;
     }
     case SPU_RdEventMask:   v = ctx->event_mask;                        break;
     case SPU_RdEventStat:   spu_resv_lost_poll(ctx); v = ctx->event_status; break;
-    case SPU_RdMachStat:    v = (ctx->status == SPU_STATUS_RUNNING) ? 1 : 0; break;
+    /* CBEA 9.8: numeric bit 0 is interrupt-enable, independent of run status.
+     * This runtime models nonisolated SPUs, so the isolation bit stays clear. */
+    case SPU_RdMachStat:    v = ctx->int_enable & 1u; break;
     case SPU_RdSRR0:        v = ctx->srr0;                              break;
     default:
         v = 0;
@@ -1701,7 +1752,7 @@ void spu_lockguard_check(spu_context* ctx, uint32_t ea, const uint8_t* src, uint
     unsigned os = (o[0] << 8) | o[1], on = (o[2] << 8) | o[3];
     unsigned ns = (n[0] << 8) | n[1], nn = (n[2] << 8) | n[3];
     int bad = !(ns == os || ns == ((os + 1) & 0xFFFF)) || !(nn == on || nn == ((on + 1) & 0xFFFF));
-    if (bad) { static int c; if (c++ < 32)
+    if (bad) { static int c; if (PS3_LOG_FIRST(c, 32))
         ps3_log("[lockguard] %s img=%d pc=0x%05X ea=0x%08X size=%u: %04X/%04X -> %04X/%04X\n",
                 what, ctx ? ctx->image_id : -1, ctx ? (unsigned)(ctx->pc & SPU_LS_MASK) : 0u,
                 ea, size, os, on, ns, nn); }
@@ -1740,7 +1791,7 @@ void spu_overlay_note_get(spu_context* ctx, uint32_t ea, const uint8_t* ls, uint
             }
             if (ctx->resident_ovl != o->image_id) {
                 ctx->resident_ovl = o->image_id;
-                { static int _n = 0; if (_n++ < 32)
+                { static int _n = 0; if (PS3_LOG_FIRST(_n, 32))
                     ps3_log("[spu-ovl] img=%d streamed overlay src=0x%08X "
                             "-> LS 0x%05X size=%u -> resident ovl image %d%s\n",
                             ctx->image_id, ea, (uint32_t)(ls - ctx->ls), size,
@@ -1799,7 +1850,7 @@ static void spu_ef_deliver_owed(spu_context* ctx, uint32_t wobj)
         m[0x30 + 2*s]     = (uint8_t)(bits >> 8);
         m[0x30 + 2*s + 1] = (uint8_t)bits;
     }
-    { static int _n = 0; if (_n++ < 8)
+    { static int _n = 0; if (PS3_LOG_FIRST(_n, 8))
         ps3_log("[spu] delivered owed bits=0x%04X to object 0x%08X \n",
                 (unsigned)bits, wobj); }
 }
@@ -1812,7 +1863,7 @@ void spu_spurs_taskset_syscall(spu_context* ctx)   /* non-static: also called by
      * budget is spent by FMOD's WAIT_SIGNAL loop long before a later task). */
     static int s_si = -2;
     if (s_si == -2) { const char* e = getenv("SPU_SYSCALL_IMG"); s_si = e ? atoi(e) : -1; }
-    { static int _n = 0; if (_n++ < 24 || ctx->image_id == s_si)
+    { static int _n = 0; if (PS3_LOG_FIRST(_n, 24) || ctx->image_id == s_si)
         ps3_log("[spu] SPURS taskset syscall num=%u (raw=0x%X args=0x%08X) image=%d link/r0=0x%05X wobj@2FDC=0x%02X%02X%02X%02X\n",
                 num, raw, ctx->gpr[4]._u32[0], ctx->image_id, ctx->gpr[0]._u32[0] & SPU_LS_MASK,
                 ctx->ls[0x2FDC], ctx->ls[0x2FDD], ctx->ls[0x2FDE], ctx->ls[0x2FDF]); }
@@ -1821,7 +1872,7 @@ void spu_spurs_taskset_syscall(spu_context* ctx)   /* non-static: also called by
      * (see func_00026DE0 / func_000272AC in image 22). Logging r4 shows caller
      * leftovers and hides what the task actually asked for. */
     { static int s_sa = -1; if (s_sa < 0) s_sa = getenv("YDKJ_SYSCALL_ARG") ? 1 : 0;
-      if (s_sa) { static int _n = 0; if (_n++ < 40) {
+      if (s_sa) { static int _n = 0; if (PS3_LOG_FIRST(_n, 40)) {
         const uint8_t* a = &ctx->ls[0x2FD0];
         ps3_log("[spu] syscall num=%u LS[0x2FD0]=%02X%02X%02X%02X %02X%02X%02X%02X"
                         " %02X%02X%02X%02X %02X%02X%02X%02X img=%d\n",
@@ -1845,7 +1896,7 @@ void spu_spurs_taskset_syscall(spu_context* ctx)   /* non-static: also called by
     static _Thread_local int s_exit_seen = 0;
     if (num == 0 && ctx->image_id == 22 && !getenv("YDKJ_CRI_EXIT_HALT")) {
         if (s_exit_seen++ == 0) { ctx->gpr[3]._u32[0] = 0; return; }   /* bootstrap */
-        { static int _n = 0; if (_n++ < 8)
+        { static int _n = 0; if (PS3_LOG_FIRST(_n, 8))
             ps3_log("[spu] cri task EXIT #%d -- halting (was spinning)\n",
                     s_exit_seen); }
         ctx->status = SPU_STATUS_STOPPED_BY_STOP;
@@ -1904,7 +1955,7 @@ void spu_spurs_taskset_syscall(spu_context* ctx)   /* non-static: also called by
                   extern void spurs_ef_set_from_spu(uint32_t, uint16_t);
                   spurs_ef_set_from_spu(wobj + 0x100u, 1);
                   static int _n = 0;
-                  if (_n++ < 8)
+                  if (PS3_LOG_FIRST(_n, 8))
                       ps3_log("[spu] SPU-REPLY: set flag 0x%08X for object "
                                       "0x%08X (cycle complete)\n", wobj + 0x100u, wobj);
               }
@@ -2033,6 +2084,8 @@ static int spu_smc_microstep(spu_context* ctx)
             pc += 4; continue;
         }
         if (op9 == 0x041 || op9 == 0x061) {                   /* stqa / lqa (abs) */
+            /* LSA = I16 << 2 (SPU ISA, RI16 form), as in spu_interp.c and
+             * the lifter. */
             uint32_t a = (((w >> 7) & 0xFFFF) << 2) & SPU_LS_MASK & ~15u;
             if (op9 == 0x041) spu_ls_write128(ctx, a, ctx->gpr[rt]);
             else              ctx->gpr[rt] = spu_ls_read128(ctx, a);
@@ -2097,7 +2150,7 @@ static int spu_smc_microstep(spu_context* ctx)
          * ordinary instruction the interpreter handles -- and with it the
          * decompression job it was running never completes. */
         { static int _n = 0;
-          if (_n++ < 8)
+          if (PS3_LOG_FIRST(_n, 8))
               ps3_log("[spu-smc] microstep img=%d pc=0x%05X word 0x%08X not in the"
                       " microstep set -- handing to the interpreter (steps=%d)\n",
                       ctx->image_id, pc, w, steps); }
@@ -2105,9 +2158,22 @@ static int spu_smc_microstep(spu_context* ctx)
         /* Stop at the drain's return point too: it sits mid-function, so it is
          * no lifted entry, and a job's return would otherwise run on through
          * the caller's code (GH3's song-freeze; see drain_ret_pc). */
-        return spu_interp_run_until(ctx, pc, ctx->drain_ret_pc) ? 1 : 0;
+        const uint32_t return_pc = ctx->drain_ret_pc;
+        uint32_t result = spu_interp_run_until(ctx, pc, return_pc);
+        /* A live interpreter rejoin is a transfer, not a host return. Nested
+         * drains can repair an empty trampoline, but the top-level driver
+         * otherwise ends the run before executing the lifted target.
+         * An already-owning drain must retain its own host continuation;
+         * stopped states and diagnostic exits keep their existing behavior. */
+        if (ctx->image_id >= 0 && (ctx->status & SPU_STATUS_RUNNING) &&
+            (!return_pc || (ctx->pc & SPU_LS_MASK) != return_pc) &&
+            spu_lifted_lookup(ctx, ctx->pc)) {
+            g_spu_trampoline_fn = spu_indirect_branch;
+            return 1;
+        }
+        return result ? 1 : 0;
     }
-    { static int _n = 0; if (_n++ < 4)
+    { static int _n = 0; if (PS3_LOG_FIRST(_n, 4))
         ps3_log("[spu-smc] microstep img=%d runaway (4096 steps from 0x%05X)\n",
                 ctx->image_id, ctx->pc & SPU_LS_MASK); }
     return 0;
@@ -2219,20 +2285,20 @@ void spu_indirect_branch(spu_context* ctx)
       if (spu_irq_regs_maybe_restore(ctx)) {
           static int s_it = -1; if (s_it < 0) s_it = getenv("SPU_IRQTRACE") ? 1 : 0;
           static int _r = 0;
-          if (s_it && _r++ < 200)
+          if (s_it && PS3_LOG_FIRST(_r, 200))
               ps3_log("[irq] IRET restore at srr0=0x%05X\n", ctx->pc & SPU_LS_MASK);
       } }
     /* SPURS kernel services (policy-module runs only): the HLE kernel plants
      * these two reserved addresses as exitToKernelAddr / selectWorkloadAddr in
      * the SpursKernelContext (spurs_policy.c). */
     if (ctx->policy_mode) {
-        extern volatile unsigned g_spurs_pm_polls, g_spurs_pm_exited;
+        extern SPU_THREAD_LOCAL volatile unsigned g_spurs_pm_polls, g_spurs_pm_exited;
         if (ctx->pc == SPURS_PM_EXIT_TO_KERNEL_LS) {
             /* Module exit: the workload returned to the kernel (drained/yield).
              * Print gated: fires once per policy run = thousands/sec. */
             g_spurs_pm_exited = 1;
-            { static int s_t = -1; if (s_t < 0) s_t = getenv("SPURS_PM_TRACE") ? 1 : 0;
-              if (s_t) { static unsigned long _n = 0; unsigned long n = ++_n;
+            { static SPU_THREAD_LOCAL int s_t = -1; if (s_t < 0) s_t = getenv("SPURS_PM_TRACE") ? 1 : 0;
+              if (s_t) { static SPU_THREAD_LOCAL unsigned long _n = 0; unsigned long n = ++_n;
                 if (n <= 64 || (n & 0xFFF) == 0)
                     ps3_log("[spurs-pm] exit-to-kernel#%lu (r3=0x%08X polls=%u)\n",
                             n, ctx->gpr[3]._u32[0], g_spurs_pm_polls); } }
@@ -2242,7 +2308,7 @@ void spu_indirect_branch(spu_context* ctx)
         }
         if (ctx->pc == SPURS_PM_SELECT_WORKLOAD_LS) {
             /* cellSpursModulePoll: report "no contention — keep running".
-             * (One virtual SPU per workload here, so nothing ever preempts.) */
+             * (The host scheduler admits bounded workers; this service does not preempt.) */
             unsigned n = ++g_spurs_pm_polls;
             if (n <= 4 || (n % 4096) == 0)
                 ps3_log("[spurs-pm] poll #%u (r3=0x%08X) -> continue\n",
@@ -2295,7 +2361,7 @@ void spu_indirect_branch(spu_context* ctx)
             uint32_t ts = g_ydkj_real_taskset_ea ? g_ydkj_real_taskset_ea : 0x0F000000u;
             ctx->ls[0x27B8]=0x00; ctx->ls[0x27B9]=0x00; ctx->ls[0x27BA]=0x00; ctx->ls[0x27BB]=0x00;
             ctx->ls[0x27BC]=(uint8_t)(ts>>24); ctx->ls[0x27BD]=(uint8_t)(ts>>16); ctx->ls[0x27BE]=(uint8_t)(ts>>8); ctx->ls[0x27BF]=(uint8_t)ts;
-            if (ctx->pc == 0xA00u) { static int _n=0; if (_n++ < 4)
+            if (ctx->pc == 0xA00u) { static int _n=0; if (PS3_LOG_FIRST(_n, 4))
                 ps3_log("[cri-r4] policy entry pc=0xA00: forced ctxt->taskset LS[0x27B8]=0x0F000000\n"); }
         }
     }
@@ -2328,7 +2394,7 @@ void spu_indirect_branch(spu_context* ctx)
      * wrong branch is taken. Env YDKJ_POLTRACE. */
     if (ctx->pc == 0xA00u) {
         static int64_t pt=-2; if (pt==-2){ const char* e=getenv("YDKJ_POLTRACE"); pt=e?1:0; }
-        if (pt) { static int _p=0; if (_p++ < 8) {
+        if (pt) { static int _p=0; if (PS3_LOG_FIRST(_p, 8)) {
             /* re-lifted policy entry uses r80 (kernel-set context base): r44=LS[r80+0xC0] */
             uint32_t r80=ctx->gpr[80]._u32[0] & SPU_LS_MASK;
             const uint8_t* q = ctx->ls + ((r80+0xC0)&SPU_LS_MASK);
@@ -2388,7 +2454,7 @@ void spu_indirect_branch(spu_context* ctx)
      * opcodes. The work is already done by the time it returns. */
     if (!ctx->policy_mode && ctx->pc == SPU_JOB_RETURN_LS) {
         static int _n = 0;
-        if (_n++ < 4)
+        if (PS3_LOG_FIRST(_n, 4))
             ps3_log("[spurs-job] img=%d returned to the job manager \n",
                     ctx->image_id);
         spu_halt(ctx);
@@ -2427,7 +2493,7 @@ void spu_indirect_branch(spu_context* ctx)
             if ((w >> 21) == 0u) {                 /* stop / stopd */
                 ctx->stop_code = w & 0x3FFFu;
                 static int _n = 0;
-                if (_n++ < 8)
+                if (PS3_LOG_FIRST(_n, 8))
                     ps3_log("[spu] img=%d exit: synthesised stop 0x%04X at LS 0x%05X\n",
                             ctx->image_id, ctx->stop_code, p0);
                 spu_halt(ctx);
@@ -2458,7 +2524,7 @@ void spu_indirect_branch(spu_context* ctx)
           if (s_iu < 0) { const char* e = getenv("SPU_INTERP_UNLIFTED"); s_iu = e ? 1 : 0; }
           if (s_iu && w0) {
               static int _n = 0;
-              if (_n++ < 8)
+              if (PS3_LOG_FIRST(_n, 8))
                   ps3_log("[spu] img=%d interpreting unlifted LS 0x%05X "
                           "(runtime-loaded code)\n", ctx->image_id, p);
               spu_interp_run(ctx, p);
@@ -2481,7 +2547,7 @@ void spu_indirect_branch(spu_context* ctx)
             if (img) {
                 if (ctx->resident_ovl != img) {
                     ctx->resident_ovl = img;
-                    static int _n = 0; if (_n++ < 32)
+                    static int _n = 0; if (PS3_LOG_FIRST(_n, 32))
                         ps3_log("[spu-ovl] WWS job module resident: codeBase=0x%05X "
                                 "pc=0x%05X -> overlay image %d\n", codeBase, ctx->pc & SPU_LS_MASK, img);
                 }
@@ -2518,7 +2584,7 @@ void spu_indirect_branch(spu_context* ctx)
         ((uint32_t)ctx->ls[ctx->pc] | ctx->ls[ctx->pc+1] |
          ctx->ls[ctx->pc+2] | ctx->ls[ctx->pc+3]) == 0) {
         static int _n = 0;
-        if (_n++ < 8) {
+        if (PS3_LOG_FIRST(_n, 8)) {
             /* Ground-truth dump of the WWS code-buffer resolution at dispatch
              * (wwsjob-rosetta offsets). jobEntry = lsaJobCodeBuffer + [buf+0x10];
              * lsaJobCodeBuffer = Gbt_bufferPageNum<<10 from the RunJob command.
@@ -2560,7 +2626,7 @@ void spu_indirect_branch(spu_context* ctx)
          * PM code the job calls back into -- and keep logging thereafter. */
         static int _armed = 0;
         if (p >= 0x4000) _armed = 1;
-        if (_armed && _n++ < 1500) {
+        if (_armed && PS3_LOG_FIRST(_n, 1500)) {
             ps3_log("[jobtrace] pc=0x%05X lr=0x%05X%s",
                     p, ctx->gpr[0]._u32[0] & SPU_LS_MASK,
                     fn ? "" : " (no lift)");
@@ -2611,7 +2677,7 @@ void spu_indirect_branch(spu_context* ctx)
                     /* write nonzero to the completion word in main RAM (BE) */
                     if (vm_base[w]==0 && vm_base[w+1]==0 && vm_base[w+2]==0 && vm_base[w+3]==0) {
                         vm_base[w+3] = 1;
-                        static int _n = 0; if (_n++ < 24)
+                        static int _n = 0; if (PS3_LOG_FIRST(_n, 24))
                             ps3_log("[hle-jobdone] wrote completion 0x%08X=1 (job overlay %d)\n",
                                     w, ctx->resident_ovl);
                         wrote++;
@@ -2623,7 +2689,7 @@ void spu_indirect_branch(spu_context* ctx)
     if (fn && ctx->pc >= 0x4000 && ctx->resident_ovl >= 200) {
         static int s_je = -1;
         if (s_je < 0) { const char* e = getenv("SPU_JOBEXEC"); s_je = e ? 1 : 0; }
-        if (s_je) { static int _n = 0; if (_n++ < 24)
+        if (s_je) { static int _n = 0; if (PS3_LOG_FIRST(_n, 24))
             ps3_log("[jobexec] DISPATCH job code pc=0x%05X overlay=%d "
                     "runJobNum=0x%02X%02X%02X%02X\n",
                     ctx->pc & SPU_LS_MASK, ctx->resident_ovl,
@@ -2670,7 +2736,7 @@ void spu_indirect_branch(spu_context* ctx)
         (ctx->gpr[0]._u32[0] & SPU_LS_MASK) >= 0xA00 &&
         (ctx->gpr[0]._u32[0] & SPU_LS_MASK) < 0x3700) {
         static int _n = 0;
-        if (_n++ < 8)
+        if (PS3_LOG_FIRST(_n, 8))
             ps3_log("[wws-jobret] staged job returned to kernel (LS 0); "
                     "resuming PM at link 0x%05X\n", ctx->gpr[0]._u32[0] & SPU_LS_MASK);
         ctx->pc = ctx->gpr[0]._u32[0] & SPU_LS_MASK;
@@ -2694,7 +2760,7 @@ void spu_indirect_branch(spu_context* ctx)
      * LS 0 in this path is a re-entry. Treat it as job end. */
     if (!ctx->policy_mode && ctx->pc == 0 && ctx->image_id > 0) {
         static int _n = 0;
-        if (_n++ < 8)
+        if (PS3_LOG_FIRST(_n, 8))
             ps3_log("[spurs-job] img=%d returned to the job manager "
                     "(branch to LS 0) -- job complete\n", ctx->image_id);
         spu_halt(ctx);
@@ -2744,7 +2810,7 @@ void spu_indirect_branch(spu_context* ctx)
       static int _bt0[BT0_MAX_IMG];
       unsigned img = (ctx->image_id >= 0 && ctx->image_id < BT0_MAX_IMG)
                      ? (unsigned)ctx->image_id : 0;
-      if (_bt0[img]++ < BT0_PER_IMG)
+      if (PS3_LOG_FIRST(_bt0[img], BT0_PER_IMG))
         ps3_log("[SPU] BRANCH-TO-0 unresolved pc=0x%05X image=%d lr=0x%05X\n",
                 ctx->pc, ctx->image_id, ctx->gpr[0]._u32[0] & SPU_LS_MASK); }
     /* One-shot: the FMOD null-handler DSP node carries a PPU descriptor EA at
@@ -2768,7 +2834,7 @@ void spu_indirect_branch(spu_context* ctx)
         const char* p = getenv("SPU_MISS_DUMP_PCMIN"); s_pcmin = p ? (uint32_t)strtoul(p,0,0) : 0; }
       static int _n=0;
       uint32_t misspc = ctx->pc & SPU_LS_MASK;
-      if ((s_img < 0 || ctx->image_id == s_img) && misspc >= s_pcmin && _n++ < 2) {
+      if ((s_img < 0 || ctx->image_id == s_img) && misspc >= s_pcmin && PS3_LOG_FIRST(_n, 2)) {
         ps3_log("[SPU] branch-to-0 lr=0x%05X r1=0x%05X\n",
                 ctx->gpr[0]._u32[0] & SPU_LS_MASK, ctx->gpr[1]._u32[0] & SPU_LS_MASK);
 #ifdef _WIN32
