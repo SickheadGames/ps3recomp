@@ -141,6 +141,7 @@ int      ppu_stdcx64(uint64_t addr, uint64_t expected, uint64_t val);
  * windows, the gcm ref-poll word, the end of the mapping -- still goes there,
  * so the result is the same, just without the call. */
 #include <string.h>
+#include "ps3emu/portable_builtins.h"   /* __builtin_* / __atomic_* for cl.exe */
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -148,12 +149,18 @@ extern uint8_t* vm_base;
 /* Raw (guest byte order) accesses for the byte-reversed and vector forms:
  * aligned ones single-copy atomic, as on Cell -- the same rule as
  * runtime/memory/guest_mem_atomic.h, which the generated code cannot include. */
-#define VM_RAW_LD(T, ea) ({ const uint8_t* _p = vm_base + (uint32_t)(ea); T _v; \
+/* One function per width rather than a statement expression, which cl lacks. */
+#define VM_RAW_DEF(T) \
+static inline T vm_raw_ld_##T(uint64_t ea) { const uint8_t* _p = vm_base + (uint32_t)ea; T _v; \
     if (!((uintptr_t)_p & (sizeof(T) - 1))) _v = __atomic_load_n((const T*)_p, __ATOMIC_RELAXED); \
-    else memcpy(&_v, _p, sizeof(T)); _v; })
-#define VM_RAW_ST(T, ea, val) do { uint8_t* _p = vm_base + (uint32_t)(ea); T _v = (val); \
+    else memcpy(&_v, _p, sizeof(T)); return _v; } \
+static inline void vm_raw_st_##T(uint64_t ea, T _v) { uint8_t* _p = vm_base + (uint32_t)ea; \
     if (!((uintptr_t)_p & (sizeof(T) - 1))) __atomic_store_n((T*)_p, _v, __ATOMIC_RELAXED); \
-    else memcpy(_p, &_v, sizeof(T)); } while (0)
+    else memcpy(_p, &_v, sizeof(T)); }
+VM_RAW_DEF(uint8_t) VM_RAW_DEF(uint16_t) VM_RAW_DEF(uint32_t) VM_RAW_DEF(uint64_t)
+#undef VM_RAW_DEF
+#define VM_RAW_LD(T, ea) vm_raw_ld_##T(ea)
+#define VM_RAW_ST(T, ea, val) vm_raw_st_##T((ea), (T)(val))
 static inline void vm_raw_ld16(void* dst, uint64_t ea) {   /* quadword-aligned */
     uint64_t lo = VM_RAW_LD(uint64_t, ea), hi = VM_RAW_LD(uint64_t, ea + 8);
     memcpy(dst, &lo, 8); memcpy((uint8_t*)dst + 8, &hi, 8); }
@@ -561,6 +568,12 @@ static inline uint64_t ppc_mulhdu(uint64_t a, uint64_t b) {
     _umul128(a, b, &hi);
     return hi;
 }
+/* mulldo OV: the signed 128-bit product does not fit in 64 bits. */
+static inline int ppc_mulld_ov(uint64_t a, uint64_t b) {
+    int64_t hi;
+    const int64_t lo = _mul128((int64_t)a, (int64_t)b, &hi);
+    return hi != (lo >> 63);
+}
 #else
 static inline int64_t ppc_mulhd(int64_t a, int64_t b) {
     return (int64_t)((__int128)(int64_t)a * (__int128)(int64_t)b >> 64);
@@ -568,7 +581,16 @@ static inline int64_t ppc_mulhd(int64_t a, int64_t b) {
 static inline uint64_t ppc_mulhdu(uint64_t a, uint64_t b) {
     return (uint64_t)((unsigned __int128)a * (unsigned __int128)b >> 64);
 }
+static inline int ppc_mulld_ov(uint64_t a, uint64_t b) {
+    int64_t p;
+    return __builtin_mul_overflow((int64_t)a, (int64_t)b, &p);
+}
 #endif
+/* mullwo OV: the 64-bit product of the low words does not fit in 32 bits. */
+static inline int ppc_mullw_ov(uint64_t a, uint64_t b) {
+    const int64_t p = (int64_t)(int32_t)a * (int64_t)(int32_t)b;
+    return p != (int64_t)(int32_t)p;
+}
 
 #include "ppu_vmx.h"   /* exact VMX semantics (runtime/ppu/ppu_vmx.h) */
 
@@ -1396,8 +1418,8 @@ class PPULifter:
         232: "(((~_a ^ _r) & ~_r) >> 63)",                            # subfme
         200: "(((~_a ^ _r) & _r) >> 63)",                             # subfze
         104: "(_a == 0x8000000000000000ull)",                         # neg
-        235: "({ int64_t _p = (int64_t)(int32_t)_a * (int64_t)(int32_t)_b; _p != (int64_t)(int32_t)_p; })",  # mullw
-        233: "({ int64_t _p; __builtin_mul_overflow((int64_t)_a, (int64_t)_b, &_p); })",                     # mulld
+        235: "ppc_mullw_ov(_a, _b)",                                 # mullw
+        233: "ppc_mulld_ov(_a, _b)",                                 # mulld
         491: "((uint32_t)_b == 0 || ((uint32_t)_a == 0x80000000u && (uint32_t)_b == 0xFFFFFFFFu))",          # divw
         459: "((uint32_t)_b == 0)",                                                                          # divwu
         489: "(_b == 0 || (_a == 0x8000000000000000ull && _b == ~0ull))",                                   # divd

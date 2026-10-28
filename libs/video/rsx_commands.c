@@ -22,6 +22,7 @@
 #include <string.h>
 #include "../../runtime/memory/vm.h"    /* VM_HLE_INJECT_BASE */
 #include "ps3emu/log_first.h"
+#include "ps3emu/portable_builtins.h"
 
 /* ---------------------------------------------------------------------------
  * Global backend

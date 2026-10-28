@@ -7,9 +7,8 @@
   #define PORT_MSVC 1
   #include <intrin.h>
   #include <stdlib.h>
-  
-  #define WIN32_LEAN_AND_MEAN
-  #include <Windows.h>
+  /* No <Windows.h>: this header reaches every lifted chunk (via ppu_recomp.h),
+     where its cost and its min/max macros are unwelcome. Include it yourself. */
 #else
   #define PORT_MSVC 0
 #endif
@@ -87,12 +86,14 @@
   #define PORT_RETURN_ADDRESS()      _ReturnAddress()
   #define PORT_ADDRESS_OF_RETURN_ADDRESS() _AddressOfReturnAddress()
 
-  /* Declared by hand to avoid dragging <Windows.h> into every consumer. */
- /*
+  /* Declared by hand to avoid dragging <Windows.h> into every consumer.
+     Matches winnt.h exactly, so including both is fine. */
+  #ifdef __cplusplus
+  extern "C"
+  #endif
   __declspec(dllimport) unsigned short __stdcall RtlCaptureStackBackTrace(
       unsigned long FramesToSkip, unsigned long FramesToCapture,
       void **BackTrace, unsigned long *BackTraceHash);
- */
 
   PORT_NOINLINE PORT_INLINE void *port_return_address_n(unsigned n)
   {
@@ -191,7 +192,7 @@ PORT_INLINE void port_atomic_store32(volatile int32_t *p, int32_t v)
 { (void)_InterlockedExchange((volatile long *)p, (long)v); }
 
 PORT_INLINE void port_atomic_storeu32(volatile uint32_t *p, uint32_t v)
-{ (void)_InterlockedExchange((volatile unsigned long *)p, (unsigned long)v); }
+{ (void)_InterlockedExchange((volatile long *)p, (long)v); }
 
 PORT_INLINE int32_t port_atomic_exchange32(volatile int32_t *p, int32_t v)
 { return (int32_t)_InterlockedExchange((volatile long *)p, (long)v); }
@@ -200,7 +201,7 @@ PORT_INLINE int32_t port_atomic_fetch_add32(volatile int32_t *p, int32_t v)
 { return (int32_t)_InterlockedExchangeAdd((volatile long *)p, (long)v); }
 
 PORT_INLINE uint32_t port_atomic_fetch_addu32(volatile uint32_t*p, uint32_t v)
-{ return (uint32_t)_InterlockedExchangeAdd((volatile unsigned long *)p, (unsigned long)v); }
+{ return (uint32_t)_InterlockedExchangeAdd((volatile long *)p, (long)v); }
 
 PORT_INLINE int32_t port_atomic_add_fetch32(volatile int32_t* p, int32_t v)
 {
@@ -377,7 +378,8 @@ PORT_INLINE void port_atomic_thread_fence(void)
  * Upstream code uses the GCC/Clang __atomic builtins directly. cl has none of
  * them, so provide them here under their own names -- call sites from upstream
  * then build unchanged. Every operation is sequentially consistent whatever
- * order is passed (always at least as strong as asked). Sizes 1/2/4/8 only.
+ * order is passed (always at least as strong as asked), except that a relaxed or
+ * release store is a plain store, which is all x64 needs. Sizes 1/2/4/8 only.
  *
  * The result type follows the pointee: _Generic in C, a template in C++.
  * Pointer-typed pointees come back as void* in C, which converts implicitly.
@@ -403,6 +405,16 @@ PORT_INLINE long long ps3a_load(size_t n, const volatile void* p)
     }
     _ReadWriteBarrier();
     return v;
+}
+PORT_INLINE void ps3a_store(size_t n, volatile void* p, long long v)
+{
+    _ReadWriteBarrier();
+    switch (n) {   /* x64: aligned stores are atomic and already release-ordered */
+    case 1:  *(volatile char*)p = (char)v; break;
+    case 2:  *(volatile short*)p = (short)v; break;
+    case 4:  *(volatile long*)p = (long)v; break;
+    default: *(volatile long long*)p = v; break;
+    }
 }
 PORT_INLINE long long ps3a_xchg(size_t n, volatile void* p, long long v)
 {
@@ -478,7 +490,8 @@ template <class T> static inline long long ps3a_arg(T v) { long long r = 0; std:
 #endif
 
 #define __atomic_load_n(p, o)          PS3A_RET(p, ps3a_load(sizeof(*(p)), (p)))
-#define __atomic_store_n(p, v, o)      ((void)ps3a_xchg(sizeof(*(p)), (p), PS3A_ARG(p, v)))
+#define __atomic_store_n(p, v, o)      ((o) == __ATOMIC_SEQ_CST \
+    ? (void)ps3a_xchg(sizeof(*(p)), (p), PS3A_ARG(p, v)) : ps3a_store(sizeof(*(p)), (p), PS3A_ARG(p, v)))
 #define __atomic_exchange_n(p, v, o)   PS3A_RET(p, ps3a_xchg(sizeof(*(p)), (p), PS3A_ARG(p, v)))
 #define __atomic_fetch_add(p, v, o)    PS3A_RET(p, ps3a_fadd(sizeof(*(p)), (p), (long long)(v)))
 #define __atomic_fetch_sub(p, v, o)    PS3A_RET(p, ps3a_fadd(sizeof(*(p)), (p), -(long long)(v)))
@@ -495,6 +508,13 @@ template <class T> static inline long long ps3a_arg(T v) { long long r = 0; std:
 /* Branch hint only: cl has no equivalent, the value is what matters. */
 #ifndef __builtin_expect
 #define __builtin_expect(x, expected) (x)
+#endif
+
+/* Same widths and results as GCC's. */
+#ifndef __builtin_bswap16
+#define __builtin_bswap16(x) PORT_BSWAP16(x)
+#define __builtin_bswap32(x) PORT_BSWAP32(x)
+#define __builtin_bswap64(x) PORT_BSWAP64(x)
 #endif
 
 #endif /* MSVC __atomic builtins */
