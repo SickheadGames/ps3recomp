@@ -3,6 +3,7 @@
  */
 
 #include "sys_rwlock.h"
+#include "ps3emu/portable_builtins.h"   /* GCC __atomic builtins on cl.exe */
 #include "../memory/vm.h"
 #include <string.h>
 

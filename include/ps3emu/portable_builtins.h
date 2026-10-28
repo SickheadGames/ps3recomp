@@ -369,3 +369,132 @@ PORT_INLINE void port_atomic_thread_fence(void)
 #define PORT_LIKELY(x)   __builtin_expect(!!(x), 1)
 #define PORT_UNLIKELY(x) __builtin_expect(!!(x), 0)
 #endif
+
+
+/* ---------------------------------------------------------------------------
+ * 5. GCC __atomic_* builtins for cl.exe
+ *
+ * Upstream code uses the GCC/Clang __atomic builtins directly. cl has none of
+ * them, so provide them here under their own names -- call sites from upstream
+ * then build unchanged. Every operation is sequentially consistent whatever
+ * order is passed (always at least as strong as asked). Sizes 1/2/4/8 only.
+ *
+ * The result type follows the pointee: _Generic in C, a template in C++.
+ * Pointer-typed pointees come back as void* in C, which converts implicitly.
+ * ------------------------------------------------------------------------ */
+#if PORT_MSVC && !defined(PS3_MSVC_ATOMIC_BUILTINS)
+#define PS3_MSVC_ATOMIC_BUILTINS 1
+
+#define __ATOMIC_RELAXED 0
+#define __ATOMIC_CONSUME 1
+#define __ATOMIC_ACQUIRE 2
+#define __ATOMIC_RELEASE 3
+#define __ATOMIC_ACQ_REL 4
+#define __ATOMIC_SEQ_CST 5
+
+PORT_INLINE long long ps3a_load(size_t n, const volatile void* p)
+{
+    long long v;
+    switch (n) {   /* x64: aligned loads are atomic; volatile keeps them in order */
+    case 1:  v = *(const volatile char*)p; break;
+    case 2:  v = *(const volatile short*)p; break;
+    case 4:  v = *(const volatile long*)p; break;
+    default: v = *(const volatile long long*)p; break;
+    }
+    _ReadWriteBarrier();
+    return v;
+}
+PORT_INLINE long long ps3a_xchg(size_t n, volatile void* p, long long v)
+{
+    switch (n) {
+    case 1:  return _InterlockedExchange8((volatile char*)p, (char)v);
+    case 2:  return _InterlockedExchange16((volatile short*)p, (short)v);
+    case 4:  return _InterlockedExchange((volatile long*)p, (long)v);
+    default: return _InterlockedExchange64((volatile long long*)p, v);
+    }
+}
+PORT_INLINE long long ps3a_fadd(size_t n, volatile void* p, long long v)
+{
+    switch (n) {
+    case 1:  return _InterlockedExchangeAdd8((volatile char*)p, (char)v);
+    case 2:  return _InterlockedExchangeAdd16((volatile short*)p, (short)v);
+    case 4:  return _InterlockedExchangeAdd((volatile long*)p, (long)v);
+    default: return _InterlockedExchangeAdd64((volatile long long*)p, v);
+    }
+}
+PORT_INLINE long long ps3a_fand(size_t n, volatile void* p, long long v)
+{
+    switch (n) {
+    case 1:  return _InterlockedAnd8((volatile char*)p, (char)v);
+    case 2:  return _InterlockedAnd16((volatile short*)p, (short)v);
+    case 4:  return _InterlockedAnd((volatile long*)p, (long)v);
+    default: return _InterlockedAnd64((volatile long long*)p, v);
+    }
+}
+PORT_INLINE long long ps3a_for(size_t n, volatile void* p, long long v)
+{
+    switch (n) {
+    case 1:  return _InterlockedOr8((volatile char*)p, (char)v);
+    case 2:  return _InterlockedOr16((volatile short*)p, (short)v);
+    case 4:  return _InterlockedOr((volatile long*)p, (long)v);
+    default: return _InterlockedOr64((volatile long long*)p, v);
+    }
+}
+/* Strong CAS: on failure *expected receives the current value. */
+PORT_INLINE int ps3a_cas(size_t n, volatile void* p, void* expected, long long desired)
+{
+    switch (n) {
+    case 1: { char e = *(char*)expected, o = _InterlockedCompareExchange8((volatile char*)p, (char)desired, e);
+              if (o == e) return 1; *(char*)expected = o; return 0; }
+    case 2: { short e = *(short*)expected, o = _InterlockedCompareExchange16((volatile short*)p, (short)desired, e);
+              if (o == e) return 1; *(short*)expected = o; return 0; }
+    case 4: { long e = *(long*)expected, o = _InterlockedCompareExchange((volatile long*)p, (long)desired, e);
+              if (o == e) return 1; *(long*)expected = o; return 0; }
+    default: { long long e = *(long long*)expected, o = _InterlockedCompareExchange64((volatile long long*)p, desired, e);
+              if (o == e) return 1; *(long long*)expected = o; return 0; }
+    }
+}
+
+#ifdef __cplusplus
+#include <cstring>
+#include <type_traits>
+extern "C++" {   /* templates need C++ linkage, even inside an extern "C" block */
+template <class P> using ps3a_val_t = std::remove_cv_t<std::remove_reference_t<P>>;
+template <class T> static inline T ps3a_ret(long long v) { T r; std::memcpy(&r, &v, sizeof(T)); return r; }
+template <class T> static inline long long ps3a_arg(T v) { long long r = 0; std::memcpy(&r, &v, sizeof(T)); return r; }
+}
+#define PS3A_RET(p, v) ps3a_ret<ps3a_val_t<decltype(*(p))>>(v)
+#define PS3A_ARG(p, v) ps3a_arg<ps3a_val_t<decltype(*(p))>>((ps3a_val_t<decltype(*(p))>)(v))
+#else
+#if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 201112L
+#error "ps3emu/portable_builtins.h: the __atomic shim needs C11 _Generic -- compile C with /std:c11 or /std:c17"
+#endif
+#define PS3A_RET(p, v) _Generic(*(p), \
+    _Bool: (_Bool)(v), char: (char)(v), unsigned char: (unsigned char)(v), /* cl: signed char == char here */ \
+    short: (short)(v), unsigned short: (unsigned short)(v), int: (int)(v), unsigned int: (unsigned int)(v), \
+    long: (long)(v), unsigned long: (unsigned long)(v), long long: (long long)(v), \
+    unsigned long long: (unsigned long long)(v), default: (void*)(uintptr_t)(v))
+#define PS3A_ARG(p, v) ((long long)(v))
+#endif
+
+#define __atomic_load_n(p, o)          PS3A_RET(p, ps3a_load(sizeof(*(p)), (p)))
+#define __atomic_store_n(p, v, o)      ((void)ps3a_xchg(sizeof(*(p)), (p), PS3A_ARG(p, v)))
+#define __atomic_exchange_n(p, v, o)   PS3A_RET(p, ps3a_xchg(sizeof(*(p)), (p), PS3A_ARG(p, v)))
+#define __atomic_fetch_add(p, v, o)    PS3A_RET(p, ps3a_fadd(sizeof(*(p)), (p), (long long)(v)))
+#define __atomic_fetch_sub(p, v, o)    PS3A_RET(p, ps3a_fadd(sizeof(*(p)), (p), -(long long)(v)))
+#define __atomic_add_fetch(p, v, o)    PS3A_RET(p, ps3a_fadd(sizeof(*(p)), (p), (long long)(v)) + (long long)(v))
+#define __atomic_sub_fetch(p, v, o)    PS3A_RET(p, ps3a_fadd(sizeof(*(p)), (p), -(long long)(v)) - (long long)(v))
+#define __atomic_fetch_and(p, v, o)    PS3A_RET(p, ps3a_fand(sizeof(*(p)), (p), (long long)(v)))
+#define __atomic_fetch_or(p, v, o)     PS3A_RET(p, ps3a_for(sizeof(*(p)), (p), (long long)(v)))
+#define __atomic_compare_exchange_n(p, e, d, w, s, f) \
+    ps3a_cas(sizeof(*(p)), (p), (void*)(e), PS3A_ARG(p, d))
+#define __atomic_test_and_set(p, o)    (ps3a_xchg(1, (p), 1) != 0)
+#define __atomic_clear(p, o)           ((void)ps3a_xchg(1, (p), 0))
+#define __atomic_thread_fence(o)       _mm_mfence()
+
+/* Branch hint only: cl has no equivalent, the value is what matters. */
+#ifndef __builtin_expect
+#define __builtin_expect(x, expected) (x)
+#endif
+
+#endif /* MSVC __atomic builtins */
