@@ -25,6 +25,7 @@
 
 #include "cellSysutilNpEula.h"
 #include "cellSysutil.h"          /* cellSysutilQueueGuestCallbackArgs */
+#include "ps3emu/logging.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -121,4 +122,13 @@ void ps3_np_eula_tick(void)
     cellSysutilQueueGuestCallbackArgs(cb, args);
     if (kind == EULA_CHECK)
         ps3_log("[cellSysutilNpEula] callback status=%u delivered\n", status);
+}
+
+/* Legacy stub: the made-up export this module had before the three real ones
+ * above. Nothing real imports it, but a ppu_hle_nids.cpp generated before the
+ * change still registers it, so keep it linkable. */
+s32 cellSysutilNpEulaCheck(void)
+{
+    ps3_log("[cellSysutilNpEula] cellSysutilNpEulaCheck() stub\n");
+    return CELL_OK;
 }

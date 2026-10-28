@@ -19,6 +19,7 @@
 #endif
 
 #include "cellFiber.h"
+#include "ps3emu/logging.h"
 #include "../../runtime/ppu/ppu_memory.h"   /* vm_base, vm_write32, vm_memset: guest EA -> host */
 #include "../../runtime/syscalls/sys_ppu_thread.h"   /* ppu_context, g_ppu_thread_entry_trampoline */
 #include <stdio.h>
@@ -547,3 +548,27 @@ s32 cellFiberPpuJoinFiber(CellFiberPpu* fiber, s32* status)
     UNLOCK();
     return rc;
 }
+
+/* ---------------------------------------------------------------------------
+ * Legacy stubs
+ *
+ * The names of the made-up API this module had before the SDK's scheduler API
+ * replaced it. Nothing real imports them (their NIDs are not the SDK's), but a
+ * ppu_hle_nids.cpp generated before the change still registers them, so keep
+ * them linkable. They do nothing.
+ * -----------------------------------------------------------------------*/
+
+#define FIBER_LEGACY_STUB(name) \
+    s32 name(void) { ps3_log("[cellFiber] " #name "() stub\n"); return CELL_OK; }
+
+FIBER_LEGACY_STUB(cellFiberPpuInitialize)
+FIBER_LEGACY_STUB(cellFiberPpuFinalize)
+FIBER_LEGACY_STUB(cellFiberPpuDeleteFiber)
+FIBER_LEGACY_STUB(cellFiberPpuSwitchFiber)
+FIBER_LEGACY_STUB(cellFiberPpuYieldFiber)
+FIBER_LEGACY_STUB(cellFiberPpuExitFiber)
+FIBER_LEGACY_STUB(cellFiberPpuGetCurrentFiber)
+FIBER_LEGACY_STUB(cellFiberPpuGetFiberState)
+FIBER_LEGACY_STUB(cellFiberPpuAttributeInitialize)
+FIBER_LEGACY_STUB(cellFiberPpuSleep)
+FIBER_LEGACY_STUB(cellFiberPpuWakeup)
