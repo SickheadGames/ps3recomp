@@ -299,8 +299,8 @@ static void pad_poll_keyboard(void)
     static const struct { int vk; u16 btn; } map[] = {
         { VK_UP,     CELL_PAD_CTRL_UP },      { VK_DOWN,  CELL_PAD_CTRL_DOWN },
         { VK_LEFT,   CELL_PAD_CTRL_LEFT },    { VK_RIGHT, CELL_PAD_CTRL_RIGHT },
-        { 'Z',       CELL_PAD_CTRL_CROSS },   { 'X',      CELL_PAD_CTRL_CIRCLE },
-        { 'A',       CELL_PAD_CTRL_SQUARE },  { 'S',      CELL_PAD_CTRL_TRIANGLE },
+        { 'X',       CELL_PAD_CTRL_CROSS },   { 'S',      CELL_PAD_CTRL_CIRCLE },
+        { 'Z',       CELL_PAD_CTRL_SQUARE },  { 'A',      CELL_PAD_CTRL_TRIANGLE },
         { 'Q',       CELL_PAD_CTRL_L1 },      { 'W',      CELL_PAD_CTRL_R1 },
         { '1',       CELL_PAD_CTRL_L2 },      { '2',      CELL_PAD_CTRL_R2 },
         { VK_RETURN, CELL_PAD_CTRL_START },   { VK_TAB,   CELL_PAD_CTRL_SELECT },
@@ -308,7 +308,10 @@ static void pad_poll_keyboard(void)
 
     u16 btns = 0;
     for (unsigned i = 0; i < sizeof map / sizeof map[0]; i++)
-        if (GetAsyncKeyState(map[i].vk) & 0x8000) btns |= map[i].btn;
+    {
+        if (GetAsyncKeyState(map[i].vk) & 0x8000) 
+            btns |= map[i].btn;
+    }
 
     hs->buttons   = btns;
     hs->connected = 1;
