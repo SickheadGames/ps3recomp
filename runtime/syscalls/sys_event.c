@@ -306,18 +306,64 @@ void sys_event_queue_cancel_by_id(uint32_t queue_id)
 /* Diagnostic gates polled on every receive (~140k/s in GH3): read once. */
 static int s_ps3_waitbt = -1, s_ydkj_sputask = -1, s_ydkj_spurs_ready = -1, s_ydkj_fakecomplete = -1, s_ydkj_hle_draw = -1;
 
-static SPU_THREAD_LOCAL uint32_t s_spin_q = 0, s_spin_n = 0;
+/* Self-re-post spin quieting. A manual-reset event built on a depth-1 queue
+ * (AC1's func_0001F1C0) re-posts what its waiter just received, so a thread
+ * polling such an event while it stays set does receive+send forever without
+ * blocking. AC1's main thread does exactly that in func_00CDE328 while the
+ * Loading thread works, and at 3 verbose lines per lap it held the (unfair)
+ * log lock so hard that the loader -- which logs every lwmutex acquire -- ran
+ * ~100x slow: a ~16k-line load took 1.8M lines and looked like a hang, about
+ * one boot in six. After a few laps both lines go quiet; the [STALL] line
+ * below still reports the spin every 10000 laps. s_last_send_* is the last
+ * port_send by this thread; a receive at the same lr on the queue it fed is a
+ * lap. */
+static SPU_THREAD_LOCAL uint32_t s_spin_q = 0, s_spin_n = 0, s_spin_lr = 0;
+static SPU_THREAD_LOCAL uint32_t s_last_send_q = 0, s_last_send_lr = 0;
+#define EVT_SPIN_QUIET_AFTER 4
 
 int64_t sys_event_queue_receive(ppu_context* ctx)
 {
     uint32_t queue_id    = LV2_ARG_U32(ctx, 0);
     uint32_t event_addr  = LV2_ARG_PTR(ctx, 1);
     uint64_t timeout_us  = LV2_ARG_U64(ctx, 2);
+
+    /* Per-thread, or any receive on another queue by another thread resets the
+     * counter and the detector never fires. Also fire repeatedly, not once:
+     * '== 10000' printed one line and then went silent forever. */
+    {
+        static uint32_t s_sq[64];
+        static uint32_t s_sn[64];
+        unsigned ti = (unsigned)ctx->thread_id & 63;
+        if (queue_id == s_sq[ti]) {
+            if (++s_sn[ti] >= 10000 && (s_sn[ti] % 10000) == 0) {
+                sys_event_queue_info* sq =
+                    (queue_id && queue_id <= SYS_EVENT_QUEUE_MAX)
+                    ? &g_sys_event_queues[queue_id - 1] : 0;
+                ps3_log("[STALL] tid=%u spinning on q=%u lr=%08X (%u iters) "
+                    "cap=%u count=%u active=%d\n",
+                    ctx->thread_id, queue_id, (uint32_t)ctx->lr, s_sn[ti],
+                    sq ? sq->capacity : 0, sq ? sq->count : 0,
+                    sq ? sq->active : -1);
+            }
+        }
+        else {
+            s_sq[ti] = queue_id;
+            s_sn[ti] = 0;
+        }
+    }
+
     /* PPU_THREADGATE: the creating thread is now blocking -> workers may run
      * (PS3 priority semantics). Their job objects are fully initialized by now. */
     { extern void ydkj_release_pending_threads(void); ydkj_release_pending_threads(); }
     ppu_thread_note_block(ctx->thread_id);   /* PS3_PRIO_START */
-    if (ps3_log_verbose())
+    if (queue_id == s_last_send_q && (uint32_t)ctx->lr == s_last_send_lr
+            && queue_id == s_spin_q && (uint32_t)ctx->lr == s_spin_lr)
+        s_spin_n++;
+    else {
+        s_spin_q = queue_id; s_spin_lr = (uint32_t)ctx->lr; s_spin_n = 0;
+    }
+    s_last_send_q = 0;
+    if (ps3_log_verbose() && s_spin_n < EVT_SPIN_QUIET_AFTER)
         ps3_log("[WAIT] event_queue_receive(q=%u timeout=%llu) tid=%llu cia=0x%08X lr=0x%08X\n",
                 queue_id, (unsigned long long)timeout_us,
                 (unsigned long long)ctx->thread_id, (uint32_t)ctx->cia, (uint32_t)ctx->lr);
@@ -332,6 +378,23 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
             extern void ppu_dump_guest_stack(ppu_context*, const char*);
             char tag[48]; snprintf(tag, sizeof tag, "waitbt tid=%u q=%u", t, queue_id);
             ppu_dump_guest_stack(ctx, tag);
+        }
+    }
+
+
+    {
+        static int once = 0;
+        if (queue_id == 43 && !once++) {
+            ps3_print("[q43] tid=%u lr=%08X  r3=%08X r4=%08X r5=%08X r6=%08X\n",
+                ctx->thread_id, (uint32_t)ctx->lr, (uint32_t)ctx->gpr[3], (uint32_t)ctx->gpr[4],
+                (uint32_t)ctx->gpr[5], (uint32_t)ctx->gpr[6]);
+            /* walk the guest stack back a few frames: each frame's LR is at +0x10 */
+            uint32_t sp = (uint32_t)ctx->gpr[1];
+            for (int i = 0; i < 8 && sp; i++) {
+                uint32_t lr = (uint32_t)vm_read64(sp + 0x10);
+                ps3_print("[q43]   frame %d: sp=%08X lr=%08X\n", i, sp, lr);
+                sp = (uint32_t)vm_read64(sp + 0x0);
+            }
         }
     }
 
@@ -1020,7 +1083,8 @@ int64_t sys_event_port_send_(ppu_context* ctx, uint32_t port_id, uint64_t data1,
     if (s_send_stack) { static unsigned char seen[8]={0}; unsigned pk=port_id&7;
         if(!seen[pk]){ seen[pk]=1; extern void ppu_dump_guest_stack(ppu_context*,const char*);
             char tag[40]; snprintf(tag,sizeof tag,"port_send producer port=%u",port_id); ppu_dump_guest_stack(ctx,tag); } }
-    if (ps3_log_verbose()) ps3_log("[evt] port_send(port=%u data=0x%llX/0x%llX/0x%llX) tid=%lld lr=0x%llX\n",
+    const int spin_quiet = s_spin_n >= EVT_SPIN_QUIET_AFTER && (uint32_t)ctx->lr == s_spin_lr;
+    if (ps3_log_verbose() && !spin_quiet) ps3_log("[evt] port_send(port=%u data=0x%llX/0x%llX/0x%llX) tid=%lld lr=0x%llX\n",
             port_id, (unsigned long long)data1, (unsigned long long)data2, (unsigned long long)data3, ctx->thread_id, ctx->lr);
 
     if (port_id == 0 || port_id > SYS_EVENT_PORT_MAX)
@@ -1053,8 +1117,10 @@ int64_t sys_event_port_send_(ppu_context* ctx, uint32_t port_id, uint64_t data1,
         ps3_log("[evt] port_send(port=%u): NOT CONNECTED to any queue\n", port_id);
         return (int64_t)(int32_t)CELL_ENOTCONN;
     }
-    if (ps3_log_verbose()) ps3_log("[evt] port_send(port=%u) -> queue id=%d (source=0x%llX)\n",
+    if (ps3_log_verbose() && !spin_quiet) ps3_log("[evt] port_send(port=%u) -> queue id=%d (source=0x%llX)\n",
             port_id, p->connected_queue, (unsigned long long)p->name);
+    s_last_send_q  = (uint32_t)p->connected_queue;
+    s_last_send_lr = (uint32_t)ctx->lr;
 
     int32_t qidx = p->connected_queue;
     if (qidx <= 0 || qidx > SYS_EVENT_QUEUE_MAX)

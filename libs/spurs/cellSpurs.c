@@ -2435,6 +2435,16 @@ static struct {
     volatile long last_jobs;  /* jobs run by the most recent walk; 0 means the
                                * walk parked without doing anything and has not
                                * satisfied any pending request. */
+    volatile long urgent_pc;  /* RESET_PC/NEXT target queued by AddUrgentCommand
+                               * (0 = none). Kept apart from `pc` because the
+                               * walker owns `pc`: a walk in flight parked over a
+                               * directly written pc and the retarget was lost.
+                               * AC1 rewinds chain 0x104D9380 to its list start
+                               * every frame; one lost rewind left the walker on
+                               * the old END, the frame's fence job never ran,
+                               * and the render thread waited on it forever. The
+                               * walker consumes this at its next command fetch,
+                               * which is where real SPURS runs urgent commands. */
 
 } s_jobchains[MAX_JOBCHAINS];
 
@@ -2505,6 +2515,7 @@ static s32 jc_register(u32 jc_ea, u32 entry_ea, u16 size_desc, u16 max_grab,
             s_jobchains[i].run_count = 0;
             s_jobchains[i].pc = 0;
             s_jobchains[i].ret_pc = 0;
+            s_jobchains[i].urgent_pc = 0;
             return CELL_OK;
         }
     }
@@ -2992,6 +3003,9 @@ static void jc_execute(int slot)
      * count that instead and reset it whenever real work happens. */
     int idle = 0;
     for (;; idle++) {
+        /* An urgent RESET_PC/NEXT runs ahead of the next command. */
+        { const u32 up = (u32)_InterlockedExchange(&s_jobchains[slot].urgent_pc, 0);
+          if (up) { pc = up; ret_pc = 0; idle = 0; } }
         if (idle > 4096) {
             /* Park at the ENTRY, not at the runaway pc. Saving the bogus pc made
              * each retry resume 0x8000 further into unrelated memory: this chain
@@ -3134,16 +3148,21 @@ static DWORD WINAPI jc_thread(LPVOID p)
             /* Parked on an END the guest has not yet overwritten, or on a guard
              * that is still closed. The real SPURS kernel polls here; exiting
              * is what wedged the boot. */
-            if (++stall > 4000) {       /* ~4 s */
+            /* Never give up while a run is pending: the guest may overwrite the
+             * END long after the kick. AC1 (Debug build) wrote JOB 0x4150FF20
+             * into the stream-copy chain 0x102E9A00 after the old 4 s bail had
+             * dropped the kick; the job never ran and the main thread's
+             * obj+0x1D8 barrier hung during shader loading. Back off to a slow
+             * poll instead. */
+            if (++stall == 4000) {      /* ~4 s */
                 ps3_log("[cellSpurs] chain 0x%08X: %ld pending run(s) but no job "
-                    "ran in 4 s (parked at 0x%08X) -- giving up\n",
+                    "ran in 4 s (parked at 0x%08X) -- slow-polling\n",
                     s_jobchains[slot].jc_ea, pending, s_jobchains[slot].pc);
-                break;
             }
 #ifdef _WIN32
-            Sleep(1);
+            Sleep(stall > 4000 ? 10 : 1);
 #else
-            usleep(1000);
+            usleep(stall > 4000 ? 10000 : 1000);
 #endif
             continue;
         }
@@ -3247,6 +3266,7 @@ s32 cellSpursShutdownJobChain(u64 jc_ea)
              * finished with. */
             s_jobchains[i].pc     = 0;
             s_jobchains[i].ret_pc = 0;
+            s_jobchains[i].urgent_pc = 0;
             return CELL_OK;
         }
     }
@@ -3876,10 +3896,12 @@ s32 cellSpursAddUrgentCommand(u64 jc_ea, u64 newCmd)
          * handles the PC-retarget forms only and says so for anything else. */
         const u32 op = (u32)(newCmd & 7);
         if (op == 1 || op == 3) {           /* RESET_PC / NEXT */
-            s_jobchains[i].pc     = (u32)(newCmd & ~7ull);
-            s_jobchains[i].ret_pc = 0;
+            /* Queue it for the walker rather than writing `pc`, which a walk
+             * in flight would overwrite when it parks (see urgent_pc). */
+            const u32 tgt = (u32)(newCmd & ~7ull);
+            _InterlockedExchange(&s_jobchains[i].urgent_pc, (long)tgt);
             ps3_log("[cellSpurs] AddUrgentCommand(jc=0x%08X): pc <- 0x%08X\n",
-                    (u32)jc_ea, s_jobchains[i].pc);
+                    (u32)jc_ea, tgt);
             return CELL_OK;
         }
 

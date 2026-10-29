@@ -545,6 +545,32 @@ def collect_function_pointer_tables(buf, phs, code_start, code_end,
     return targets
 
 
+_CTOR_SECTIONS = {".ctors", ".dtors", ".init_array", ".fini_array",
+                  ".preinit_array"}
+
+
+def collect_ctor_targets(buf, shs, code_start, code_end, insns_by_addr):
+    """Static constructor/destructor entries (.ctors/.dtors/.init_array ...).
+
+    crt0 walks the list and calls each entry via `bisl $r0,$r4`, so a ctor is
+    reachable only through this table. The lists are short ({-1, ctor, ..., 0}),
+    usually below collect_function_pointer_tables' min_run, so they're read by
+    section name here. Missed in AC1's Bink SPU decoder task (0D234353...):
+    .ctors = {-1, 0x11768, 0x18240, 0}; the task branched into unlifted
+    0x18240 from its crt0 and ended before decoding anything.
+    """
+    targets = set()
+    for sh in shs:
+        if sh.get("name") not in _CTOR_SECTIONS or not sh["size"]:
+            continue
+        data = buf[sh["off"]:sh["off"] + sh["size"]]
+        for i in range(0, len(data) - 3, 4):
+            w = int.from_bytes(data[i:i + 4], "big")
+            if (w & 3) == 0 and code_start <= w < code_end and w in insns_by_addr:
+                targets.add(w)
+    return targets
+
+
 # Kept for backwards compatibility / call-only counting.
 def collect_brsl_targets(insns):
     return {t for ins in insns if ins.mnemonic in ("brsl", "brasl")
@@ -653,12 +679,18 @@ def detect_functions(buf, base_override=None, verbose=True, raw=False):
     # hold a small constant cannot seed a bogus function.
     fptr_targets = collect_function_pointer_tables(
         buf, elf["phs"], code_start, code_end, insns_by_addr)
+    ctor_targets = collect_ctor_targets(
+        buf, elf["shs"], code_start, code_end, insns_by_addr)
+    if ctor_targets and verbose:
+        print(f"  {len(ctor_targets)} ctor/dtor target(s): "
+              f"{', '.join(f'0x{a:X}' for a in sorted(ctor_targets))}")
     for t in (collect_link_register_targets(insns)
               | collect_computed_branch_targets(insns)
               | collect_jump_table_targets(insns, code, code_start, code_end)
               | collect_ila_continuation_targets(insns, code_start, code_end)
               | collect_duff_targets(insns, code_start, code_end)
-              | fptr_targets):
+              | fptr_targets
+              | ctor_targets):
         if code_start <= t < code_end and (t & 3) == 0 and t in insns_by_addr:
             seed_starts.add(t)
     if fptr_targets and verbose:

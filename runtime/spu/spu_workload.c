@@ -100,7 +100,7 @@ int32_t spu_workload_register(uint64_t fingerprint, spu_lifted_entry_fn fn,
             return s_registry[i].image_id;
         }
 
-    static int image_id = 0x1000;
+    static int image_id = SPU_JOB_IMAGE_BASE;
     int id = image_id++;
     spu_workload_register_img(fingerprint, fn, id, name);
     return id;

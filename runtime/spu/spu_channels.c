@@ -1691,10 +1691,20 @@ spu_fn spu_lookup(uint32_t addr, int image_id)   /* exported: clang-built fast-p
 {
     /* Match the context's active image; image_id 0 (context or entry) matches
      * any, for back-compat with single-image contexts. */
+    /* A SPURS job binary (id >= SPU_JOB_IMAGE_BASE) is self-contained at LS 0:
+     * an address its own lift lacks is still ITS code, never another program's.
+     * So a job does not take the id-0 wildcard -- the miss goes to the
+     * interpreter, which runs the job's real bytes and rejoins its lift. AC1's
+     * job 7C04A1CCBEEEEC95 reaches LS 0x33F8, a loop point inside its own
+     * func_33A0 with no lifted entry; the wildcard served spu_0003's unrelated
+     * function there, which built an illegal 66-byte GET from 0x19A50 (just
+     * before the screen went white). Not refused for other images: see
+     * spu_report_cross_image. */
+    const int job = image_id >= SPU_JOB_IMAGE_BASE;
     for (uint32_t n = s_hash_head[spu_fn_hash(addr)]; n; n = s_hash_next[n - 1]) {
         const spu_reg_entry* e = &s_registry[n - 1];
         if (e->addr == addr &&
-            (image_id == 0 || e->image_id == 0 || e->image_id == image_id)) {
+            (image_id == 0 || (e->image_id == 0 && !job) || e->image_id == image_id)) {
             /* One compare on the return path; the report itself is rare. */
             if (e->image_id != image_id)
                 spu_report_cross_image(addr, image_id, e->image_id);

@@ -43,6 +43,10 @@ extern "C" {
 #define SPU_LS_SIZE         (256 * 1024)
 #define SPU_LS_MASK         (SPU_LS_SIZE - 1)
 
+/* First image id spu_workload_register hands out; every SPURS job binary
+ * registered by fingerprint gets an id at or above it. */
+#define SPU_JOB_IMAGE_BASE  0x1000
+
 /* ---------------------------------------------------------------------------
  * Reusable env-driven LS watchpoint (mini-debugger, no rebuild to retarget).
  *   SPU_LS_WATCH=0x1BE80        watch one 16-byte LS line (reads + writes)
