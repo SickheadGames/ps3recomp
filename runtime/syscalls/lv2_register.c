@@ -1720,6 +1720,12 @@ static int spu_deliver_user_event(spu_context* spu, uint32_t value)
             int rc = sys_event_queue_push_by_id(queue, 0xFFFFFFFF53505501ull,
                 spu->spu_id, ((uint64_t)port << 32) | (value & 0xFFFFFFu), data);
             result = rc == 0 ? CELL_OK : CELL_EBUSY;
+            /* A queue with a real SPU-task producer must not also get the
+             * synthetic job-chain completion events (cellSpurs.c). */
+            if (!spu->spu_group_id) {
+                extern void spurs_mark_task_event_queue(uint32_t queue);
+                spurs_mark_task_event_queue(queue);
+            }
         }
     }
     if (code < 64) spu_channel_write(&spu->ch_in_mbox, result);

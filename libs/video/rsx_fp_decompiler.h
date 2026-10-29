@@ -122,6 +122,10 @@ float rsx_fp_alpha_ref(u32 raw, u32 surface_color_format);
  * call-site guidance. */
 int rsx_fp_decompile_ex(const u8* ucode, u32 max_bytes, u32 ctrl,
                         u32 tex_cube_mask, char* out, u32 out_size);
+/* As rsx_fp_decompile_ex, with tex_vol_mask naming the units bound to a 3D
+ * texture (declared Texture3D, sampled with three coordinates). */
+int rsx_fp_decompile_vol_ex(const u8* ucode, u32 max_bytes, u32 ctrl,
+                            u32 tex_cube_mask, u32 tex_vol_mask, char* out, u32 out_size);
 
 /* Buffered-constant variant of rsx_fp_decompile_ex. Inline CONST payloads are
  * represented as fp_constants[N] in a b1 PSConstants cbuffer rather than

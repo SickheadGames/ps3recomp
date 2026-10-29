@@ -371,6 +371,7 @@ def main() -> int:
     test_multi_toc_prefers_targets_near_the_dispatcher()
     test_bound_compare_beyond_window()
     test_spilled_base_reused_as_target()
+    test_spilled_two_level_base()
     if FAILS:
         print(f"FAILED: {', '.join(FAILS)}")
         return 1
@@ -426,6 +427,29 @@ def test_spilled_base_reused_as_target():
     # A store to a different slot is not the spill: no base, no table.
     words[1] = w_std(10, 1, 0x2D8)
     check("reload of a slot nothing stored is not a base", discover(words, mem), None)
+
+
+def test_spilled_two_level_base():
+    """The base is loaded through a function-scope pointer, THEN spilled:
+
+        lwz r30,8(r2)           <- prologue: the base's base
+        lwz r7,-16(r30) ; std r7,0xD0(r1)
+        cmplwi r0,2 ; ld r8,0xD0(r1) ; slwi r9,r0,2 ; lwzx r0,r9,r8
+        add r8,r0,r8 ; mtctr r8 ; bctr
+
+    AC1 func_01089330 (a 29-case Havok shape decoder). The spill path only
+    followed a stored register to a direct TOC load, so the dispatcher was
+    dropped; its cases ran as split-off functions that never restored the
+    decoder's callee-saved registers, and its caller got r17 back as a data
+    pointer.
+    """
+    mid, table = 0x200800, 0x11000
+    mem = {TOC + 8: mid, mid - 16: table,
+           table + 0: 0x100, table + 4: 0x200, table + 8: 0x300, table + 12: 0xFFFFFFFF}
+    words = [w_lwz(30, 2, 8), w_lwz(7, 30, -16), w_std(7, 1, 0xD0), w_cmplwi(0, 0, 2),
+             w_ld(8, 1, 0xD0), w_slwi(9, 0, 2), w_lwzx(0, 9, 8), w_add(8, 0, 8),
+             w_mtctr(8), w_bctr()]
+    check("spilled two-level base", discover(words, mem), [0x11100, 0x11200, 0x11300])
 
 
 if __name__ == "__main__":

@@ -19,9 +19,11 @@
 #include <string.h>
 #include <math.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+/* No extern "C" here: every helper in this header is static inline (or
+ * SPU__XI / SPU__NV_INLINE, both static), so each translation unit gets its
+ * own copy in its own language and nothing has external linkage to give a C
+ * name to. Wrapping them only made MSVC warn (C4190) that u128_t, which has
+ * constructors under C++, is returned with C linkage. */
 
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -1961,10 +1963,6 @@ static inline u128 spu_ila(uint32_t i18) { return spu_splat_u32(i18 & 0x3FFFF); 
 static inline u128 spu_ilh(uint16_t imm) { return spu_splat_u16(imm); }
 static inline u128 spu_ilhu(uint16_t imm){ return spu_splat_u32((uint32_t)imm << 16); }
 static inline u128 spu_iohl(u128 a, uint16_t imm){ u128 r; for(int i=0;i<4;i++) r._u32[i]=a._u32[i]|(uint32_t)imm; return r; }
-
-#ifdef __cplusplus
-}
-#endif
 
 /* ---- NEON forms of the per-lane integer ops ------------------------------------------
  * Each was a scalar loop over 4/8/16 lanes (tests/bench/spu: 3-20 ns per op lifted); here it

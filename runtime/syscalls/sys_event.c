@@ -31,6 +31,10 @@ sys_event_flag_info  g_sys_event_flags[SYS_EVENT_FLAG_MAX];
 #ifdef _WIN32
 static CRITICAL_SECTION s_evt_table_lock;
 static int              s_evt_table_lock_init = 0;
+/* GCM callback pump for receivers (see sys_event_queue_receive). The fallback
+ * for a build without cellGcmSys lives in sys_semaphore.c. */
+void* ppu_gcm_wait_pump(void (**pump)(void));
+static volatile LONG    s_recv_pumper = 0;   /* 1 while a receiver holds the pump role */
 #else
 static pthread_mutex_t  s_evt_table_lock = PTHREAD_MUTEX_INITIALIZER;
 #endif
@@ -577,11 +581,35 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
         }
     }
     if (timeout_us == 0) {
+        /* GCM vblank/flip/user callbacks are delivered on guest threads that
+         * reach an HLE call, a timer sleep or a semaphore wait (cellGcmSys.c).
+         * When every guest thread is parked in an event-queue receive, none of
+         * those happens and a title whose frame loop is driven from its vblank
+         * handler stops for good -- AC1's title screen froze that way once its
+         * Havok step no longer usleep-polled. One receiver at a time therefore
+         * waits in short slices and runs the pump when a callback is pending;
+         * the rest wait indefinitely. */
+        void (*pump)(void) = NULL;
+        HANDLE pump_ev = (HANDLE)ppu_gcm_wait_pump(&pump);
+        const int pumper = pump_ev && pump &&
+            InterlockedCompareExchange(&s_recv_pumper, 1, 0) == 0;
         q->waiters++;
         while (q->count == 0 && q->active && !q->cancelled) {
-            SleepConditionVariableCS(&q->not_empty, &q->lock, INFINITE);
+            if (!pumper) {
+                SleepConditionVariableCS(&q->not_empty, &q->lock, INFINITE);
+                continue;
+            }
+            if (!SleepConditionVariableCS(&q->not_empty, &q->lock, 2) &&
+                WaitForSingleObject(pump_ev, 0) == WAIT_OBJECT_0) {
+                q->waiters--;
+                LeaveCriticalSection(&q->lock);
+                pump();
+                EnterCriticalSection(&q->lock);
+                q->waiters++;
+            }
         }
         q->waiters--;
+        if (pumper) InterlockedExchange(&s_recv_pumper, 0);
         if (q->count == 0 && q->cancelled) {
             LeaveCriticalSection(&q->lock);
             return (int64_t)(int32_t)CELL_ECANCELED;
@@ -610,8 +638,8 @@ int64_t sys_event_queue_receive(ppu_context* ctx)
         while (q->count == 0 && q->active && !q->cancelled) {
             if (!SleepConditionVariableCS(&q->not_empty, &q->lock, ms)) {
                 if (GetLastError() == ERROR_TIMEOUT) {
+                    q->waiters--;              /* under the lock, like every other update */
                     LeaveCriticalSection(&q->lock);
-                    q->waiters--;
                     return (int64_t)(int32_t)CELL_ETIMEDOUT;
                 }
             }

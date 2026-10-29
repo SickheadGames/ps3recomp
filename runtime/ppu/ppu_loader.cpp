@@ -2311,6 +2311,15 @@ static bool ppu_dump_readable(uint32_t ea, uint32_t n)
 {
     if (vm_oob(ea, n)) return false;
 #ifdef _WIN32
+    /* Guest space is reserved, not all committed: the stack scan used to walk
+     * off the top of a thread's committed stack and fault inside the dump. */
+    for (uintptr_t a = (uintptr_t)(vm_base + ea) & ~(uintptr_t)0xFFF;
+         a <= (uintptr_t)(vm_base + ea + n - 1); a += 0x1000) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery((const void*)a, &mbi, sizeof mbi)) return false;
+        if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+            return false;
+    }
     return true;
 #else
     static int s_probe[2] = {-1, -1};

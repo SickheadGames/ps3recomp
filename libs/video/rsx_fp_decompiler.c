@@ -1371,6 +1371,13 @@ int rsx_fp_decompile_ex(const u8* ucode, u32 max_bytes, u32 ctrl,
         ucode, max_bytes, ctrl, tex_cube_mask, 0, 0, NULL, NULL, NULL, out, out_size, NULL);
 }
 
+int rsx_fp_decompile_vol_ex(const u8* ucode, u32 max_bytes, u32 ctrl,
+                            u32 tex_cube_mask, u32 tex_vol_mask, char* out, u32 out_size)
+{
+    return rsx_fp_decompile_internal(
+        ucode, max_bytes, ctrl, tex_cube_mask, tex_vol_mask, 0, NULL, NULL, NULL, out, out_size, NULL);
+}
+
 int rsx_fp_decompile_buffered_ex(
     const u8* ucode, u32 max_bytes, u32 ctrl, u32 tex_cube_mask,
     char* out, u32 out_size, u32* out_constant_count)

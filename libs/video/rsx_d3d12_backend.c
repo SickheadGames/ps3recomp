@@ -113,6 +113,8 @@ typedef struct {
         u32 mips;       /* SET_TEXTURE_FORMAT bits 16..31: mipmap level count.
                          * Cube faces sit one whole mip pyramid apart, so this
                          * is what sets the face stride. */
+        u32 depth;      /* volume slices when SET_TEXTURE_FORMAT dimension is 3
+                         * (a 3D LUT); 0 = 2D */
         int cube;       /* SET_TEXTURE_FORMAT bit 2: a cube texture. Sampled
                          * with a 3-component direction, not a 2D uv -- treating
                          * one as 2D is what makes an environment-mapped chrome
@@ -208,6 +210,7 @@ typedef struct {
     u32 off, w, h, fmt; /* current contents (resource reused when dims match) */
     u32 csum;           /* sparse checksum of the source bytes last uploaded */
     int cube;           /* resource is a 6-face cube, sampled as TextureCube */
+    u32 depth;          /* > 1: a TEXTURE3D of this many slices (Texture3D) */
     u32 key;            /* the ORIGINAL bound offset -- the cache lookup key.
                          * off is the RESOLVED source after TEX_OFF_BIAS/TEX_REMAP
                          * shift it, so keying on off never matches the raw offset
@@ -377,6 +380,7 @@ typedef struct {
     u32                   srv_inc;              /* CBV_SRV_UAV descriptor size   */
     /* VP path: latest texture bound per unit (t0-t15). */
     struct { u32 off, raw, w, h, fmt, ctrl1, mips; int cube; int set;
+             u32 depth;   /* volume slices (SET_TEXTURE_FORMAT dimension 3); 0 = 2D */
              u32 addr, filter, ctrl0, border; } cur_texs[RSX_TEX_UNITS];
     /* Guest sampler states, one shader-visible descriptor each (samp_key[i]
      * describes descriptor i; 0 and 1 are the defaults for units with none). */
@@ -2483,6 +2487,34 @@ static u32 dr_cube_mask(const D3D12DrawRecord* dr)
     return m;
 }
 
+/* Which units are bound to a 3D (volume) texture the upload path can build:
+ * linear (LN) uncompressed ARGB8 / B8 with more than one slice. AC1's colour
+ * grade samples a 16x16x16 LUT; read as its first 2D slice (blue = 0) every
+ * colour lost its blue and the whole frame went green. Swizzled volumes use a
+ * 3D Morton order the per-slice decoder does not do, so they stay 2D.
+ * RSX_VOL_TEX=0 disables. */
+static int vol_unit_ok(const D3D12DrawRecord* dr, int u)
+{
+    const u32 bf = dr->tex[u].fmt & 0x9F;
+    return dr->tex[u].set && dr->tex[u].depth > 1 && !dr->tex[u].cube &&
+           (dr->tex[u].fmt & 0x20) && (bf == 0x85 || bf == 0x81);
+}
+static u32 dr_vol_mask(const D3D12DrawRecord* dr)
+{
+    static int en = -1;
+    if (en < 0) { const char* e = getenv("RSX_VOL_TEX"); en = e ? atoi(e) : 1; }
+    if (!en) return 0;
+    u32 m = 0;
+    for (int u = 0; u < RSX_TEX_UNITS; u++) if (vol_unit_ok(dr, u)) m |= 1u << u;
+    return m;
+}
+/* The pipeline key's texture-kind mask: cube units in bits 0..15, volume
+ * units in bits 16..31 (RSX_TEX_UNITS is 16). */
+static u32 dr_texkind_mask(const D3D12DrawRecord* dr)
+{
+    return dr_cube_mask(dr) | (dr_vol_mask(dr) << 16);
+}
+
 /* ===========================================================================
  * Fragment pipeline cache.
  *
@@ -2706,7 +2738,14 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
     static int ctrl_auto = -1;
     if (ctrl_auto < 0) ctrl_auto = getenv("RSX_FP_CTRL_AUTO") ? 1 : 0;
     u32 fp_ctrl = ctrl_auto ? RSX_FP_CTRL_AUTO : ctrl;
-    int n = rsx_fp_decompile(vm_base + off, 4096, fp_ctrl, hlsl, sizeof(hlsl));
+    /* Volume units ride in the key's upper half (dr_texkind_mask): the
+     * decompiler declares them Texture3D and samples them with uvw. */
+    const u32 vol_mask = cube_mask >> 16;
+    int n = vol_mask
+        ? rsx_fp_decompile_vol_ex(vm_base + off, 4096, fp_ctrl, 0u, vol_mask, hlsl, sizeof(hlsl))
+        : rsx_fp_decompile(vm_base + off, 4096, fp_ctrl, hlsl, sizeof(hlsl));
+    if (vol_mask) { static int _vn = 0; if (PS3_LOG_FIRST(_vn, 8))
+        ps3_log("[VOLTEX] fp=0x%X compiled with volume units mask 0x%X\n", fp_addr, vol_mask); }
     if (n <= 0) { static int _e=0; if(PS3_LOG_FIRST(_e, 16)) ps3_log("[FP] decompile fail (fp=0x%08X)\n", fp_addr); return NULL; }
     /* FP_LIST=1: every program the title actually compiles, with its size. A
      * fragment program that hangs the GPU shows up here as an implausible
@@ -3085,8 +3124,12 @@ static u32 tex_csum(const u8* base, u32 nbytes)
     return h;
 }
 
-static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips)
+/* depth > 1: a linear volume (3D texture) of `depth` w x h slices stored back
+ * to back, uploaded as one TEXTURE3D and viewed as Texture3D (vol_unit_ok
+ * decides which units get here). */
+static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips, u32 depth)
 {
+    if (cube || depth < 2) depth = 1;
     /* TEX_BUDGET=<n>: cap texture uploads per frame. Off by default -- it was
      * tried against the TDR and does not help, because PERF shows the upload
      * path costing 0.01s for 775 calls. Kept because it is the right lever if a
@@ -3144,7 +3187,7 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
     for (int i = 0; i < VP_TEX_SLOTS; i++) {
         VPTexSlot* c = &s_d3d.vp_tex[i];
         if (c->res && c->key == key_off && c->w == w && c->h == h && c->fmt == fmt
-            && c->cube == cube) {
+            && c->cube == cube && c->depth == depth) {
             c->last_frame = s_d3d.frame_count;
             if (c->used) return i;                /* already bound this frame */
             { static int nocache = -1;            /* TEX_NOCACHE=1: always re-upload */
@@ -3154,7 +3197,7 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
             /* Held from an earlier frame: re-upload only if the guest bytes
              * changed. Most of this scene's textures are static, and converting
              * every one of them every frame was ~70% of the frame's CPU time. */
-            u32 nb = dxt ? (blkrow * blkrows) : (w * h * bpp);
+            u32 nb = (dxt ? (blkrow * blkrows) : (w * h * bpp)) * depth;
             u32 cs = TEX_CSUM(vm_base + c->off, nb);
             if (cs == c->csum) { c->used = 1; return i; }
             slot = i; break;                      /* stale: fall through and redo */
@@ -3279,16 +3322,18 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
      * the same dimensions would otherwise be reused with 1 array slice while the
      * cube path copies 6 subresources and writes a 6x upload buffer -- which
      * crashes. */
-    if (t->res && (t->w != w || t->h != h || t->fmt != fmt || t->cube != cube)) {
+    if (t->res && (t->w != w || t->h != h || t->fmt != fmt || t->cube != cube ||
+                   t->depth != depth)) {
         d3d12_defer_release(t->res); t->res = NULL;
         if (t->up) { d3d12_defer_release(t->up); t->up = NULL; }
     }
     if (!t->res) {
         D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
         D3D12_RESOURCE_DESC td = {0};
-        td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        td.Dimension = depth > 1 ? D3D12_RESOURCE_DIMENSION_TEXTURE3D
+                                 : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         td.Width = w; td.Height = h;
-        td.DepthOrArraySize = cube ? 6 : 1;   /* cube = 6 array slices */
+        td.DepthOrArraySize = cube ? 6 : (UINT16)depth;   /* cube = 6 array slices */
         td.MipLevels = 1;
         td.Format = dxfmt; td.SampleDesc.Count = 1;
         td.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
@@ -3301,7 +3346,7 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
     }
     /* Stage the decoded image in the ring, or in the slot's own upload
      * buffer when the ring is full or could not be made. */
-    const u64 up_bytes = (u64)pitch * (dxt ? blkrows : h) * (cube ? 6 : 1);
+    const u64 up_bytes = (u64)pitch * (dxt ? blkrows : h) * (cube ? 6 : depth);
     const u32 fi = s_d3d.frame_index;
     if (!s_d3d.tex_ring) {
         D3D12_HEAP_PROPERTIES hu = {0}; hu.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -3383,7 +3428,9 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
         }
         _face_bytes = (total + 127u) & ~127u;
     }
-    const u32 _nfaces     = cube ? 6u : 1u;
+    /* A volume's slices are converted the same way as cube faces, one per
+     * w*h*bpp of source (level 0 of a linear volume is its slices back to back). */
+    const u32 _nfaces     = cube ? 6u : depth;
     const u32 _off0 = off; u8* const _map0 = (u8*)mapped;
     for (u32 _f = 0; _f < _nfaces; _f++) {
     off    = _off0 + _f * _face_bytes;
@@ -3677,6 +3724,12 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
     src.PlacedFootprint.Footprint.Height   = h;
     src.PlacedFootprint.Footprint.Depth    = 1;
     src.PlacedFootprint.Footprint.RowPitch = pitch;
+    if (depth > 1) {   /* volume: one subresource, slices pitch*h apart */
+        src.PlacedFootprint.Footprint.Depth = depth;
+        dst.SubresourceIndex       = 0;
+        src.PlacedFootprint.Offset = up_base;
+        s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &dst, 0, 0, 0, &src, NULL);
+    } else
     for (u32 _f = 0; _f < _nfaces; _f++) {
         dst.SubresourceIndex        = _f;      /* cube face = array slice */
         src.PlacedFootprint.Offset  = up_base + (u64)_f * pitch * _face_rows;
@@ -3693,8 +3746,8 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
     }
 
     t->off = off; t->key = key_off; t->w = w; t->h = h; t->fmt = fmt;
-    t->cube = cube; t->used = 1;
-    { u32 nb = dxt ? (blkrow * blkrows) : (w * h * bpp);
+    t->cube = cube; t->depth = depth; t->used = 1;
+    { u32 nb = (dxt ? (blkrow * blkrows) : (w * h * bpp)) * depth;
       t->csum = TEX_CSUM(vm_base + off, nb); }
     #undef TEX_CSUM
     return slot;
@@ -4160,7 +4213,12 @@ static void srv_write_ex(u32 heap_slot, ID3D12Resource* res, DXGI_FORMAT fmt,
     sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     sv.Shader4ComponentMapping = mapping;
     sv.Texture2D.MipLevels = 1;
-    if (cube) {   /* must match the TextureCube declaration in the HLSL */
+    if (cube == 3) {   /* a volume: must match the Texture3D declaration */
+        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+        sv.Texture3D.MipLevels = 1;
+        sv.Texture3D.MostDetailedMip = 0;
+        sv.Texture3D.ResourceMinLODClamp = 0.0f;
+    } else if (cube) {   /* must match the TextureCube declaration in the HLSL */
         sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
         sv.TextureCube.MipLevels = 1;
         sv.TextureCube.MostDetailedMip = 0;
@@ -5127,9 +5185,11 @@ static void render_frame(void)
                      (_bf >= 0x86 && _bf <= 0x88))) {
                     double _tt = perf_on() ? perf_now() : 0.0;
                     int _cube = dr->tex[_u].cube && (dr_cube_mask(dr) & (1u << _u));
+                    const int _vol = (dr_vol_mask(dr) >> _u) & 1;
                     int ts = vp_upload_tex_slot(dr->tex[_u].off, dr->tex[_u].w,
                                                 dr->tex[_u].h, dr->tex[_u].fmt,
-                                                _cube, dr->tex[_u].mips);
+                                                _cube, dr->tex[_u].mips,
+                                                _vol ? dr->tex[_u].depth : 1);
                     if (perf_on()) { s_perf_tex += perf_now() - _tt; s_perf_ntex++;
                         s_perf_texbytes += (u64)dr->tex[_u].w * dr->tex[_u].h * 4u; }
                     /* Both forms of the offset are in hand here; the filters
@@ -5147,7 +5207,7 @@ static void render_frame(void)
                         srv_write_ex(wslot, s_d3d.vp_tex[ts].res, sf,
                                   (_bf == 0x81) ? 0x1000
                                                 : rsx_remap_to_d3d(dr->tex[_u].ctrl1, _bf),
-                                  _cube);
+                                  _vol ? 3 : _cube);
                         continue;
                     }
                 }
@@ -5161,8 +5221,10 @@ static void render_frame(void)
                 ps3_log("[TEXBIND] null SRV unit=%d raw=0x%X off=0x%X %ux%u fmt=0x%02X%c",
                         _u, dr->tex[_u].raw, dr->tex[_u].off, dr->tex[_u].w,
                         dr->tex[_u].h, dr->tex[_u].fmt, 10); } }
-            srv_write(wslot, NULL, DXGI_FORMAT_R8G8B8A8_UNORM,
-                      D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
+            /* A null view must still have the dimension the shader declares. */
+            srv_write_ex(wslot, NULL, DXGI_FORMAT_R8G8B8A8_UNORM,
+                         D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                         ((dr_vol_mask(dr) >> _u) & 1) ? 3 : 0);
         }
         if (perf_on()) s_perf_srv += perf_now() - _sv0;
         double _ps0 = perf_on() ? perf_now() : 0.0;
@@ -5170,7 +5232,7 @@ static void render_frame(void)
                                        dr_num_rts(dr),
                                        dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
                                                   : DXGI_FORMAT_R8G8B8A8_UNORM,
-                                       dr->fp_ctrl, dr->cmask, dr->cull, dr_cube_mask(dr),
+                                       dr->fp_ctrl, dr->cmask, dr->cull, dr_texkind_mask(dr),
                                        dr->zs_key);
         if (perf_on()) s_perf_pso += perf_now() - _ps0;
     }
@@ -5553,7 +5615,7 @@ static void render_frame(void)
                                                 dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
                                                            : DXGI_FORMAT_R8G8B8A8_UNORM,
                                                 dr->fp_ctrl, dr->cmask, dr->cull,
-                                                dr_cube_mask(dr), dr->zs_key) : NULL;
+                                                dr_texkind_mask(dr), dr->zs_key) : NULL;
                 s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list,
                                                          dpso ? dpso : vpso);
                 s_d3d.cmd_list->lpVtbl->OMSetStencilRef(s_d3d.cmd_list, dr->stencil_ref & 0xFFu);
@@ -7352,6 +7414,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
                     dr->tex[_u].fmt = s_d3d.cur_texs[_u].fmt;
                     dr->tex[_u].ctrl1 = s_d3d.cur_texs[_u].ctrl1;
                     dr->tex[_u].cube  = s_d3d.cur_texs[_u].cube;
+                    dr->tex[_u].depth = s_d3d.cur_texs[_u].depth;
                     dr->tex[_u].mips  = s_d3d.cur_texs[_u].mips; dr->tex[_u].addr = s_d3d.cur_texs[_u].addr; dr->tex[_u].filter = s_d3d.cur_texs[_u].filter; dr->tex[_u].ctrl0 = s_d3d.cur_texs[_u].ctrl0; dr->tex[_u].border = s_d3d.cur_texs[_u].border;
                     dr->tex[_u].set = s_d3d.cur_texs[_u].set;
                     dr->tex_rt[_u]  = -1;
@@ -7475,6 +7538,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
                 dr->tex[_u].fmt = s_d3d.cur_texs[_u].fmt;
                     dr->tex[_u].ctrl1 = s_d3d.cur_texs[_u].ctrl1;
                     dr->tex[_u].cube  = s_d3d.cur_texs[_u].cube;
+                    dr->tex[_u].depth = s_d3d.cur_texs[_u].depth;
                     dr->tex[_u].mips  = s_d3d.cur_texs[_u].mips; dr->tex[_u].addr = s_d3d.cur_texs[_u].addr; dr->tex[_u].filter = s_d3d.cur_texs[_u].filter; dr->tex[_u].ctrl0 = s_d3d.cur_texs[_u].ctrl0; dr->tex[_u].border = s_d3d.cur_texs[_u].border;
                 dr->tex[_u].set = s_d3d.cur_texs[_u].set;
                 dr->tex_rt[_u]  = -1;
@@ -7644,6 +7708,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
             dr->tex[_u].fmt = s_d3d.cur_texs[_u].fmt;
                     dr->tex[_u].ctrl1 = s_d3d.cur_texs[_u].ctrl1;
                     dr->tex[_u].cube  = s_d3d.cur_texs[_u].cube;
+                    dr->tex[_u].depth = s_d3d.cur_texs[_u].depth;
                     dr->tex[_u].mips  = s_d3d.cur_texs[_u].mips; dr->tex[_u].addr = s_d3d.cur_texs[_u].addr; dr->tex[_u].filter = s_d3d.cur_texs[_u].filter; dr->tex[_u].ctrl0 = s_d3d.cur_texs[_u].ctrl0; dr->tex[_u].border = s_d3d.cur_texs[_u].border;
             dr->tex[_u].set = s_d3d.cur_texs[_u].set;
             dr->tex_rt[_u]  = -1;
@@ -7792,6 +7857,9 @@ static void d3d12_bind_texture(void* ud, u32 unit, const rsx_texture_state* tex)
         s_d3d.cur_texs[unit].fmt = format;   /* full byte: LN(0x20)/UN(0x40) kept */
         s_d3d.cur_texs[unit].ctrl1 = tex->control1;
         s_d3d.cur_texs[unit].cube  = (tex->format & 4) ? 1 : 0;
+        /* A volume (dimension 3): TEXTURE_CONTROL3 bits 31..20 hold the slice count. */
+        s_d3d.cur_texs[unit].depth = (((tex->format >> 4) & 0xF) == 3 && !(tex->format & 4))
+                                     ? (tex->control3 >> 20) : 0;
         s_d3d.cur_texs[unit].mips  = (tex->format >> 16) & 0xFFFFu;
         s_d3d.cur_texs[unit].addr   = tex->address;
         s_d3d.cur_texs[unit].filter = tex->filter;

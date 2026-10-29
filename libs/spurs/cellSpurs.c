@@ -2844,9 +2844,30 @@ static u64 spurs_event_data3_probe(void)
  *     spurs_mark_service_queue(queue);
  *
  * 0xFEE1DEAD is the name libspurs gives its spu_printf port. */
-#define MAX_SERVICE_QUEUES 8
+#define MAX_SERVICE_QUEUES 32
 static u32 s_service_queue[MAX_SERVICE_QUEUES];
 static int s_service_queue_n = 0;
+
+/* A queue an SPURS *task* delivers user events to (send_event on an attached
+ * port) has a real producer, and its consumer counts those events: AC1's Havok
+ * step waits for exactly three, one per integrate task, on the queue its port
+ * maps to. Pushing chain completions into it as well let that loop leave
+ * before the SPU work was done, the step desynced, and the title screen froze
+ * a few seconds in. Keep chain completions out of such queues from the first
+ * task event on. Called by the SPU event path (lv2_register.c). */
+void spurs_mark_task_event_queue(uint32_t queue)
+{
+    if (!queue) return;
+    AcquireSRWLockExclusive(&s_spurs_queue_lock);
+    int known = 0;
+    for (int i = 0; i < s_service_queue_n; i++) if (s_service_queue[i] == queue) known = 1;
+    if (!known && s_service_queue_n < MAX_SERVICE_QUEUES)
+        s_service_queue[s_service_queue_n++] = queue;
+    ReleaseSRWLockExclusive(&s_spurs_queue_lock);
+    if (!known)
+        ps3_log("[cellSpurs] queue %u receives SPU task events: no chain completions "
+                "will be pushed to it\n", queue);
+}
 
 void spurs_mark_service_queue(uint32_t queue)
 {
@@ -3065,6 +3086,32 @@ static void jc_execute(int slot)
 
         if (op == 7) {
             if (ext == (7 | (15 << 3))) {                     /* END */
+                /* libspurs Overview, Request SPU Count: "When the END command
+                 * is reached, the request SPU count will also be set to 0. It
+                 * will be reset to the original value when
+                 * cellSpursRunJobChain() is next called." A run issued before
+                 * the streamer read this END is cancelled by it; only a run
+                 * issued after it -- after the guest replaced the END, as the
+                 * Dynamic Job Additions section requires -- resumes the chain.
+                 * Carrying those earlier runs past the END kept the walker
+                 * polling it, and it started AC1's render chain (0x104D9380)
+                 * mid-list as soon as the PPU's rewrite of the next frame's list
+                 * reached the old END slot -- the sort job ran before its
+                 * producer, the draw lists got empty items, and the draw loop
+                 * called through a null material after NEW.
+                 *
+                 * Hardware does the END read and the count reset under the
+                 * command-list lock, so a guest that replaces the END and then
+                 * runs the chain is never lost. Here: cancel the runs first,
+                 * THEN look at the slot again -- if the guest replaced the END
+                 * meanwhile, its run may be among those just cancelled, so carry
+                 * on walking instead of parking.
+                 * SPURS_JC_KEEP_RUNS=1 restores the old behaviour for A/B. */
+                { static int s_kr = -1; if (s_kr < 0) s_kr = getenv("SPURS_JC_KEEP_RUNS") ? 1 : 0;
+                  if (!s_kr) _InterlockedExchange(&s_jobchains[slot].rerun, 0);
+                  MemoryBarrier();
+                  const int replaced = !s_kr && vm_read64(pc) != cmd;
+                  if (replaced) continue; }
                 ps3_log("[cellSpurs] chain 0x%08X: END after %d job(s) "
                         "(parked on the END at 0x%08X)\n", jc_ea, jobs, pc);
                 if (jobs) jc_signal_done(jc_ea, jobs - 1);
@@ -3136,12 +3183,17 @@ static DWORD WINAPI jc_thread(LPVOID p)
     for (;;) {
         jc_execute(slot);
 
-        pending += _InterlockedExchange(&s_jobchains[slot].rerun, 0);
+        /* Runs still latched here came in after the walk read its END (the
+         * END read cancels the earlier ones -- see jc_execute), i.e. after the
+         * guest replaced the END and kicked again: each is owed a walk. A walk
+         * that ran jobs has served every run that was pending before it. */
+        const long fresh = _InterlockedExchange(&s_jobchains[slot].rerun, 0);
+        if (s_jobchains[slot].last_jobs > 0) pending = fresh;
+        else pending += fresh;
 
         if (pending > 0) {
-            if (s_jobchains[slot].last_jobs > 0) 
+            if (s_jobchains[slot].last_jobs > 0)
             {
-                pending--;              /* this walk earned one request */
                 stall = 0;
                 continue;               /* still holding `running` */
             }

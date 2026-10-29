@@ -610,6 +610,14 @@ extern "C" void ps3_indirect_call_to(ppu_context* ctx, uint32_t target);
  * pointer table the recomp never fills). See --hle-stubs. */
 extern "C" void ps3_hle_call(unsigned int nid, ppu_context* ctx);
 
+/* Guest setjmp/longjmp between stacks (coroutines) -- runtime/ppu/ppu_guest_jmp.cpp.
+ * The lifter calls these from functions shaped like the CRT's setjmp/longjmp
+ * (see _gjmp_shape): a longjmp to a buffer saved on another stack becomes a host
+ * fiber switch, since lifted code cannot change host stacks by loading r1. */
+extern "C" void ppu_gjmp_setjmp(ppu_context* ctx, uint32_t ea);
+extern "C" void ppu_gjmp_longjmp_begin(ppu_context* ctx);
+extern "C" void ppu_gjmp_longjmp_switch(ppu_context* ctx, uint32_t ea);
+
 /* Trampoline function pointer for cross-fragment branches (TLS).
  * PPU_THREAD_LOCAL comes from ppu_recomp.h, included above. */
 extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
@@ -994,6 +1002,54 @@ class LiftedFunction:
 _MAX_MID_TAIL = 0x6000
 
 
+def _gjmp_shape(range_insns) -> tuple[str, int] | None:
+    """Recognise the CRT's setjmp / longjmp and say where the runtime hooks go.
+
+    Lifted code cannot switch host stacks: a longjmp to a buffer saved on
+    another stack (setjmp/longjmp coroutines -- AC1's frame-job scheduler)
+    used to load that stack's r1 and then return on the current host stack,
+    so every epilogue after it popped frames of the wrong guest stack. The
+    runtime (ppu_guest_jmp.cpp) turns such a longjmp into a host fiber switch;
+    it needs to see every setjmp and longjmp to do it.
+
+    setjmp: leaf (no calls), `std r1,0(r3)` and `mflr`, ending `li r3,0; blr`
+            with r3 untouched between the r1 store and the li. Returns
+            ("setjmp", addr of that li): the hook goes before it, r3 = buffer.
+    longjmp: leaf, `ld r1,0(r3)`, `ld r2,8(r3)` and `mtlr`. Returns
+            ("longjmp", addr of the r1 load): the snapshot hook goes before it
+            (before any register is loaded), the switch hook before each blr.
+    """
+    def ops(i):
+        return [o.strip() for o in i.operands.split(",")]
+    def is_mem(i, mn, rt, disp, base):
+        if i.mnemonic != mn:
+            return False
+        o = ops(i)
+        return len(o) == 2 and o[0] == rt and o[1].replace("0x0(", "0(").replace("0x8(", "8(") == f"{disp}({base})"
+    calls = ("bl", "bla", "bctrl", "blrl", "sc")
+    if not range_insns or any(i.mnemonic in calls for i in range_insns):
+        return None
+    mns = {i.mnemonic for i in range_insns}
+
+    r1_ld = next((i for i in range_insns if is_mem(i, "ld", "r1", 0, "r3")), None)
+    if (r1_ld is not None and "mtlr" in mns and "blr" in mns and
+            any(is_mem(i, "ld", "r2", 8, "r3") for i in range_insns)):
+        return ("longjmp", r1_ld.addr)
+
+    r1_st = next((k for k, i in enumerate(range_insns) if is_mem(i, "std", "r1", 0, "r3")), None)
+    if r1_st is None or "mflr" not in mns or range_insns[-1].mnemonic != "blr":
+        return None
+    li = next((k for k in range(len(range_insns) - 2, r1_st, -1)
+               if range_insns[k].mnemonic == "li" and ops(range_insns[k]) == ["r3", "0"]), None)
+    if li is None:
+        return None
+    for i in range_insns[r1_st + 1:li]:     # r3 must still be the buffer at the li
+        o = ops(i)
+        if (o and o[0] == "r3" and not i.mnemonic.startswith(("st", "cmp", "b", "mt", "dcb"))):
+            return None
+    return ("setjmp", range_insns[li].addr)
+
+
 def _last_line_is_terminator(body_lines: list[str]) -> bool:
     """True if the function's last instruction is an unconditional terminator
     (return / internal goto / direct call / unconditional tail-call). A syscall is
@@ -1163,12 +1219,25 @@ class PPULifter:
                     if start <= _c < end:
                         internal_targets.add(_c)
 
+        # setjmp/longjmp: runtime hooks for stack-switching longjmps (_gjmp_shape).
+        gjmp = _gjmp_shape(range_insns)
+        if gjmp and gjmp[0] == "longjmp":
+            func.body_lines.append("    uint32_t _gj_ea = 0;   /* longjmp buffer (ppu_guest_jmp.cpp) */")
+
         emitted_labels: set[int] = set()
         for insn in range_insns:
             # Label
             if insn.addr in internal_targets:
                 func.body_lines.append(f"loc_{insn.addr:08X}:")
                 emitted_labels.add(insn.addr)
+
+            if gjmp:
+                if gjmp[0] == "setjmp" and insn.addr == gjmp[1]:
+                    func.body_lines.append("    ppu_gjmp_setjmp(ctx, (uint32_t)ctx->gpr[3]);")
+                elif gjmp[0] == "longjmp" and insn.addr == gjmp[1]:
+                    func.body_lines.append("    _gj_ea = (uint32_t)ctx->gpr[3]; ppu_gjmp_longjmp_begin(ctx);")
+                elif gjmp[0] == "longjmp" and insn.mnemonic == "blr":
+                    func.body_lines.append("    ppu_gjmp_longjmp_switch(ctx, _gj_ea);")
 
             patch = self.insn_patches.get(insn.addr)
             if patch is not None:
@@ -4717,6 +4786,28 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts
                             if w2.mnemonic in ('lwz', 'ld') and len(b) == 2 and '(r2)' in b[1]:
                                 disp = mem_disp(b[1]); r_base = cand
                                 base_is_ld = (w2.mnemonic == 'ld')
+                            elif w2.mnemonic in ('lwz', 'ld') and len(b) == 2 and '(' in b[1]:
+                                # Spilled TWO-LEVEL base: `lwz r30,d1(r2)` in the
+                                # prologue, `lwz r7,d2(r30); std r7,s(r1)` before
+                                # a loop, `ld r8,s(r1); lwzx; add; mtctr; bctr`
+                                # inside it. AC1 func_01089330 (a Havok shape
+                                # decoder, 29 cases): unresolved, its bctr lifted
+                                # to an indirect tail call, the cases ran as
+                                # split-off functions that never restored the
+                                # decoder's callee-saved registers, and its caller
+                                # func_00FE97C4 got r17 back as a data pointer --
+                                # its TLS read through r17 came up NULL and the
+                                # vcall at 0xFEA32C jumped to address 0.
+                                _mid2 = b[1][b[1].index('(') + 1:-1].strip()
+                                for w3 in reversed([x for x in _live(_scan_lo(i), i) if x.addr < w2.addr]):
+                                    c3 = [x.strip() for x in w3.operands.split(',')]
+                                    if not c3 or c3[0] != _mid2 or w3.mnemonic.startswith(('st', 'lf')):
+                                        continue
+                                    if w3.mnemonic in ('lwz', 'ld') and len(c3) == 2 and '(r2)' in c3[1]:
+                                        disp = mem_disp(c3[1]); r_base = cand
+                                        base_is_ld = (w3.mnemonic == 'ld')
+                                        disp2 = mem_disp(b[1]); disp2_is_ld = (w2.mnemonic == 'ld')
+                                    break       # nearest definition wins
                             break               # nearest definition wins, TOC load or not
                 elif w.mnemonic in ('lwz', 'ld') and len(a) == 2 and '(' in a[1]:
                     # TWO-LEVEL base: `lwz r30, d1(r2); lwz r11, d2(r30)`. The
