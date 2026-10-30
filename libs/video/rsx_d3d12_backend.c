@@ -2266,8 +2266,8 @@ static u8 gl_blend_op_d3d(u32 e)
 /* Pack the guest's face-culling state for the PSO key.
  * bit0 = cull enabled, bit1 = cull FRONT (else BACK), bit2 = front face is CCW.
  * RSX/GL enums: CULL_FACE FRONT=0x0404 BACK=0x0405 FRONT_AND_BACK=0x0408;
- * FRONT_FACE CW=0x0900 CCW=0x0901. rsx_commands seeds cull_face/front_face with
- * plain 1/0 before any register arrives, so treat those defaults as BACK/CW. */
+ * FRONT_FACE CW=0x0900 CCW=0x0901. rsx_commands seeds both with the RSX reset
+ * values (BACK, CCW) before any register arrives. */
 static u32 rsx_cull_key(const rsx_state* st)
 {
     if (!st) return 0;
@@ -3912,7 +3912,16 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
                        ? s_d3d.vp_vs[vs_idx].uses_c03 : s_d3d.vp_uses_c03;
     float* c = (float*)dst;
     float c00 = c[0];
-    int garbage = !(c00 > 0.0f && c00 < 8.0f);
+    /* Garbage means never written (all zero) or not numbers. It used to be
+     * "c[0].x outside (0, 8)", which a real view-projection fails whenever the
+     * camera's yaw makes that term negative: AC1's menu camera has c[0].x =
+     * -0.907, every 3D draw got this fixed projection with no view in it, and
+     * its cloud billboards piled up in a corner of the screen. */
+    int garbage = 1;
+    for (int _i = 0; _i < 16; _i++) {
+        if (c[_i] != c[_i] || c[_i] > 1e30f || c[_i] < -1e30f) { garbage = 1; break; }
+        if (c[_i] != 0.0f) garbage = 0;
+    }
     if (env_on("VP_NOFIXPROJ", &s_env_vp_nofixproj)) garbage = 0;
     if ((garbage && uses_c03) || env_on("VP_FIXPROJ", &s_env_vp_fixproj)) {
         { static int _fb = 0; if (PS3_LOG_FIRST(_fb, 6))

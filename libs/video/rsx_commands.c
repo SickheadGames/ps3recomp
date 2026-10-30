@@ -72,9 +72,13 @@ void rsx_state_init(rsx_state* state)
     state->depth_func = 1; /* LESS */
     state->depth_mask = 1;
 
-    /* Default cull */
-    state->cull_face = 1; /* BACK */
-    state->front_face = 0; /* CW */
+    /* Default cull: the RSX reset values, CULL_FACE BACK and FRONT_FACE CCW
+     * (as rsx_dispatch.c seeds them). FRONT_FACE was 0, which the backends
+     * read as CW: AC1 never writes the register, so every culled draw kept
+     * the faces it should have dropped -- the title's cloud billboards and
+     * digital effects vanished once their camera matrix arrived intact. */
+    state->cull_face = 0x0405u;  /* BACK */
+    state->front_face = 0x0901u; /* CCW */
 
     /* Colour target A, as libgcm sets up. With 0 (NONE) a title that never
      * writes the register would look like it draws depth only. */
