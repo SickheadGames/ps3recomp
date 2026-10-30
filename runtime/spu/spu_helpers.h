@@ -317,10 +317,32 @@ static inline u128 spu_xor(u128 a, u128 b) {
 #else
 static inline u128 spu_xor(u128 a, u128 b) { return spu_xor_ref(a, b); }
 #endif
+/* MSVC x64 (no SPU_X86: MSVC never defines __SSE4_1__) gets explicit SSE2 for
+ * the complemented bitwise ops. Left as scalar u64 code, MSVC 14.38's
+ * auto-vectorizer turns `a & ~b` into ANDNPS and then stores the wrong
+ * register: in AC1's Havok SPU job queue, `andc $r2,$r2,$r6` came out as
+ *     andnps xmm6,xmm0 ; movaps xmm6,[rsp+50h] ; movups [ctx+r2],xmm0
+ * i.e. r2 kept its pre-andc value. "active==0 && queues empty" became just
+ * "queues empty", the master tasks quit mid-step and the PPU waited for ever.
+ * The intrinsics do not go through that path. Lane order does not matter to
+ * bitwise ops. */
+#if defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64) && !SPU_X86 && \
+    !defined(SPU_SCALAR_HELPERS)
+#include <emmintrin.h>
+#define SPU_MSVC_SSE2 1
+static inline __m128i spu__ml(u128 a) { return _mm_loadu_si128((const __m128i*)&a); }
+static inline u128 spu__ms(__m128i v) { u128 r; _mm_storeu_si128((__m128i*)&r, v); return r; }
+static inline u128 spu_nand(u128 a, u128 b){ return spu__ms(_mm_xor_si128(_mm_and_si128(spu__ml(a), spu__ml(b)), _mm_set1_epi32(-1))); }
+static inline u128 spu_nor(u128 a, u128 b) { return spu__ms(_mm_xor_si128(_mm_or_si128(spu__ml(a), spu__ml(b)), _mm_set1_epi32(-1))); }
+static inline u128 spu_andc(u128 a, u128 b){ return spu__ms(_mm_andnot_si128(spu__ml(b), spu__ml(a))); }
+static inline u128 spu_orc(u128 a, u128 b) { return spu__ms(_mm_or_si128(spu__ml(a), _mm_xor_si128(spu__ml(b), _mm_set1_epi32(-1)))); }
+#else
+#define SPU_MSVC_SSE2 0
 static inline u128 spu_nand(u128 a, u128 b){ u128 r; r._u64[0]=~(a._u64[0]&b._u64[0]); r._u64[1]=~(a._u64[1]&b._u64[1]); return r; }
 static inline u128 spu_nor(u128 a, u128 b) { u128 r; r._u64[0]=~(a._u64[0]|b._u64[0]); r._u64[1]=~(a._u64[1]|b._u64[1]); return r; }
 static inline u128 spu_andc(u128 a, u128 b){ u128 r; r._u64[0]=a._u64[0]&~b._u64[0]; r._u64[1]=a._u64[1]&~b._u64[1]; return r; }
 static inline u128 spu_orc(u128 a, u128 b) { u128 r; r._u64[0]=a._u64[0]|~b._u64[0]; r._u64[1]=a._u64[1]|~b._u64[1]; return r; }
+#endif
 static inline u128 spu_andi_ref(u128 a, int32_t imm){ u128 r; for(int i=0;i<4;i++) r._u32[i]=a._u32[i]&(uint32_t)imm; return r; }
 #if defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS) && !defined(SPU_SCALAR_INT)
 static inline u128 spu_andi(u128 a, int32_t imm) {
@@ -463,6 +485,10 @@ static inline u128 spu_selb(u128 a, u128 b, u128 c) {
 #elif SPU_X86
 static inline u128 spu_selb(u128 a, u128 b, u128 c) {
     const __m128i m = spu__xl(c); return spu__xs(_mm_or_si128(_mm_andnot_si128(m, spu__xl(a)), _mm_and_si128(m, spu__xl(b))));
+}
+#elif SPU_MSVC_SSE2   /* same a & ~c miscompile as spu_andc above */
+static inline u128 spu_selb(u128 a, u128 b, u128 c) {
+    const __m128i m = spu__ml(c); return spu__ms(_mm_or_si128(_mm_andnot_si128(m, spu__ml(a)), _mm_and_si128(m, spu__ml(b))));
 }
 #else
 static inline u128 spu_selb(u128 a, u128 b, u128 c) { return spu_selb_ref(a, b, c); }

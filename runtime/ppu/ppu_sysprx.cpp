@@ -18,6 +18,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <mutex>
+#include <unordered_map>
+#include <vector>
+#include <algorithm>
+#include "ps3emu/error_codes.h"
 /* win32_compat.h is <windows.h> on Windows (CRITICAL_SECTION for the real
  * lwmutex exclusion) and the POSIX shims elsewhere -- Sleep, DWORD, QPC. */
 #include "../platform/win32_compat.h"
@@ -510,31 +515,65 @@ static void sys_ppu_thread_get_id(ppu_context* ctx)
     ctx->gpr[3] = 0;
 }
 
-/* sys_mmapper_allocate_memory(u32 size, u64 flags, vm::ptr<u32> mem_id) ->
- * hand back a unique opaque id; the backing is the flat VM, so the later
- * search_and_map just needs a non-zero id to track. */
-/* id -> size so sys_mmapper_search_and_map (lv2 337) can lay blocks out
- * without overlap. Ids are dense from 0x1000. */
-static uint32_t s_mm_sizes[256];
+/* sys_mmapper physical blocks. The VM is flat, so mapping moves nothing, but
+ * the bookkeeping is real: each id carries its size, which is charged to the
+ * user-memory pool (sys_memory_charge) until it is freed; map_memory records
+ * where an id went so unmap_memory can hand it back, as LV2 does. AC1's memory
+ * manager frees exactly the id unmap returned, and purges only when
+ * allocate_memory reports ENOMEM (see sys_memory_charge). */
+extern "C" int  sys_memory_charge(uint32_t size);
+extern "C" void sys_memory_uncharge(uint32_t size);
+
+struct MmBlock { uint32_t size; bool charged; uint32_t addr; uint32_t page; };   /* addr: last mapped at, 0 = never */
+static std::mutex s_mm_mu;
+static std::unordered_map<uint32_t, MmBlock>  s_mm_blocks;   /* id -> block */
+static std::unordered_map<uint32_t, uint32_t> s_mm_mapped;   /* addr -> id */
 static uint32_t s_mmapper_next_id = 0x1000;
+
+/* id -> size so sys_mmapper_search_and_map (lv2 337) can lay blocks out
+ * without overlap. */
 extern "C" uint32_t ps3_mmapper_block_size(uint32_t mem_id)
 {
-    uint32_t i = mem_id - 0x1000u;
-    return (i < 256) ? s_mm_sizes[i] : 0;
+    std::lock_guard<std::mutex> g(s_mm_mu);
+    auto it = s_mm_blocks.find(mem_id);
+    return it != s_mm_blocks.end() ? it->second.size : 0;
 }
 
-static uint32_t mmapper_new_id(uint32_t size)
+static uint32_t mmapper_new_id(uint32_t size, bool charged, uint64_t flags)
 {
+    std::lock_guard<std::mutex> g(s_mm_mu);
     uint32_t id = s_mmapper_next_id++;
-    if (id - 0x1000u < 256) s_mm_sizes[id - 0x1000u] = size;
+    s_mm_blocks[id] = MmBlock{ size, charged, 0, (flags & 0x400) ? 0x100000u : 0x10000u };
     return id;
 }
 
+/* Record id as mapped at addr (s_mm_mu held). The block's contents live in its
+ * physical pages, so they go wherever it is mapped: AC1's pager
+ * (func_00D02220) moves a page by unmapping its id and mapping that id at the
+ * new address, which in the flat VM is a copy. A block mapped for the first
+ * time reads as zero, as fresh LV2 memory does. */
+static void mmapper_place(uint32_t addr, uint32_t id, MmBlock& b)
+{
+    if (!b.addr)              memset(vm_base + addr, 0, b.size);
+    else if (b.addr != addr)  memmove(vm_base + addr, vm_base + b.addr, b.size);
+    b.addr = addr;
+    s_mm_mapped[addr] = id;
+}
+
+/* sys_mmapper_allocate_memory(u32 size, u64 flags, vm::ptr<u32> mem_id) */
 static void sys_mmapper_allocate_memory(ppu_context* ctx)
 {
     uint32_t size       = (uint32_t)ctx->gpr[3];
     uint32_t mem_id_ptr = (uint32_t)ctx->gpr[5];
-    uint32_t id         = mmapper_new_id(size);
+    if (!size) { ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)CELL_EINVAL; return; }
+    if (!sys_memory_charge(size)) {
+        static long s_n = 0;
+        if (s_n++ < 16 || getenv("PS3_MEMTRACE"))
+            ps3_log("[mmapper] allocate_memory(size=0x%X) -> ENOMEM (#%ld)\n", size, s_n);
+        ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)CELL_ENOMEM;
+        return;
+    }
+    uint32_t id = mmapper_new_id(size, true, ctx->gpr[4]);
     if (getenv("PS3_MEMTRACE"))
         ps3_log("[mmapper] allocate_memory(size=0x%X flags=0x%llX id_ptr=0x%X) -> id 0x%X\n",
                 size, (unsigned long long)ctx->gpr[4], mem_id_ptr, id);
@@ -543,16 +582,103 @@ static void sys_mmapper_allocate_memory(ppu_context* ctx)
 }
 /* sys_mmapper_allocate_memory_from_container(u32 size, u32 container, u64 flags,
  * vm::ptr<u32> mem_id) -> id in *r6. flОw's CRT uses this for its heap/mutex pool;
- * it was previously UNregistered (CRT saw failure -> "not enough memory"). */
+ * it was previously UNregistered (CRT saw failure -> "not enough memory").
+ * Container memory was set aside when the container was made: not charged. */
 static void sys_mmapper_allocate_memory_from_container(ppu_context* ctx)
 {
     uint32_t size = (uint32_t)ctx->gpr[3];
     uint32_t mem_id_ptr = (uint32_t)ctx->gpr[6];
-    uint32_t id = mmapper_new_id(size);
+    uint32_t id = mmapper_new_id(size, false, ctx->gpr[5]);
     if (getenv("PS3_MEMTRACE"))
         ps3_log("[mmapper] alloc_from_container(size=0x%X cid=0x%X flags=0x%llX id_ptr=0x%X) -> id 0x%X\n",
                 size, (uint32_t)ctx->gpr[4], (unsigned long long)ctx->gpr[5], mem_id_ptr, id);
     if (mem_id_ptr) vm_write32(mem_id_ptr, id);
+    ctx->gpr[3] = 0;
+}
+
+/* sys_mmapper_map_memory(u32 addr, u32 mem_id, u64 flags) */
+static void sys_mmapper_map_memory(ppu_context* ctx)
+{
+    uint32_t addr = (uint32_t)ctx->gpr[3], id = (uint32_t)ctx->gpr[4];
+    if (getenv("PS3_MEMTRACE"))
+        ps3_log("[mmapper] map_memory(addr=0x%08X id=0x%X flags=0x%llX) lr=%08X\n", addr, id,
+                (unsigned long long)ctx->gpr[5], (uint32_t)ctx->lr);
+    std::lock_guard<std::mutex> g(s_mm_mu);
+    auto it = s_mm_blocks.find(id);
+    if (it == s_mm_blocks.end()) { ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)CELL_ESRCH; return; }
+    mmapper_place(addr, id, it->second);
+    ctx->gpr[3] = 0;
+}
+
+/* sys_mmapper_search_and_map (lv2 337, dispatched from ppu_loader.cpp): map
+ * mem_id at the lowest free page-aligned address of the reservation holding
+ * start, at or above start. Free means not covered by a block mapped now, so
+ * unmapped space is reused. The old version bumped a cursor and rounded every
+ * block up to 1MB, so AC1's main heap -- grown 64K-192K at a time through
+ * func_00CF4C3C -- ran out of its 256MB range after ~256 maps and every engine
+ * allocation after that returned NULL in the middle of the first level load. */
+extern "C" int sys_mmapper_reservation_bounds(uint32_t addr, uint32_t* start, uint32_t* end);
+extern "C" int64_t ps3_mmapper_search_and_map(uint32_t start, uint32_t id, uint32_t* out)
+{
+    uint32_t rs, re;
+    if (!sys_mmapper_reservation_bounds(start, &rs, &re)) return (int64_t)(int32_t)CELL_EINVAL;
+    std::lock_guard<std::mutex> g(s_mm_mu);
+    auto it = s_mm_blocks.find(id);
+    if (it == s_mm_blocks.end()) return (int64_t)(int32_t)CELL_ESRCH;
+    const uint64_t align = it->second.page;
+    const uint64_t size  = (it->second.size + align - 1) & ~(align - 1);
+    std::vector<std::pair<uint32_t, uint32_t>> used;          /* [begin, end) in [rs, re) */
+    for (const auto& m : s_mm_mapped) {
+        if (m.first < rs || m.first >= re) continue;
+        auto b = s_mm_blocks.find(m.second);
+        uint32_t sz = b != s_mm_blocks.end() ? b->second.size : 0x10000u;
+        used.push_back({ m.first, m.first + sz });
+    }
+    std::sort(used.begin(), used.end());
+    uint64_t cand = start > rs ? start : rs;
+    cand = (cand + align - 1) & ~(align - 1);
+    for (const auto& u : used) {
+        if (cand + size <= u.first) break;
+        if (u.second > cand) cand = (u.second + align - 1) & ~(align - 1);
+    }
+    if (cand + size > re) return (int64_t)(int32_t)CELL_ENOMEM;
+    mmapper_place((uint32_t)cand, id, it->second);
+    *out = (uint32_t)cand;
+    return CELL_OK;
+}
+
+/* sys_mmapper_unmap_memory(u32 addr, vm::ptr<u32> mem_id) */
+static void sys_mmapper_unmap_memory(ppu_context* ctx)
+{
+    uint32_t addr = (uint32_t)ctx->gpr[3], id_ptr = (uint32_t)ctx->gpr[4];
+    uint32_t id = 0;
+    {
+        std::lock_guard<std::mutex> g(s_mm_mu);
+        auto it = s_mm_mapped.find(addr);
+        if (it != s_mm_mapped.end()) { id = it->second; s_mm_mapped.erase(it); }
+    }
+    if (getenv("PS3_MEMTRACE"))
+        ps3_log("[mmapper] unmap_memory(addr=0x%08X) -> id 0x%X lr=%08X\n", addr, id, (uint32_t)ctx->lr);
+    if (!id) { ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)CELL_EINVAL; return; }
+    if (id_ptr) vm_write32(id_ptr, id);
+    ctx->gpr[3] = 0;
+}
+
+/* sys_mmapper_free_memory(u32 mem_id) */
+static void sys_mmapper_free_memory(ppu_context* ctx)
+{
+    uint32_t id = (uint32_t)ctx->gpr[3];
+    MmBlock b{ 0, false, 0, 0 };
+    bool found = false;
+    {
+        std::lock_guard<std::mutex> g(s_mm_mu);
+        auto it = s_mm_blocks.find(id);
+        if (it != s_mm_blocks.end()) { b = it->second; found = true; s_mm_blocks.erase(it); }
+    }
+    if (getenv("PS3_MEMTRACE"))
+        ps3_log("[mmapper] free_memory(id=0x%X) size=0x%X lr=%08X\n", id, b.size, (uint32_t)ctx->lr);
+    if (!found) { ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)CELL_ESRCH; return; }
+    if (b.charged) sys_memory_uncharge(b.size);
     ctx->gpr[3] = 0;
 }
 
@@ -1047,7 +1173,7 @@ extern "C" void ppu_sysprx_register(void)
     ps3_hle_register_ctx(ps3_compute_nid("sys_ppu_thread_exit"),        "sys_ppu_thread_exit",        hle_ppu_thread_exit);
     ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_allocate_memory"), "sys_mmapper_allocate_memory", sys_mmapper_allocate_memory);
     ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_allocate_memory_from_container"), "sys_mmapper_allocate_memory_from_container", sys_mmapper_allocate_memory_from_container);
-    ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_map_memory"),     "sys_mmapper_map_memory",     crt_ok);
-    ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_unmap_memory"),   "sys_mmapper_unmap_memory",   crt_ok);
-    ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_free_memory"),    "sys_mmapper_free_memory",    crt_ok);
+    ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_map_memory"),     "sys_mmapper_map_memory",     sys_mmapper_map_memory);
+    ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_unmap_memory"),   "sys_mmapper_unmap_memory",   sys_mmapper_unmap_memory);
+    ps3_hle_register_ctx(ps3_compute_nid("sys_mmapper_free_memory"),    "sys_mmapper_free_memory",    sys_mmapper_free_memory);
 }

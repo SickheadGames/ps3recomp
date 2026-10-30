@@ -136,6 +136,28 @@ int64_t sys_memory_allocate(ppu_context* ctx)
     return CELL_OK;
 }
 
+/* Physical memory handed out by sys_mmapper_allocate_memory (ppu_sysprx.cpp)
+ * comes out of the same user-memory pool as sys_memory_allocate. A title's
+ * memory manager relies on running out: AC1's (func_00D0BBE0) purges caches,
+ * which also unmaps their pages, only when allocate_memory fails. Never
+ * failing let it map until its address range was full, and then every engine
+ * allocation came back NULL during the first level load. */
+int sys_memory_charge(uint32_t size)
+{
+    bump_lock();
+    int ok = size <= SYS_MEM_USER_TOTAL - s_total_allocated;
+    if (ok) s_total_allocated += size;
+    bump_unlock();
+    return ok;
+}
+
+void sys_memory_uncharge(uint32_t size)
+{
+    bump_lock();
+    s_total_allocated = size <= s_total_allocated ? s_total_allocated - size : 0;
+    bump_unlock();
+}
+
 /* ---------------------------------------------------------------------------
  * sys_memory_free
  *
@@ -165,10 +187,11 @@ int64_t sys_memory_get_user_memory_size(ppu_context* ctx)
 {
     uint32_t out_addr = LV2_ARG_PTR(ctx, 0);
 
-    ps3_log("[sys_memory] get_user_memory_size()\n");
     if (out_addr != 0) {
         uint32_t total = SYS_MEM_USER_TOTAL;
         uint32_t avail = total - s_total_allocated;
+        { static int n = 0; if (PS3_LOG_FIRST(n, 8))
+            ps3_log("[sys_memory] get_user_memory_size() -> total=0x%X avail=0x%X\n", total, avail); }
         write_be32(out_addr + 0, total);
         write_be32(out_addr + 4, avail);
     }
@@ -384,6 +407,22 @@ int64_t sys_mmapper_search_map_address(uint32_t start, uint32_t size, uint32_t* 
     found->next = (uint32_t)end;
     *out = (uint32_t)addr;
     bump_unlock(); return CELL_OK;
+}
+
+/* Bounds of the reservation holding addr (or the first one, for addr 0), for
+ * sys_mmapper_search_and_map's first-fit search (ppu_sysprx.cpp). */
+int sys_mmapper_reservation_bounds(uint32_t addr, uint32_t* start, uint32_t* end)
+{
+    int ok = 0;
+    bump_lock();
+    for (int i = 0; i < SYS_MEMORY_ALLOC_MAX; ++i) {
+        const mapper_reservation* r = &s_mapper_reservations[i];
+        if (r->start && (!addr || (addr >= r->start && addr < r->end))) {
+            *start = r->start; *end = r->end; ok = 1; break;
+        }
+    }
+    bump_unlock();
+    return ok;
 }
 
 /* ---------------------------------------------------------------------------

@@ -44,6 +44,9 @@
 
 extern "C" uint8_t* vm_base;
 extern "C" void ps3_indirect_call(ppu_context* ctx);
+/* ps3_indirect_call's per-thread nesting counters (ppu_loader.cpp). */
+extern "C" int* ps3_ppu_dispatch_depth_slot(void);
+extern "C" int* ps3_ppu_vcall_sp_slot(void);
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -130,6 +133,9 @@ VOID CALLBACK co_entry(void* p)
     *ctx = st->regs;
     delete st;
     const uint32_t entry = (uint32_t)ctx->lr;
+    /* A fresh host stack: no ps3_indirect_call frames on it yet. */
+    *ps3_ppu_dispatch_depth_slot() = 0;
+    *ps3_ppu_vcall_sp_slot() = 0;
     ps3_log("[gjmp] tid=%u coroutine start buf=0x%08X entry=0x%08X r1=0x%08X\n",
             (unsigned)ctx->thread_id, ea, entry, (uint32_t)ctx->gpr[1]);
     ctx->ctr = entry;
@@ -207,7 +213,20 @@ extern "C" void ppu_gjmp_longjmp_switch(ppu_context* ctx, uint32_t ea)
         }
     }
 
+    /* ps3_indirect_call counts its nesting per host thread, but a fiber that
+     * switches away leaves its frames unwound, so a thread-wide count only
+     * grows. AC1 spawns ~3 coroutines a frame; at depth 4000 the guard began
+     * skipping every indirect call on that worker, the frame's job graph
+     * never finished and the title/menu froze (~35 s in). Each fiber keeps
+     * its own count: saved here on its own stack, restored on resume (on
+     * whichever thread resumes it). */
+    const int my_depth = *ps3_ppu_dispatch_depth_slot();
+    const int my_vsp   = *ps3_ppu_vcall_sp_slot();
+
     SwitchToFiber(target);
+
+    *ps3_ppu_dispatch_depth_slot() = my_depth;
+    *ps3_ppu_vcall_sp_slot()       = my_vsp;
 
     /* Resumed: another coroutine longjmp'd to the buffer this fiber saved. Its
      * lifted longjmp loaded our setjmp-time registers and the value in r3;

@@ -3111,7 +3111,16 @@ static void jc_execute(int slot)
                   if (!s_kr) _InterlockedExchange(&s_jobchains[slot].rerun, 0);
                   MemoryBarrier();
                   const int replaced = !s_kr && vm_read64(pc) != cmd;
-                  if (replaced) continue; }
+                  if (replaced) continue;
+                  /* Likewise an urgent command queued since the top of this
+                   * step: real SPURS runs it ahead of the END. AC1's audio
+                   * chain (0x104E3180) is reset by func_00D4B9C4 with
+                   * AddUrgentCommand(RESET_PC) + Run; landing between the
+                   * urgent check and this END read, the Run was cancelled
+                   * above and the RESET_PC left pending with no walker. The
+                   * next job then sat in the ring, and the DARE mixer waited
+                   * on it for ever holding the lwmutex the loader needed. */
+                  if (!s_kr && s_jobchains[slot].urgent_pc) continue; }
                 ps3_log("[cellSpurs] chain 0x%08X: END after %d job(s) "
                         "(parked on the END at 0x%08X)\n", jc_ea, jobs, pc);
                 if (jobs) jc_signal_done(jc_ea, jobs - 1);
@@ -3180,6 +3189,9 @@ static DWORD WINAPI jc_thread(LPVOID p)
      * proven empty. */
     long pending = 0;
     int  stall = 0;
+    /* jc_start counts its run in `rerun` before starting this thread; the
+     * first walk below serves it and every other run already latched. */
+    _InterlockedExchange(&s_jobchains[slot].rerun, 0);
     for (;;) {
         jc_execute(slot);
 
@@ -3264,6 +3276,15 @@ static s32 jc_start(u64 jc_ea, const char* who)
             jc_dump_commands(who, s_jobchains[i].entry_ea, 16);
         }
         if (s_off || !s_jobchains[i].entry_ea) return CELL_OK;
+        /* Publish the run BEFORE testing `running`. Testing first lost runs:
+         * this CAS saw a walker still running, the walker then cleared
+         * `running` and found no run pending, and only then did the increment
+         * land -- a pending run with no walker. AC1's boot loader hung there
+         * with chain 0x102EC880 at running=0 rerun=1, its next job written
+         * over the parked END and never walked. With the increment first, a
+         * walker that clears `running` either sees this run or has already
+         * cleared `running` in time for the CAS below to start a new one. */
+        long q = _InterlockedIncrement(&s_jobchains[i].rerun);
         /* Coalesce: a chain already being walked must not start twice. */
         if (_InterlockedCompareExchange(&s_jobchains[i].running, 1, 0) == 0) {
             HANDLE th = CreateThread(NULL, 1u << 20, jc_thread, (LPVOID)(intptr_t)i, 0, NULL);
@@ -3272,7 +3293,6 @@ static s32 jc_start(u64 jc_ea, const char* who)
         }
         else
         {
-            long q = _InterlockedIncrement(&s_jobchains[i].rerun);
             {
                 static int _n = 0;
                 if (_n++ < 32)

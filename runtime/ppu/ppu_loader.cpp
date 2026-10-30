@@ -3225,6 +3225,8 @@ extern "C" void ppu_unlifted_stub(uint64_t addr, ppu_context* ctx)
 extern "C" int lv2_try_syscall(ppu_context* ctx);
 extern "C" int64_t sys_mmapper_allocate_address(ppu_context* ctx);
 extern "C" int64_t sys_mmapper_search_map_address(uint32_t start, uint32_t size, uint32_t* out);
+extern "C" int64_t ps3_mmapper_search_and_map(uint32_t start, uint32_t id, uint32_t* out);
+extern "C" int64_t sys_memory_get_user_memory_size(ppu_context* ctx);
 
 /* lv2 syscall dispatch: r11 = syscall number, args in r3.. (PPC ABI).
  * A few syscalls the CRT needs at boot are handled inline (boot-tuned); the
@@ -3322,11 +3324,12 @@ extern "C" void lv2_syscall(ppu_context* ctx)
                 bg,(unsigned long long)(tgt-bh),(uint32_t)ctx->gpr[4],(uint32_t)ctx->gpr[5],(uint32_t)ctx->gpr[6]); } }
     switch (num) {
     case 352: {   /* sys_memory_get_user_memory_size(sys_memory_info_t* info)
-                   * info = { u32 total_user_memory; u32 available_user_memory } */
-        uint32_t info = (uint32_t)ctx->gpr[3];
-        if (info) { vm_write32(info + 0, 0x10000000u);   /* 256 MB total */
-                    vm_write32(info + 4, 0x0C000000u); } /* 192 MB available */
-        ctx->gpr[3] = 0;
+                   * info = { u32 total_user_memory; u32 available_user_memory }
+                   * From the real accounting (sys_memory.c), which mmapper
+                   * blocks are charged to: AC1's pager (func_00D02220) evicts
+                   * pages only when available drops under 1MB. A fixed
+                   * "192MB free" meant it never did. */
+        ctx->gpr[3] = (uint64_t)sys_memory_get_user_memory_size(ctx);
         return;
     }
     case 330: {   /* sys_mmapper_allocate_address(u64 size, u64 flags,
@@ -3340,15 +3343,17 @@ extern "C" void lv2_syscall(ppu_context* ctx)
                    * non-overlapping VAs inside the reserved region, sized from
                    * the allocate_memory bookkeeping (PSL1GHT maps its heap
                    * blocks this way; the old stub returned OK without writing
-                   * alloc_addr -> the guest used a garbage pointer). */
-        extern uint32_t ps3_mmapper_block_size(uint32_t mem_id);
+                   * alloc_addr -> the guest used a garbage pointer). The
+                   * search and the bookkeeping live with the other mmapper
+                   * calls in ppu_sysprx.cpp. */
         uint32_t start  = (uint32_t)ctx->gpr[3];
         uint32_t mem_id = (uint32_t)ctx->gpr[4];
         uint32_t outp   = (uint32_t)ctx->gpr[6];
-        uint32_t size = ps3_mmapper_block_size(mem_id);
-        if (!size) size = 0x100000u;
         uint32_t va = 0;
-        int64_t rc = sys_mmapper_search_map_address(start, size, &va);
+        int64_t rc = ps3_mmapper_search_and_map(start, mem_id, &va);
+        if (getenv("PS3_MEMTRACE") || rc != CELL_OK)
+            ps3_log("[mmapper] search_and_map(start=0x%08X id=0x%X) -> rc=0x%X va=0x%08X\n",
+                    start, mem_id, (uint32_t)rc, va);
         if (rc != CELL_OK) {
             ctx->gpr[3] = (uint64_t)rc;
             return;
