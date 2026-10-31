@@ -63,7 +63,7 @@
 /* Fragment texture units the backend tracks, binds and declares in the VP root
  * signature: all 16 of the RSX's. This was 4 -- the root signature held t0-t3
  * and s0-s3 and bind_texture dropped units 4+ -- so a fragment program that
- * samples rsx_tex[4] (AC1's 6-tap bloom downsample) failed PSO creation with
+ * samples rsx_tex[4] (the title's 6-tap bloom downsample) failed PSO creation with
  * "sampler descriptor range ... is not fully bound in root signature". */
 #define RSX_TEX_UNITS     16
 #define MAX_DRAWS         2048  /* per-frame draw records. Sized from the
@@ -148,7 +148,7 @@ typedef struct {
     u32 zeta_w, zeta_h; /* surface clip size for the depth surface (set even when the
                          * stale colour offset is a display buffer, which leaves rt_w/h 0) */
     u32 zeta_x;         /* pixels into the base surface: a zeta offset inside an
-                         * existing surface's rows (AC1's 4 shadow cascades share one
+                         * existing surface's rows (the title's 4 shadow cascades share one
                          * 4096-wide atlas, each at +0x1000 bytes) */
     int no_color;       /* colour target NONE with a depth surface: a depth-only pass */
     int tex_ds[RSX_TEX_UNITS];      /* pre-pass: OffDS read through unit u (its colour copy is tex_rt), -1 = none */
@@ -184,7 +184,7 @@ typedef struct {
     int                   used;        /* referenced this frame */
     u32                   stamp;       /* off_rt_get order: newest of several sizes at one offset wins */
 } OffRT;
-#define MAX_OFF_RTS  32  /* demosaic double-buffers its 6-surface pass chain; AC1's
+#define MAX_OFF_RTS  32  /* demosaic double-buffers its 6-surface pass chain; the title's
                           * luminance chain reuses offsets at 3 sizes (keyed by size) */
 
 /* Depth surface, one per guest zeta offset. The pass chain keeps several
@@ -205,7 +205,7 @@ typedef struct {
 #define RT_SRV_BASE  5   /* SRV heap slots 5.. hold offscreen-RT SRVs, one per OffRT */
 /* Per-draw SRV windows: each VP draw gets RSX_TEX_UNITS consecutive
  * descriptors (t0-t15) so multi-unit fragment programs see all their textures
- * (demosaic's interpolation passes sample 3 units; AC1's bloom downsample
+ * (demosaic's interpolation passes sample 3 units; the title's bloom downsample
  * samples 6). */
 #define DRAW_SRV_BASE 64   /* past DS_SRV_BASE + 2*MAX_OFF_DS */
 #define SRV_HEAP_SIZE (DRAW_SRV_BASE + MAX_DRAWS * RSX_TEX_UNITS)
@@ -234,7 +234,7 @@ typedef struct {
  * so every draw past the fourth got slot -1 from vp_upload_tex_slot ("out of
  * slots") and drew UNTEXTURED. That reads as a correctly-lit but solid black
  * object, which is indistinguishable from a missing texture upload. */
-#define VP_TEX_SLOTS 1024   /* AC1 gameplay binds more than 192 distinct textures a frame:
+#define VP_TEX_SLOTS 1024   /* the title's gameplay binds more than 192 distinct textures a frame:
                              * past the 192nd every one came back null (dark, unlit-looking
                              * walls and characters) */
 /* Guest texture uploads are staged in one persistently mapped upload buffer,
@@ -254,6 +254,7 @@ typedef struct {
     u32 hash;               /* FNV-1a of the ucode */
     ID3DBlob* vs;
     int uses_c03;
+    char* src;              /* the HLSL it was compiled from (RSX_CAP writes it) */
 } VPVSEntry;
 #define VP_VS_CACHE 128 /* wave uses 5+ distinct VPs; at 4 the cache
                          * thrashed every frame and eviction shifted slots
@@ -1528,7 +1529,7 @@ static void d3d12_note_removed(const char* where, HRESULT trigger)
 }
 
 /* Deferred release. A resource replaced while a frame is being recorded may
- * already be referenced by the open command list -- AC1 re-binds one texture
+ * already be referenced by the open command list -- the title re-binds one texture
  * slot at a new size inside a frame, so the first CopyTextureRegion targeted a
  * resource that was released before ExecuteCommandLists. The GPU page-faulted
  * on the freed allocation (DRED: died in CopyTextureRegion, fault VA in a
@@ -1865,6 +1866,13 @@ static void cap_readback_write(ID3D12Resource* res, u32 w, u32 h, u32 dxgi,
 }
 
 #include "rsx_fp_decompiler.h"   /* the capture decompiles each post pass */
+/* How far a fragment program may extend (the walkers stop at its END bit).
+ * 4096 cut the title's lit-surface programs off mid-way: the literal decompile
+ * truncated them, the buffered one rejects a program with no END in range. */
+#define FP_UCODE_MAX 0x10000u
+/* RSX_CAP=file with a number N in rsxcap.txt: the next batch executes ops
+ * 0..N only and is captured, so the surfaces show the chain at op N. */
+static int s_cap_stop_next = -1, s_cap_stop_active = -1;
 static u32 dr_texkind_mask(const D3D12DrawRecord* dr);
 static void rsx_capture_frame(u32 fi, u32 ndraws, u32 capidx)
 {
@@ -1948,7 +1956,7 @@ static void rsx_capture_frame(u32 fi, u32 ndraws, u32 capidx)
      * the HLSL we compile, with the fp_k constants it ran with. Post passes
      * are judged by their arithmetic; the image alone does not say which
      * pass over-brightens. */
-    if (ndraws <= 64 && s_d3d.vp_fpcb_mapped) {
+    if (ndraws <= 128 && s_d3d.vp_fpcb_mapped) {
         extern uint8_t* vm_base;
         extern u32 cellGcmResolveLocated(int, u32);
         static char hl[RSX_FP_HLSL_BUFFER_SIZE];
@@ -1959,8 +1967,8 @@ static void rsx_capture_frame(u32 fi, u32 ndraws, u32 capidx)
             const u32 foff = cellGcmResolveLocated((r->fp_addr & 0x3u) == 1, r->fp_addr & ~0x3u);
             if (foff == 0xFFFFFFFFu) continue;
             const u32 vol = dr_texkind_mask(r) >> 16;
-            const int n = vol ? rsx_fp_decompile_vol_ex(vm_base + foff, 4096, r->fp_ctrl, 0u, vol, hl, sizeof hl)
-                              : rsx_fp_decompile(vm_base + foff, 4096, r->fp_ctrl, hl, sizeof hl);
+            const int n = vol ? rsx_fp_decompile_vol_ex(vm_base + foff, FP_UCODE_MAX, r->fp_ctrl, 0u, vol, hl, sizeof hl)
+                              : rsx_fp_decompile(vm_base + foff, FP_UCODE_MAX, r->fp_ctrl, hl, sizeof hl);
             snprintf(path, sizeof path, "%s/fp_op%03u.hlsl", dir, d);
             FILE* f = fopen(path, "w");
             if (!f) continue;
@@ -1975,7 +1983,18 @@ static void rsx_capture_frame(u32 fi, u32 ndraws, u32 capidx)
             }
             fprintf(f, "*/\n%s\n", n > 0 ? hl : "/* decompile failed */");
             fclose(f);
-            /* Volume textures (AC1's 16^3 colour-grading LUT): the raw guest
+            /* The vertex program it ran with (vs_N.hlsl, once per program). */
+            if (r->vs_idx >= 0 && r->vs_idx < s_d3d.vp_vs_n && s_d3d.vp_vs[r->vs_idx].src) {
+                snprintf(path, sizeof path, "%s/vs_%d.hlsl", dir, r->vs_idx);
+                FILE* vf = fopen(path, "r");
+                if (vf) fclose(vf);
+                else if ((vf = fopen(path, "w")) != NULL) {
+                    fprintf(vf, "/* vs=%d hash=0x%08X */\n%s\n", r->vs_idx,
+                            s_d3d.vp_vs[r->vs_idx].hash, s_d3d.vp_vs[r->vs_idx].src);
+                    fclose(vf);
+                }
+            }
+            /* Volume textures (the title's 16^3 colour-grading LUT): the raw guest
              * bytes, linear slices pitch*h apart -- w*4 pitch assumed (ARGB8). */
             for (int u = 0; u < RSX_TEX_UNITS; u++) {
                 if (!r->tex[u].set || r->tex[u].depth < 2 || !r->tex[u].off) continue;
@@ -2260,11 +2279,13 @@ static int vp_get_vs(const rsx_state* st)
     if (s_d3d.vp_vs_n < VP_VS_CACHE) slot = s_d3d.vp_vs_n++;
     else {  /* evict slot 0 */
         if (s_d3d.vp_vs[0].vs) s_d3d.vp_vs[0].vs->lpVtbl->Release(s_d3d.vp_vs[0].vs);
+        free(s_d3d.vp_vs[0].src);
         memmove(&s_d3d.vp_vs[0], &s_d3d.vp_vs[1], sizeof(VPVSEntry)*(VP_VS_CACHE-1));
         slot = VP_VS_CACHE - 1;
     }
     s_d3d.vp_vs[slot].hash = hash;
     s_d3d.vp_vs[slot].vs   = vb;
+    s_d3d.vp_vs[slot].src  = _strdup(hlsl);
     s_d3d.vp_vs[slot].uses_c03 =
         (strstr(hlsl, "vp_c[0]") || strstr(hlsl, "vp_c[1]") ||
          strstr(hlsl, "vp_c[2]") || strstr(hlsl, "vp_c[3]")) ? 1 : 0;
@@ -2547,7 +2568,7 @@ static u32 dr_cube_mask(const D3D12DrawRecord* dr)
 }
 
 /* Which units are bound to a 3D (volume) texture the upload path can build:
- * linear (LN) uncompressed ARGB8 / B8 with more than one slice. AC1's colour
+ * linear (LN) uncompressed ARGB8 / B8 with more than one slice. The title's colour
  * grade samples a 16x16x16 LUT; read as its first 2D slice (blue = 0) every
  * colour lost its blue and the whole frame went green. Swizzled volumes use a
  * 3D Morton order the per-slice decoder does not do, so they stay 2D.
@@ -2595,7 +2616,7 @@ static int dr_shadow(const D3D12DrawRecord* dr, rsx_fp_shadow_desc out[RSX_TEX_U
     return any;
 }
 /* Which kind of write last touched surface `raw` before draw d this batch:
- * 1 = depth (zeta), 0 = colour, -1 = none. Guest memory aliases: AC1 draws
+ * 1 = depth (zeta), 0 = colour, -1 = none. Guest memory aliases: the title draws
  * its shadow atlas into zeta 0x1680000, then reuses 0x1680000 as the 1280x720
  * scene colour RT, so "is there a depth surface at this offset" alone would
  * replace the scene with a colour copy of the shadow depth. */
@@ -2749,20 +2770,30 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
     /* Hash the CODE, not the constants: with fp_k[] hoisted into the per-draw
      * constant buffer the compiled shader is invariant under constant changes,
      * so hashing them made the pipeline key move every draw. */
+    /* That only holds when the shader really reads its constants from fp_k[]
+     * (kbuf below). The adopted decompiler bakes them in as literals unless
+     * asked for its buffered form, and with literals a code-only key handed
+     * every program that differs only in constants the FIRST one's pipeline:
+     * The title's menu glow pass ran its x0.001 draw with another draw's x0.7, the
+     * glow mask went flat grey and the bloom chain saturated to white. */
     u32 uhash;
-    u32 usz = rsx_fp_program_size(vm_base + off, 4096);
+    u32 usz = rsx_fp_program_size(vm_base + off, FP_UCODE_MAX);
     if (usz == 0) usz = 64;
+    int kbuf;
     {
         s_perf_pso_hashbytes += (int)usz;
         static int consts_inline = -1;
         if (consts_inline < 0) { const char* e = getenv("FP_CONSTBUF");
                                  consts_inline = (e && e[0] == '0') ? 1 : 0; }
-        if (consts_inline) {
+        /* fp_k[] holds 64: a program with more keeps literals (and a full key). */
+        float kt[65 * 4];
+        kbuf = !consts_inline && rsx_fp_extract_consts(vm_base + off, FP_UCODE_MAX, kt, 65) <= 64;
+        if (!kbuf) {
             uhash = 2166136261u;
             const u8* up = vm_base + off;
             for (u32 i = 0; i < usz; i++) { uhash ^= up[i]; uhash *= 16777619u; }
         } else {
-            uhash = rsx_fp_code_hash(vm_base + off, 4096);
+            uhash = rsx_fp_code_hash(vm_base + off, FP_UCODE_MAX);
         }
     }
 
@@ -2885,14 +2916,37 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
     const u32 vol_mask = cube_mask >> 16;
     /* Depth-compare units (shadow maps) go through the shadow-aware entry;
      * every other program keeps the exact call it had. */
-    int n = (key.shadow_lo | key.shadow_hi)
-        ? rsx_fp_decompile_shadow_vol_ex(vm_base + off, 4096, fp_ctrl, 0u, vol_mask, shadow, hlsl, sizeof(hlsl))
+    u32 nk = 0;
+    int n = kbuf
+        ? rsx_fp_decompile_buffered_vol_shadow_ex(vm_base + off, FP_UCODE_MAX, fp_ctrl, 0u, vol_mask,
+                                                  (key.shadow_lo | key.shadow_hi) ? shadow : NULL,
+                                                  hlsl, sizeof(hlsl), &nk)
+        : (key.shadow_lo | key.shadow_hi)
+        ? rsx_fp_decompile_shadow_vol_ex(vm_base + off, FP_UCODE_MAX, fp_ctrl, 0u, vol_mask, shadow, hlsl, sizeof(hlsl))
         : vol_mask
-        ? rsx_fp_decompile_vol_ex(vm_base + off, 4096, fp_ctrl, 0u, vol_mask, hlsl, sizeof(hlsl))
-        : rsx_fp_decompile(vm_base + off, 4096, fp_ctrl, hlsl, sizeof(hlsl));
+        ? rsx_fp_decompile_vol_ex(vm_base + off, FP_UCODE_MAX, fp_ctrl, 0u, vol_mask, hlsl, sizeof(hlsl))
+        : rsx_fp_decompile(vm_base + off, FP_UCODE_MAX, fp_ctrl, hlsl, sizeof(hlsl));
     if (vol_mask) { static int _vn = 0; if (PS3_LOG_FIRST(_vn, 8))
         ps3_log("[VOLTEX] fp=0x%X compiled with volume units mask 0x%X\n", fp_addr, vol_mask); }
     if (n <= 0) { static int _e=0; if(PS3_LOG_FIRST(_e, 16)) ps3_log("[FP] decompile fail (fp=0x%08X)\n", fp_addr); return NULL; }
+    /* Buffered form: lay its cbuffer over our b1 slot (VP_FPCB_STRIDE) --
+     * rsx_texscale[4], rsx_alphatest, fp_k[64] (vp_record_cb fills them per
+     * draw, in rsx_fp_extract_consts order = the decompiler's slot order), then
+     * fp_alpha in the spare slot 69, kept zero: WPOS stays the host position. */
+    if (kbuf) {
+        char decl[160];
+        snprintf(decl, sizeof decl,
+                 "cbuffer PSConstants : register(b1) {\n    float4 fp_constants[%u];\n    float4 fp_alpha;\n};\n",
+                 nk ? nk : 1u);
+        if (!strstr(hlsl, decl)) {
+            static int _e = 0; if (PS3_LOG_FIRST(_e, 8))
+                ps3_log("[FP] fp=0x%08X: buffered cbuffer declaration not found\n", fp_addr);
+            return NULL;
+        }
+        hlsl_replace_all(hlsl, sizeof hlsl, decl,
+                "cbuffer PSConstants : register(b1) {\n    float4 _b1_texscale[4];\n"
+                "    float4 _b1_alphatest;\n    float4 fp_constants[64];\n    float4 fp_alpha;\n};\n");
+    }
     /* FP_LIST=1: every program the title actually compiles, with its size. A
      * fragment program that hangs the GPU shows up here as an implausible
      * instruction count long before it shows up as a TDR. */
@@ -3959,7 +4013,8 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
             u32 foff = cellGcmResolveLocated((dr->fp_addr & 0x3u) == 1,
                                              dr->fp_addr & ~0x3u);
             if (vm_base && foff != 0xFFFFFFFFu)
-                rsx_fp_extract_consts(vm_base + foff, 4096, &ts[20], 64);   /* fp_k[64] */
+                rsx_fp_extract_consts(vm_base + foff, FP_UCODE_MAX, &ts[20], 64);   /* fp_k[64] */
+            ts[276] = ts[277] = ts[278] = ts[279] = 0.0f;   /* fp_alpha (slot 69): host WPOS */
             /* FPK_DBG=1: the fragment constants as the shader will see them.
              * A program whose only output is fp_k[0].xxxx renders black if
              * those constants never arrive, which looks identical from the
@@ -4028,7 +4083,7 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
     const float* vo_ = st->viewport_offset;
     vpx[0] = vpx[1] = vpx[3] = 1.0f;
     vpx[4] = vpx[5] = vpx[7] = 0.0f;
-    /* Once the guest has written the z lane, a z scale of 0 is real: AC1
+    /* Once the guest has written the z lane, a z scale of 0 is real: the title
      * draws its 3-unit sky dome after the scene with viewport z scale 0 /
      * offset 1 (and SET_CLIP_MIN/MAX = 1,1) to pin it to the far plane, so it
      * only shows where nothing was drawn. Reading 0 as "unprogrammed" passed
@@ -4065,7 +4120,7 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
     float c00 = c[0];
     /* Garbage means never written (all zero) or not numbers. It used to be
      * "c[0].x outside (0, 8)", which a real view-projection fails whenever the
-     * camera's yaw makes that term negative: AC1's menu camera has c[0].x =
+     * camera's yaw makes that term negative: the title's menu camera has c[0].x =
      * -0.907, every 3D draw got this fixed projection with no view in it, and
      * its cloud billboards piled up in a corner of the screen. */
     int garbage = 1;
@@ -4168,7 +4223,7 @@ static u32 current_rt_off(u32* out_w, u32* out_h, u32 out_mrt[3])
     /* Surface clip dims when sane; else the window size. Any size works --
      * passes draw normalized full-surface quads -- this only picks resolution. */
     u32 w = st->surface_clip_w, h = st->surface_clip_h;
-    if (w < 1 || w > 4096 || h < 1 || h > 4096) { w = 0; h = 0; }   /* AC1 luminance: 20x11 */
+    if (w < 1 || w > 4096 || h < 1 || h > 4096) { w = 0; h = 0; }   /* luminance chain: 20x11 */
     if (out_w) *out_w = w;
     if (out_h) *out_h = h;
     return raw;
@@ -4187,7 +4242,7 @@ static DXGI_FORMAT rsx_surface_dxgi(u32 fmt)
     }
 }
 
-/* Offscreen RTs are keyed by offset AND size: AC1's luminance chain renders
+/* Offscreen RTs are keyed by offset AND size: the title's luminance chain renders
  * one offset at 80x45, 40x22 and 20x11 within a frame (and samples each at
  * its own size), so a single resource per offset was resized back and forth
  * and every level read whichever size won. off_rt_find (offset only) picks
@@ -5195,7 +5250,7 @@ static void render_frame(void)
     /* A zeta offset that lands inside the rows of another depth surface (its
      * offset minus (offset mod pitch) names a surface this batch also uses, or
      * one we already hold) is a sub-rectangle of that surface, x pixels in.
-     * AC1 renders its 4 shadow cascades this way: zeta 0x1680000 + n*0x1000
+     * The title renders its 4 shadow cascades this way: zeta 0x1680000 + n*0x1000
      * with a 0x4000-byte pitch, one 4096x1024 atlas the lit draws sample. */
     for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
         D3D12DrawRecord* dr = &s_d3d.draws[_d];
@@ -5333,7 +5388,7 @@ static void render_frame(void)
             /* A DEPTH-FORMAT texture (DEPTH24_D8 / DEPTH16: a shadow map) over
              * one of our depth surfaces samples that surface's depth plane:
              * the TEX fetch returns normalized depth (or, with a zfunc set,
-             * the comparison the shader translation emits). AC1's cascaded
+             * the comparison the shader translation emits). The title's cascaded
              * shadow atlas is bound this way on unit 15 and sampled null. */
             /* Only a unit the FP translation compares against (zfunc set): a
              * plain depth-format read wants the RGBA8 reinterpretation the
@@ -5366,7 +5421,7 @@ static void render_frame(void)
             }
             /* A texture that IS one of our offscreen RTs samples that RT, before
              * any of the guesses below. The display-size guess used to run
-             * first, so AC1's final composite -- which samples its 1280x720
+             * first, so the title's final composite -- which samples its 1280x720
              * scene RT -- got the frame copy instead: a copy of a backbuffer
              * nothing had drawn to, so the whole screen came out black. */
             if (dr->tex[_u].set) {
@@ -5382,7 +5437,7 @@ static void render_frame(void)
                 }
             }
             /* A sampler reading a DISPLAY buffer -> the rendered frame. Matched
-             * on the address, not just the size: size alone also caught AC1's
+             * on the address, not just the size: size alone also caught the title's
              * Bink movies, whose 1280x720 Y plane is a plain B8 texture in
              * local memory. Every movie frame (the autosave notice, the AC
              * logo) sampled the frame copy instead of its decoded luma and drew
@@ -5689,7 +5744,9 @@ static void render_frame(void)
             D3D12_CPU_DESCRIPTOR_HANDLE cur_dsv = dsv_handle;
             double _rec0 = perf_on() ? perf_now() : 0.0;
             int seen_small_vp = 0, captured = 0;
+            if (s_cap_stop_next >= 0) { s_cap_stop_active = s_cap_stop_next; s_cap_stop_next = -1; }
             for (u32 d = 0; d < s_d3d.draw_count && d < MAX_DRAWS; d++) {
+                if (s_cap_stop_active >= 0 && (int)d > s_cap_stop_active) break;   /* rsxcap stop op */
                 const D3D12DrawRecord* dr = &s_d3d.draws[d];
                 if (!dr->is_vp) continue;
                 /* Depth surfaces this draw samples directly (shadow maps): readable
@@ -6435,10 +6492,20 @@ skip_dump_consider: ;
             s_next_check = now_ms + 250;
             FILE* f = fopen("rsxcap.txt", "r");
             if (f) {
+                /* A number in the file: stop the NEXT batch after that op and
+                 * capture it, so every surface holds its state at that op. */
+                int stop = -1;
+                if (fscanf(f, "%d", &stop) != 1) stop = -1;
                 fclose(f);
                 remove("rsxcap.txt");
-                rsx_capture_frame(fi, s_dbg_last_draws, s_file_caps++);
+                if (stop >= 0) s_cap_stop_next = stop;
+                else rsx_capture_frame(fi, s_dbg_last_draws, s_file_caps++);
             }
+        }
+        if (s_cap_stop_active >= 0) {   /* this batch ran only up to the stop op */
+            ps3_log("[rsxcap] capture %u stopped after op%03d\n", s_file_caps, s_cap_stop_active);
+            rsx_capture_frame(fi, s_dbg_last_draws, s_file_caps++);
+            s_cap_stop_active = -1;
         }
         cap = NULL;
       }
@@ -6605,7 +6672,7 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
     /* SET_SURFACE_COLOR_TARGET = NONE (0): the hardware has no colour surface
      * bound, so a clear can only touch depth/stencil, whatever the colour mask
      * bits say. The colour offset registers still hold the PREVIOUS pass's
-     * target, and honouring the colour bits cleared that: AC1 clears its
+     * target, and honouring the colour bits cleared that: the title clears its
      * depth-only shadow pass (zeta 0x1680000) right after compositing into the
      * colour surface at the same offset, and the final pass then read zeros. */
     if (s_d3d.current_rsx_state && s_d3d.current_rsx_state->color_target == 0)
@@ -8435,7 +8502,7 @@ void rsx_d3d12_backend_present(void)
      * (wave: black flashes and layout flicker between frames). */
     static int s_seen_content = 0;
     /* A depth-only pass (no_color) is not display work even when its stale
-     * colour offset names a display buffer: AC1's 1024x1024 shadow pass sets
+     * colour offset names a display buffer: the title's 1024x1024 shadow pass sets
      * colour target NONE over offset 0. Counting it presented batches that
      * held only the next frame's shadow pass -- a black frame every few. */
     int has_display = (s_d3d.draw_count == 0 && !s_seen_content);
