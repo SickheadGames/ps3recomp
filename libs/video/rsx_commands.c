@@ -604,11 +604,13 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
     if (method >= 0x0A20 && method < 0x0A30) {
         u32 f = data; float v; memcpy(&v, &f, 4);
         state->viewport_offset[(method - 0x0A20) >> 2] = v;
+        if (method == 0x0A28) state->viewport_z_set = 1;
         return 0;
     }
     if (method >= 0x0A30 && method < 0x0A40) {
         u32 f = data; float v; memcpy(&v, &f, 4);
         state->viewport_scale[(method - 0x0A30) >> 2] = v;
+        if (method == 0x0A38) state->viewport_z_set = 1;
         return 0;
     }
 

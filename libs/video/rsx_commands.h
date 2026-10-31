@@ -370,6 +370,9 @@ typedef struct rsx_state {
      * 4 floats each): window = ndc * scale + offset (pixels; z [0,1]). */
     float viewport_offset[4];
     float viewport_scale[4];
+    /* Set once the guest writes either z lane. A z scale of 0 is then a real
+     * depth range (every fragment at the offset), not "never programmed". */
+    u32 viewport_z_set;
     u32 shader_program;       /* fragment program address (offset | location in bits [0:1]) */
     u32 shader_control;       /* SET_SHADER_CONTROL (0x40 = 32-bit colour exports) */
     u32 fragment_program_addr;

@@ -152,6 +152,10 @@ typedef struct rsx_fp_shadow_desc {
 void rsx_fp_shadow_desc_from_texture(rsx_fp_shadow_desc* out, u32 format,
     u32 dimension, u32 cube, u32 mips, u32 filter, u32 address, u32 control0);
 u32 rsx_fp_texture_units(const u8* ucode, u32 max_bytes);
+int rsx_fp_decompile_shadow_vol_ex(const u8* ucode, u32 max_bytes, u32 ctrl,
+                                   u32 tex_cube_mask, u32 tex_vol_mask,
+                                   const rsx_fp_shadow_desc shadow[16],
+                                   char* out, u32 out_size);
 int rsx_fp_decompile_buffered_shadow_ex(
     const u8* ucode, u32 max_bytes, u32 ctrl, u32 tex_cube_mask,
     const rsx_fp_shadow_desc shadow[16],
