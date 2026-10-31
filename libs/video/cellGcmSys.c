@@ -1322,6 +1322,9 @@ static void nv3089_blit(void)
                out_w, out_h, f, src, in_pitch, dst, dst_pitch, out_x, out_y); } }
 }
 
+/* NV0039 (memory-to-memory copy) method numbers, the ones libgcm sends on
+ * subchannel 1. Everything else on subchannel 1 still goes to the 3D path. */
+static int gcm_is_nv0039(u32 m) { return m == 0x180 || m == 0x184 || m == 0x188 || (m >= 0x30C && m <= 0x328); }
 static void gcm_2d_method(u32 subch, u32 method, u32 data)
 {
     /* GCM2D_TRACE=1: histogram of (subchannel, method) actually seen. The
@@ -1348,6 +1351,45 @@ static void gcm_2d_method(u32 subch, u32 method, u32 data)
               ps3_log("---%c", 10);
           }
       } }
+    /* NV0039 memory-to-memory copy (cellGcmSetTransferData), libgcm's
+     * subchannel 1. BUFFER_NOTIFY (0x328) is the trigger: copy LINE_COUNT
+     * lines of LINE_LENGTH bytes, OFFSET_IN/PITCH_IN -> OFFSET_OUT/PITCH_OUT,
+     * context DMA 0xFEED0000 = local memory, 0xFEED0001 = main (IO offset).
+     * FORMAT is the per-byte stride of each side (1 = contiguous). Without
+     * this, AC1's VRAM defragmenter repointed meshes to new blocks whose data
+     * never arrived -- the meshes drew from whatever the block held before. */
+    if (subch == 1) {
+        static struct { u32 dma_in, dma_out, off_in, off_out, pitch_in, pitch_out, len, lines, fmt; } m2m;
+        switch (method) {
+        case 0x0180: return;                         /* SET_CONTEXT_DMA_NOTIFIES */
+        case 0x0184: m2m.dma_in = data; return;
+        case 0x0188: m2m.dma_out = data; return;
+        case 0x030C: m2m.off_in = data; return;
+        case 0x0310: m2m.off_out = data; return;
+        case 0x0314: m2m.pitch_in = data; return;
+        case 0x0318: m2m.pitch_out = data; return;
+        case 0x031C: m2m.len = data; return;
+        case 0x0320: m2m.lines = data; return;
+        case 0x0324: m2m.fmt = data; return;
+        case 0x0328: {
+            const u32 src = cellGcmResolveLocated(m2m.dma_in != 0xFEED0001u, m2m.off_in);
+            const u32 dst = cellGcmResolveLocated(m2m.dma_out != 0xFEED0001u, m2m.off_out);
+            const u32 si = m2m.fmt & 0xFF, di = (m2m.fmt >> 8) & 0xFF;
+            { static int n = 0; if (PS3_LOG_FIRST(n, 8))
+                ps3_log("[NV0039] copy 0x%08X -> 0x%08X len=0x%X lines=%u pitch %d/%d fmt=0x%X\n",
+                        src, dst, m2m.len, m2m.lines, (int)m2m.pitch_in, (int)m2m.pitch_out, m2m.fmt); }
+            if (!src || !dst || !m2m.len) return;
+            extern u8* vm_base;
+            for (u32 y = 0; y < m2m.lines; y++) {
+                const u32 s = src + y * m2m.pitch_in, d = dst + y * m2m.pitch_out;
+                if ((si <= 1) && (di <= 1)) gcm_row_copy(d, s, m2m.len);
+                else for (u32 x = 0; x < m2m.len; x++) vm_base[d + x * di] = vm_base[s + x * si];
+            }
+            return;
+        }
+        }
+        /* fall through: anything else on subchannel 1 is not NV0039 */
+    }
     /* Subchannel bindings are libgcm-version-specific (SET_OBJECT binds are
      * not tracked): demosaic's SDK emits dest-surface on sub 3 and image-from-
      * CPU on sub 5 (cellGcmSetInlineTransfer: 0x4630C / 0xCA304 / 0xA400
@@ -2519,7 +2561,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
              * which can match, are skipped. Most of a frame's words come this
              * way (God of War HD: about five million vertex-program microcode and
              * constant words a second). */
-            if (!wdiag && count && (subch == 0 || (subch == 1 && !s1_2d)) &&
+            if (!wdiag && count && (subch == 0 || (subch == 1 && !s1_2d && !gcm_is_nv0039(method))) &&
                 ((s_fifo_getoff + 4) >> 20) == ((s_fifo_getoff + count * 4) >> 20)) {
                 const u32 dea = gcm_io2ea(s_fifo_getoff + 4);
                 if (dea) {
@@ -2681,7 +2723,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
                     cellGcmQueueUserCommand(vm_read32(dea));
                 } else if (mfull == 0xE920u || mfull == 0xE924u) {
                     cellGcmSetFlipCommand(vm_read32(dea) & 7u);
-                } else if (subch == 0 || (subch == 1 && !s1_2d)) {
+                } else if (subch == 0 || (subch == 1 && !s1_2d && !gcm_is_nv0039(m))) {
                     gcm_3d_method(&s_state, m, vm_read32(dea), legacy_state_live);
                 } else
                     gcm_2d_method(subch, m, vm_read32(dea));

@@ -344,6 +344,11 @@ typedef struct rsx_state {
      * (index = vertex % freq, repeats a mesh), clear = DIVIDE (index =
      * vertex / freq, advances once per instance). Instancing needs both. */
     u32 frequency_divider_op;
+    /* NV4097_SET_VERTEX_DATA_BASE_OFFSET (0x1738) is added to every array
+     * offset, NV4097_SET_VERTEX_DATA_BASE_INDEX (0x173C) to every vertex
+     * index (rsx_fetch_attrib). */
+    u32 vertex_data_base_offset;
+    u32 vertex_data_base_index;
 
     /* Current draw state */
     u32 primitive_type;

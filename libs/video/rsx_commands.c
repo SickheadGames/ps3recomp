@@ -498,6 +498,11 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
     /* NV4097_SET_FREQUENCY_DIVIDER_OPERATION: per-attribute modulo/divide mask
      * for the frequency divisor (instancing). Captured for read_vp_vertex. */
     if (method == 0x00001FC0) { state->frequency_divider_op = data; return 0; }
+    /* NV4097_SET_VERTEX_DATA_BASE_OFFSET / _BASE_INDEX: applied by
+     * rsx_fetch_attrib (they were dropped as unknown methods, so a title that
+     * moves its arrays with them would fetch from the unshifted offsets). */
+    if (method == 0x00001738) { state->vertex_data_base_offset = data; return 0; }
+    if (method == 0x0000173C) { state->vertex_data_base_index  = data; return 0; }
 
     /* NV4097_SET_CONTEXT_DMA_SEMAPHORE (0x01A4) picks where the semaphore
      * offset points. CELL_GCM_CONTEXT_DMA_MEMORY_HOST_BUFFER (0xFEED0001) is

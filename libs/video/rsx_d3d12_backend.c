@@ -6265,7 +6265,7 @@ static void d3d12_present(void* ud, u32 buffer_id)
      * order, in one command list. Empty batches still present (boot/idle). */
     int flip_has_display = (s_d3d.draw_count == 0);
     for (u32 _i = 0; _i < s_d3d.draw_count && _i < MAX_DRAWS; _i++)
-        if (!s_d3d.draws[_i].is_clear && s_d3d.draws[_i].rt_off == 0) {
+        if (!s_d3d.draws[_i].is_clear && s_d3d.draws[_i].rt_off == 0 && !s_d3d.draws[_i].no_color) {
             flip_has_display = 1;
             break;
         }
@@ -6347,7 +6347,7 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
      * until its composite draw arrives, or the screen strobes intermediates. */
     int have_display_draws = 0;
     for (u32 i = 0; i < s_d3d.draw_count && i < MAX_DRAWS; i++)
-        if (!s_d3d.draws[i].is_clear && s_d3d.draws[i].rt_off == 0) {
+        if (!s_d3d.draws[i].is_clear && s_d3d.draws[i].rt_off == 0 && !s_d3d.draws[i].no_color) {
             have_display_draws = 1;
             break;
         }
@@ -8125,9 +8125,13 @@ void rsx_d3d12_backend_present(void)
      * empty present is a flip/drain race and wipes the screen for a frame
      * (wave: black flashes and layout flicker between frames). */
     static int s_seen_content = 0;
+    /* A depth-only pass (no_color) is not display work even when its stale
+     * colour offset names a display buffer: AC1's 1024x1024 shadow pass sets
+     * colour target NONE over offset 0. Counting it presented batches that
+     * held only the next frame's shadow pass -- a black frame every few. */
     int has_display = (s_d3d.draw_count == 0 && !s_seen_content);
     for (u32 _i = 0; _i < s_d3d.draw_count && _i < MAX_DRAWS; _i++)
-        if (!s_d3d.draws[_i].is_clear && s_d3d.draws[_i].rt_off == 0) {
+        if (!s_d3d.draws[_i].is_clear && s_d3d.draws[_i].rt_off == 0 && !s_d3d.draws[_i].no_color) {
             has_display = 1;
             break;
         }

@@ -53,7 +53,9 @@ void rsx_fetch_attrib(const rsx_state* st, int idx, u32 vi, float out[4])
      * attrib9 is DIVIDE -- without it attrib9 advanced every vertex and the
      * instanced cubes drew with garbage transforms (only the baseplate,
      * which isn't instanced, survived). */
-    u32 ei = vi;
+    /* An ordinary array also adds NV4097_SET_VERTEX_DATA_BASE_INDEX (same
+     * rule as rsx_live_draw.c, rsx_vertex_element_index). */
+    u32 ei = (vi + st->vertex_data_base_index) & 0x000FFFFFu;
     if (!rsx_vertex_freq_plain(a->frequency,
                                (st->frequency_divider_op >> idx) & 1u)) {
         static int nofreq = -1;                 /* VP_NOFREQ: instancing kill-switch */
@@ -73,7 +75,10 @@ void rsx_fetch_attrib(const rsx_state* st, int idx, u32 vi, float out[4])
      * 0x11104480, which is empty -- so every INDEXED mesh fetched zeros and
      * collapsed to the origin, while non-indexed geometry whose arrays lie
      * outside the shadowed pages drew fine. */
-    u32 off = (a->offset & 0x7FFFFFFFu) + ei * a->stride;
+    /* NV4097_SET_VERTEX_DATA_BASE_OFFSET is added to the array offset and the
+     * sum taken to 28 bits (rsx_dsp_resolve_vertex_offset). */
+    u32 off = ((st->vertex_data_base_offset + (a->offset & 0x7FFFFFFFu)) & 0x0FFFFFFFu)
+              + ei * a->stride;
     const u8* p = vm_base + ((a->offset & 0x80000000u)
         ? cellGcmResolveLocated(0, off)   /* MAIN:  IO offset table          */
         : cellGcmResolveLocated(1, off)); /* LOCAL: VRAM, never the IO table */

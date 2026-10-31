@@ -276,6 +276,7 @@ static struct LwmSlot* lwm_slot(uint32_t addr)
             /* someone else claimed this slot for a different addr -> keep probing */
         }
     }
+    { static int _f = 0; if (!_f) { _f = 1; ps3_log("[LWM] TABLE FULL at addr 0x%08X -- locking disabled for new lwmutexes\n", addr); } }
     return nullptr;   /* table full (raise LWM_HASH) */
 }
 /* The lock itself is the slot's state word: 0 free, 1 held, 2 held with a
