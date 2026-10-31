@@ -74,7 +74,7 @@ void rsx_state_init(rsx_state* state)
 
     /* Default cull: the RSX reset values, CULL_FACE BACK and FRONT_FACE CCW
      * (as rsx_dispatch.c seeds them). FRONT_FACE was 0, which the backends
-     * read as CW: AC1 never writes the register, so every culled draw kept
+     * read as CW: the title never writes the register, so every culled draw kept
      * the faces it should have dropped -- the title's cloud billboards and
      * digital effects vanished once their camera matrix arrived intact. */
     state->cull_face = 0x0405u;  /* BACK */
@@ -833,6 +833,53 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
           if (_d && _n < 400) { _n++;
             ps3_log("[VDATA4F] attr=%u lane=%u = %.4f%c", idx, lane, f, 10); } }
         return 0;
+    }
+    /* The other encodings of the same constant attribute register file
+     * (gcm_implementation_sub.h SetVertexData2f/3f/1f/4ub/2s/4s/Scaled4s; types
+     * as RPCS3 registers them: 4ub normalized, 2s/4s raw, scaled4s normalized).
+     * Missing components take (0, 0, 0, 1). A title that set an attribute this
+     * way had it read as (0,0,0,1) on every vertex of a draw with that array off. */
+    {
+        int idx = -1, n = 0; float v[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+        const char* kind = NULL;
+        if (method >= 0x1880u && method < 0x1880u + RSX_MAX_VERTEX_ATTRIBS * 8u) {          /* 2F */
+            idx = (int)((method - 0x1880u) >> 3); kind = "2F";
+            const int lane = (int)((method - 0x1880u) >> 2) & 1;
+            memcpy(&state->vertex_data4f[idx][lane], &data, 4);
+            if (lane == 1) { state->vertex_data4f[idx][2] = 0.0f; state->vertex_data4f[idx][3] = 1.0f; }
+            n = -1;
+        } else if (method >= 0x1500u && method < 0x1500u + RSX_MAX_VERTEX_ATTRIBS * 12u) {   /* 3F */
+            idx = (int)((method - 0x1500u) / 12u); kind = "3F";
+            const int lane = (int)(((method - 0x1500u) % 12u) >> 2);
+            memcpy(&state->vertex_data4f[idx][lane], &data, 4);
+            if (lane == 2) state->vertex_data4f[idx][3] = 1.0f;
+            n = -1;
+        } else if (method >= 0x1E40u && method < 0x1E40u + RSX_MAX_VERTEX_ATTRIBS * 4u) {    /* 1F */
+            idx = (int)((method - 0x1E40u) >> 2); kind = "1F";
+            memcpy(&v[0], &data, 4); n = 4;
+        } else if (method >= 0x1940u && method < 0x1940u + RSX_MAX_VERTEX_ATTRIBS * 4u) {    /* 4UB */
+            idx = (int)((method - 0x1940u) >> 2); kind = "4UB";
+            for (int i = 0; i < 4; i++) v[i] = (float)((data >> (8 * i)) & 0xFFu) / 255.0f;
+            n = 4;
+        } else if (method >= 0x1900u && method < 0x1900u + RSX_MAX_VERTEX_ATTRIBS * 4u) {    /* 2S */
+            idx = (int)((method - 0x1900u) >> 2); kind = "2S";
+            v[0] = (float)(s16)(data & 0xFFFFu); v[1] = (float)(s16)(data >> 16); n = 4;
+        } else if ((method >= 0x1980u && method < 0x1980u + RSX_MAX_VERTEX_ATTRIBS * 8u) ||   /* 4S */
+                   (method >= 0x0A80u && method < 0x0A80u + RSX_MAX_VERTEX_ATTRIBS * 8u)) {   /* SCALED4S */
+            const int scaled = method < 0x1980u;
+            const u32 base = scaled ? 0x0A80u : 0x1980u;
+            idx = (int)((method - base) >> 3); kind = scaled ? "SCALED4S" : "4S";
+            const int half = (int)((method - base) >> 2) & 1;   /* word 0: x,y  word 1: z,w */
+            const float k = scaled ? 1.0f / 32767.0f : 1.0f;
+            state->vertex_data4f[idx][half * 2 + 0] = (float)(s16)(data & 0xFFFFu) * k;
+            state->vertex_data4f[idx][half * 2 + 1] = (float)(s16)(data >> 16) * k;
+            n = -1;
+        }
+        if (idx >= 0) {
+            if (n > 0) memcpy(state->vertex_data4f[idx], v, sizeof v);
+            (void)kind;
+            return 0;
+        }
     }
 
 
