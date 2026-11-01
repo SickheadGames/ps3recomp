@@ -1356,7 +1356,7 @@ static void gcm_2d_method(u32 subch, u32 method, u32 data)
      * lines of LINE_LENGTH bytes, OFFSET_IN/PITCH_IN -> OFFSET_OUT/PITCH_OUT,
      * context DMA 0xFEED0000 = local memory, 0xFEED0001 = main (IO offset).
      * FORMAT is the per-byte stride of each side (1 = contiguous). Without
-     * this, AC1's VRAM defragmenter repointed meshes to new blocks whose data
+     * this, the title's VRAM defragmenter repointed meshes to new blocks whose data
      * never arrived -- the meshes drew from whatever the block held before. */
     if (subch == 1) {
         static struct { u32 dma_in, dma_out, off_in, off_out, pitch_in, pitch_out, len, lines, fmt; } m2m;

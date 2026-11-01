@@ -186,6 +186,7 @@ typedef struct {
     D3D12_RESOURCE_STATES st;          /* tracked resource state */
     int                   used;        /* referenced this frame */
     u32                   stamp;       /* off_rt_get order: newest of several sizes at one offset wins */
+    u32                   drawn;       /* draw-time stamp of the last draw that rendered into it */
 } OffRT;
 #define MAX_OFF_RTS  32  /* demosaic double-buffers its 6-surface pass chain; the title's
                           * luminance chain reuses offsets at 3 sizes (keyed by size) */
@@ -1911,13 +1912,20 @@ static void rsx_capture_frame(u32 fi, u32 ndraws, u32 capidx)
                         r->fp_addr, r->vs_idx, r->vertex_count, r->cmask, r->blend, r->blend_key,
                         r->tex[0].raw, r->tex[1].raw, r->tex[2].raw, r->tex[3].raw);
                 for (int u = 0; u < RSX_TEX_UNITS; u++)
-                    if (r->tex[u].set)
-                        fprintf(mf, "      t%d off=0x%08X fmt=0x%02X (%s%s) %ux%u d=%u remap=0x%04X\n", u,
+                    if (r->tex[u].set) {
+                        fprintf(mf, "      t%d off=0x%08X fmt=0x%02X (%s%s) %ux%u d=%u remap=0x%04X", u,
                                 r->tex[u].off, r->tex[u].fmt,
                                 (r->tex[u].fmt & 0x20) ? "LN" : "SZ",
                                 (r->tex[u].fmt & 0x40) ? ",NR" : "",
                                 r->tex[u].w, r->tex[u].h, r->tex[u].depth,
                                 r->tex[u].ctrl1 & 0xFFFF);
+                        /* Which offscreen RT the binding loop actually gave it. */
+                        const int rt = r->tex_rt[u];
+                        if (rt >= 0 && rt < MAX_OFF_RTS)
+                            fprintf(mf, "  -> rt[%d] 0x%08X %ux%u", rt, s_d3d.off_rt[rt].off,
+                                    s_d3d.off_rt[rt].w, s_d3d.off_rt[rt].h);
+                        fprintf(mf, "\n");
+                    }
             }
         }
         /* Per-draw VP constant banks for the first few offscreen-RT geometry
@@ -4359,6 +4367,28 @@ static int off_rt_find(u32 off)
             (best < 0 || s_d3d.off_rt[i].stamp > s_d3d.off_rt[best].stamp)) best = i;
     return best;
 }
+static u32 s_rt_drawn;   /* bumped each time a draw binds an offscreen RT as its target */
+static int off_rt_find_sz(u32 off, u32 w, u32 h);
+/* The RT a TEXTURE of this size reads at off: the exact size; else the one a
+ * 2x-AA read implies (the texture twice the surface's width, or width and
+ * height: a resolve reads a 1280x720 2x-AA target as 2560x720); else
+ * the one most recently RENDERED to. "Most recently prepared" (off_rt_find)
+ * follows the pre-pass order, which moves with where frames split into
+ * batches -- a resolve that picked a different-size RT at the same offset
+ * that way fed the glow buffer through the whole post chain. */
+static int off_rt_find_tex(u32 off, u32 w, u32 h)
+{
+    int rt = off_rt_find_sz(off, w, h);
+    if (rt >= 0 || !off) return rt;
+    int best = -1;
+    for (int i = 0; i < MAX_OFF_RTS; i++) {
+        const OffRT* r = &s_d3d.off_rt[i];
+        if (!r->res || r->off != off) continue;
+        if (r->w * 2u == w && (r->h == h || r->h * 2u == h)) return i;
+        if (best < 0 || r->drawn > s_d3d.off_rt[best].drawn) best = i;
+    }
+    return (best >= 0 && s_d3d.off_rt[best].drawn) ? best : off_rt_find(off);
+}
 static int off_rt_find_sz(u32 off, u32 w, u32 h)
 {
     if (!off) return -1;
@@ -5527,9 +5557,9 @@ static void render_frame(void)
              * scene RT -- got the frame copy instead: a copy of a backbuffer
              * nothing had drawn to, so the whole screen came out black. */
             if (dr->tex[_u].set) {
-                /* The surface of the texture's own size when one exists (see
-                 * off_rt_find_sz), else the newest at that offset (2x-AA reads). */
-                int rt = off_rt_find_sz(dr->tex[_u].raw, dr->tex[_u].w, dr->tex[_u].h);
+                /* The RT this texture reads (off_rt_find_tex: exact size, then a 2x-AA
+                 * read, then the one most recently rendered to). */
+                int rt = off_rt_find_tex(dr->tex[_u].raw, dr->tex[_u].w, dr->tex[_u].h);
                 if (rt < 0) rt = off_rt_find(dr->tex[_u].raw);
                 if (rt >= 0) {
                     dr->tex_rt[_u] = rt;
@@ -5897,7 +5927,8 @@ static void render_frame(void)
                 /* Remember where geometry actually went: off_rt_find() matches
                  * on offset alone and slots share offsets at different sizes,
                  * so the composite cannot just look the source up by address. */
-                if (want >= 0) { s_last_drawn_slot = want; s_last_drawn_off = dr->rt_off; }
+                if (want >= 0) { s_last_drawn_slot = want; s_last_drawn_off = dr->rt_off;
+                                 s_d3d.off_rt[want].drawn = ++s_rt_drawn; }
                 int wantm[3];
                 for (int _m = 0; _m < 3; _m++)
                     wantm[_m] = (dr->rt_mrt[_m] && !dr->no_color) ? off_rt_find_sz(dr->rt_mrt[_m], dr->rt_w, dr->rt_h) : -1;
