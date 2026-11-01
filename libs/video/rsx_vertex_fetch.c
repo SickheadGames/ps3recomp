@@ -176,3 +176,107 @@ void rsx_fetch_planned(const rsx_fetch_plan* p, u32 vi, float out[4])
                           : vm_base + cellGcmResolveLocated(0, p->off0 + ei * p->stride);
     rsx_convert(q, p->type, p->n, p->idx, p->n, p->stride, out);
 }
+
+/* ---------------------------------------------------------------------------
+ * rsx_fetch_planned_many: the per-type loops.
+ *
+ * Each loop reads an element, converts all its components at once and keeps
+ * the constant register in the components the array does not supply -- the
+ * same arithmetic as rsx_convert, lane by lane: a byte swap for float32, an
+ * exact int->float conversion and the same IEEE division for the normalized
+ * types, and the same bit assembly for half floats (exponent 0 is a signed
+ * zero, not a denormal, so not F16C). Anything the loops do not cover takes
+ * the per-vertex path, which is the definition.
+ * -------------------------------------------------------------------------*/
+#if !defined(__ARM_NEON) && \
+    (defined(__SSE4_1__) || (defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64)))
+#define RVF_SSE 1
+#include <immintrin.h>
+#else
+#define RVF_SSE 0
+#endif
+
+#if RVF_SSE
+/* Lanes 0..n-1 all-ones: where the array supplies the component. */
+static __m128 rvf_keep(u32 n)
+{
+    return _mm_castsi128_ps(_mm_cmpgt_epi32(_mm_set1_epi32((int)n), _mm_setr_epi32(0, 1, 2, 3)));
+}
+/* The element's bytes into the low end of a vector. One 16-byte load: the bytes past the element
+ * only reach lanes the caller replaces with the constant register. Only within 16 bytes of the
+ * end of guest memory does it copy just the element instead (a variable-length memcpy per
+ * element was a library call each, a quarter of this function's time). */
+extern uint32_t ppu_vm_size;
+static inline __m128i rvf_load(const u8* q, u32 bytes)
+{
+    if ((u64)(q - vm_base) + 16u <= (u64)ppu_vm_size) return _mm_loadu_si128((const __m128i*)q);
+    u8 t[16] = {0}; memcpy(t, q, bytes);
+    return _mm_loadu_si128((const __m128i*)t);
+}
+/* Half floats (low 16 bits of each lane) as rsx_rd_half_be builds them. */
+static inline __m128i rvf_half(__m128i h)
+{
+    const __m128i sgn = _mm_slli_epi32(_mm_and_si128(h, _mm_set1_epi32(0x8000)), 16);
+    const __m128i exp = _mm_and_si128(_mm_srli_epi32(h, 10), _mm_set1_epi32(0x1F));
+    const __m128i man = _mm_slli_epi32(_mm_and_si128(h, _mm_set1_epi32(0x3FF)), 13);
+    const __m128i nrm = _mm_or_si128(_mm_or_si128(sgn, man), _mm_slli_epi32(_mm_add_epi32(exp, _mm_set1_epi32(112)), 23));
+    const __m128i inf = _mm_or_si128(_mm_or_si128(sgn, man), _mm_set1_epi32(0x7F800000));
+    __m128i r = _mm_blendv_epi8(nrm, inf, _mm_cmpeq_epi32(exp, _mm_set1_epi32(31)));
+    return _mm_blendv_epi8(r, sgn, _mm_cmpeq_epi32(exp, _mm_setzero_si128()));
+}
+#endif
+
+void rsx_fetch_planned_many(const rsx_fetch_plan* p, const u32* vis, u32 vi0, u32 nverts,
+                            u8* out, u32 out_stride)
+{
+#define RVF_VI(i) (vis ? vis[i] : vi0 + (i))
+    if (p->mode == 0) {   /* the constant register for every vertex */
+        for (u32 i = 0; i < nverts; i++) memcpy(out + (u64)i * out_stride, p->c, 16);
+        return;
+    }
+#if RVF_SSE
+    const u32 n = p->n;
+    if (p->mode == 1 && p->base && n >= 1 && n <= 4) {
+        const __m128 c = _mm_loadu_ps(p->c), keep = rvf_keep(n);
+        const u8* const base = p->base;
+        const u32 bi = p->base_index, stride = p->stride;
+#define RVF_LOOP(ELEM_BYTES, CONVERT)                                                        \
+        for (u32 i = 0; i < nverts; i++) {                                                   \
+            const u8* q = base + (u64)((RVF_VI(i) + bi) & 0x000FFFFFu) * stride;            \
+            const __m128i raw = rvf_load(q, (ELEM_BYTES));                                   \
+            const __m128 v = (CONVERT);                                                      \
+            _mm_storeu_ps((float*)(out + (u64)i * out_stride), _mm_blendv_ps(c, v, keep));   \
+        }                                                                                    \
+        return;
+        switch (p->type) {
+        case 2: {   /* float32: a byte swap per word */
+            const __m128i bs = _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12);
+            RVF_LOOP(n * 4, _mm_castsi128_ps(_mm_shuffle_epi8(raw, bs)))
+        }
+        case 4:     /* u8 normalized */
+            RVF_LOOP(n, _mm_div_ps(_mm_cvtepi32_ps(_mm_cvtepu8_epi32(raw)), _mm_set1_ps(255.0f)))
+        case 7:     /* u8 unnormalized */
+            RVF_LOOP(n, _mm_cvtepi32_ps(_mm_cvtepu8_epi32(raw)))
+        case 1: {   /* s16 normalized */
+            const __m128i bs = _mm_setr_epi8(1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14);
+            RVF_LOOP(n * 2, _mm_div_ps(_mm_cvtepi32_ps(_mm_cvtepi16_epi32(_mm_shuffle_epi8(raw, bs))),
+                                       _mm_set1_ps(32767.0f)))
+        }
+        case 5: {   /* s16 integer */
+            const __m128i bs = _mm_setr_epi8(1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14);
+            RVF_LOOP(n * 2, _mm_cvtepi32_ps(_mm_cvtepi16_epi32(_mm_shuffle_epi8(raw, bs))))
+        }
+        case 3: {   /* half float */
+            const __m128i bs = _mm_setr_epi8(1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14);
+            RVF_LOOP(n * 2, _mm_castsi128_ps(rvf_half(_mm_cvtepu16_epi32(_mm_shuffle_epi8(raw, bs)))))
+        }
+        default:
+            break;   /* CMP and anything else: the per-vertex path */
+        }
+#undef RVF_LOOP
+    }
+#endif
+    for (u32 i = 0; i < nverts; i++)
+        rsx_fetch_planned(p, RVF_VI(i), (float*)(out + (u64)i * out_stride));
+#undef RVF_VI
+}

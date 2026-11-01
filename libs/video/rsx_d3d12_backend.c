@@ -7408,6 +7408,39 @@ static void read_vp_vertex(const rsx_state* state, u32 vi, VPSlot* out)
     }
 }
 
+/* Many vertices at once: vertex vis[i] (vi0 + i when vis is NULL) into dst[i * s_vl.n], one
+ * attribute at a time, so each attribute's conversion loop is picked once for the draw
+ * (rsx_fetch_planned_many) instead of two calls and a type switch per attribute per vertex. */
+/* The attribute passes write a cached scratch buffer, copied to dst in one sequential memcpy:
+ * dst is the upload heap, which is write-combined, and interleaved 16-byte stores from
+ * separate passes flushed its lines piecemeal, several times over. */
+static void vp_convert_vertices(const rsx_state* state, const u32* vis, u32 vi0, u32 nv, VPSlot* dst)
+{
+    if (!nv) return;
+    if (s_vs_on > 0) s_vs.conv += nv;
+    const size_t bytes = (size_t)nv * VL_STRIDE;
+    static u8* s_scratch; static size_t s_scratch_cap;   /* the RSX thread's alone */
+    if (bytes > s_scratch_cap) {
+        u8* q = (u8*)realloc(s_scratch, bytes);
+        if (!q) {   /* no scratch: straight into dst, as before */
+            for (u32 j = 0; j < s_vl.n; j++)
+                rsx_fetch_planned_many(&s_vl.plan[j], vis, vi0, nv, (u8*)dst + 16u * j, VL_STRIDE);
+            return;
+        }
+        s_scratch = q; s_scratch_cap = bytes;
+    }
+    for (u32 j = 0; j < s_vl.n; j++)
+        rsx_fetch_planned_many(&s_vl.plan[j], vis, vi0, nv, s_scratch + 16u * j, VL_STRIDE);
+    memcpy(dst, s_scratch, bytes);
+    static int pos_dbg = -1;
+    if (pos_dbg < 0) pos_dbg = getenv("VTX_POS") ? 1 : 0;
+    if (pos_dbg) {
+        const rsx_vertex_attrib* a = &state->vertex_attribs[0];
+        u32 n = a->size ? a->size : 4; if (n > 4) n = 4;
+        rsx_vtx_pos_dbg(state, dst[0].v, n);
+    }
+}
+
 /* Per-draw vertex cache for the paths that expand one guest vertex into
  * several output vertices: indexed lists (shared vertices), strips and fans
  * (each vertex in up to three triangles) and indexed quads. Fetching all 16
@@ -7622,8 +7655,7 @@ static u32 upload_tris_vp(const rsx_state* state, u32 first, u32 count)
     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
         + (u64)s_d3d.vp_parity * VP_VB_BYTES + s_d3d.vp_vb_offset);
     { double _tv = perf_on() ? perf_now() : 0.0;
-      for (u32 k = 0; k < count; k++)
-          read_vp_vertex(state, first + k, &out[k*s_vl.n]);
+      vp_convert_vertices(state, NULL, first, count, out);
       if (perf_on()) { s_perf_vtx += perf_now() - _tv; s_perf_nverts += count; } }
     /* IDXDBG=<hex shader_program>: vertex range for that program's draws. */
     { static const char* ie = (const char*)1; static u32 iw = 0;
@@ -7818,6 +7850,14 @@ static u32 upload_tris_vp_ix(const rsx_state* state, u32 first, u32 count, int c
     const u8* ip = vm_base + cellGcmResolveLocated(local, state->index_array_offset);
     const int sixteen = (((state->index_array_dma >> 4) & 0xF) == 1);
     u32 n = s_ix_nverts;
+    const u32 n0 = n;
+    /* The new vertices, in slot order: converted after the index pass, all at once. */
+    static u32* s_ix_new; static u32 s_ix_new_cap;
+    if (count > s_ix_new_cap) {
+        u32* q = (u32*)realloc(s_ix_new, sizeof(u32) * count);
+        if (!q) return 0;
+        s_ix_new = q; s_ix_new_cap = count;
+    }
     for (u32 k = 0; k < count; k++) {
         const u32 kk = first + k;
         const u32 ix = sixteen ? (((u32)ip[kk * 2] << 8) | ip[kk * 2 + 1])
@@ -7833,11 +7873,12 @@ static u32 upload_tris_vp_ix(const rsx_state* state, u32 first, u32 count, int c
         if (s_ix_stamp[ix] != s_ix_gen) {
             s_ix_stamp[ix] = s_ix_gen;
             s_ix_slot[ix] = n;
-            read_vp_vertex(state, ix, &vb[(u64)n * s_vl.n]);
+            s_ix_new[n - n0] = ix;
             n++;
         }
         ib[k] = s_ix_slot[ix];
     }
+    vp_convert_vertices(state, s_ix_new, 0, n - n0, &vb[(u64)n0 * s_vl.n]);
     s_d3d.vp_vb_offset += (n - s_ix_nverts) * VL_STRIDE;
     s_ix_nverts = n;
     s_d3d.vp_ib_offset += count;

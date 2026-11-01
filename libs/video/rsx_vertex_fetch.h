@@ -86,6 +86,14 @@ typedef struct {
 void rsx_fetch_plan_init(const rsx_state* st, int idx, rsx_fetch_plan* p);
 void rsx_fetch_planned(const rsx_fetch_plan* p, u32 vi, float out[4]);
 
+/* rsx_fetch_planned for many vertices of one attribute: vertex vis[i] (or vi0 + i when vis is
+ * NULL) for i < nverts, its float4 written at out + i * out_stride bytes. Same values bit for
+ * bit; an ordinary per-vertex LOCAL array of a common type runs a loop specialized for it
+ * instead of one generic call per vertex. Convert a draw's vertices attribute by attribute
+ * with it rather than vertex by vertex. */
+void rsx_fetch_planned_many(const rsx_fetch_plan* p, const u32* vis, u32 vi0, u32 nverts,
+                            u8* out, u32 out_stride);
+
 #ifdef __cplusplus
 }
 #endif
