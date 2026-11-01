@@ -87,6 +87,10 @@
 
 typedef struct {
     u32 vb_byte_offset; /* offset into vb_mapped where this draw's verts live */
+    /* VP path vertex layout (see VPLayout): the attributes packed per vertex
+     * (bit i = ATTRi), the packed stride, and the 16-slot block of constant
+     * attribute values the others read with a zero stride. */
+    u32 vl_mask, vb_stride, vc_off;
     u32 vertex_count;
     u32 topology;       /* rsx_topology (NOT a D3D value; see topo_to_d3d) */
     int textured;       /* 1 = sample the bound font/atlas texture (dbgfont) */
@@ -175,6 +179,8 @@ typedef struct {
 } D3D12DrawRecord;
 /* An indexed run (upload_tris_vp_ix) may take the next batch; cleared with the records. */
 static int s_ix_run_valid;
+/* Moves whenever the VP vertex/index buffers reset (see s_vcb). */
+static u32 s_vb_batch;
 
 /* Offscreen render target (render-to-texture). Persistent across frames --
  * pass N's output is sampled by pass N+1 and possibly by later frames. */
@@ -2017,16 +2023,21 @@ static void rsx_capture_frame(u32 fi, u32 ndraws, u32 capidx)
                 snprintf(path, sizeof path, "%s/vtx_op%03u.txt", dir, d);
                 FILE* xf = fopen(path, "w");
                 if (xf) {
-                    const float* vb = (const float*)((const char*)s_d3d.vp_vb_mapped
-                        + (u64)par * MAX_VERTICES * 256u /* VP_VERT_STRIDE */ + r->vb_byte_offset);
-                    fprintf(xf, "op%03u vs=%d verts=%u indexed=%d\n", d, r->vs_idx,
-                            r->vertex_count, r->indexed);
-                    for (u32 vi = 0; vi < 3 && vi < r->vertex_count; vi++)
+                    const char* half = (const char*)s_d3d.vp_vb_mapped + (u64)par * MAX_VERTICES * 256u;
+                    const float* vb = (const float*)(half + r->vb_byte_offset);
+                    const float* vc = (const float*)(half + r->vc_off);
+                    fprintf(xf, "op%03u vs=%d verts=%u indexed=%d packed=0x%04X stride=%u\n", d, r->vs_idx,
+                            r->vertex_count, r->indexed, r->vl_mask, r->vb_stride);
+                    for (u32 vi = 0; vi < 3 && vi < r->vertex_count; vi++) {
+                        u32 j = 0;
                         for (int a = 0; a < 16; a++) {
-                            const float* s = vb + (vi * 16 + a) * 4;
+                            const int packed = (r->vl_mask >> a) & 1;
+                            const float* s = packed ? vb + (vi * (r->vb_stride / 4u)) + 4u * j++ : vc + a * 4;
                             if (s[0] || s[1] || s[2] || s[3] != 1.0f)
-                                fprintf(xf, "v%u a%-2d = %g %g %g %g\n", vi, a, s[0], s[1], s[2], s[3]);
+                                fprintf(xf, "v%u a%-2d = %g %g %g %g%s\n", vi, a, s[0], s[1], s[2], s[3],
+                                        packed ? "" : "  (constant)");
                         }
+                    }
                     const float* c = (const float*)((const char*)s_d3d.vp_cb_mapped
                         + ((u64)par * MAX_DRAWS + r->cb_slot) * VP_CB_STRIDE);
                     for (int k = 0; k < RSX_MAX_VERTEX_CONSTANTS; k++) {
@@ -2140,12 +2151,12 @@ static void compile_vp(void)
         il[_e].SemanticName = "ATTR";
         il[_e].SemanticIndex = _e;
         il[_e].Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-        il[_e].InputSlot = 0;
-        /* 256-byte generic VP vertex: every ATTRi is a float4 slot at i*16
-         * (read_vp_vertex converts each enabled RSX attrib by type; disabled
-         * slots hold (0,0,0,1)). Covers tiny3d (a0/a3/a8), SDK gcm samples
-         * (a0/a1/a2), dbgfont -- no aliasing. */
-        il[_e].AlignedByteOffset = (UINT)(_e * 16);
+        /* ATTRi is a float4 in input slot i (see VPLayout): each draw points
+         * slot i at its packed vertices or at its constants block, so one
+         * layout serves every attribute combination. Covers tiny3d
+         * (a0/a3/a8), SDK gcm samples (a0/a1/a2), dbgfont -- no aliasing. */
+        il[_e].InputSlot = (UINT)_e;
+        il[_e].AlignedByteOffset = 0;
         il[_e].InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
         il[_e].InstanceDataStepRate = 0;
     }
@@ -2749,16 +2760,73 @@ static int dr_writes_depth(const D3D12DrawRecord* e, u32 off)
     if (e->is_clear) return (e->clear_mask & 0x3u) != 0;
     return (e->rt_off || e->no_color) && (e->zs_key & (2u | (1u << 5))) != 0;
 }
+/* The batch's writes, indexed by offset, so a lookup for draw d need not scan
+ * draws 0..d-1 (a 1600-draw batch made that the bulk of the pre-pass). One
+ * entry per colour target of a colour-enabled record (writes = whether it
+ * really writes colour, dr_writes_colour) and per depth write; sorted by
+ * (off, d). Built on first use after the batch's surfaces are final
+ * (wx_invalidate: render_frame, after the zeta sub-rectangle rewrite). */
+typedef struct { u32 off, d; u16 w, h; u8 depth, writes; } WEnt;
+static WEnt* s_wx;
+static u32 s_wx_n, s_wx_cap;
+static int s_wx_valid;
+static void wx_invalidate(void) { s_wx_valid = 0; }
+static int wx_cmp(const void* a, const void* b)
+{
+    const WEnt* x = (const WEnt*)a; const WEnt* y = (const WEnt*)b;
+    if (x->off != y->off) return x->off < y->off ? -1 : 1;
+    return x->d < y->d ? -1 : (x->d > y->d);
+}
+static void wx_build(void)
+{
+    const u32 n = s_d3d.draw_count < MAX_DRAWS ? s_d3d.draw_count : MAX_DRAWS;
+    if (n * 5u > s_wx_cap) {
+        WEnt* p = (WEnt*)realloc(s_wx, sizeof(WEnt) * n * 5u);
+        if (!p) { s_wx_n = 0; s_wx_valid = 1; return; }
+        s_wx = p; s_wx_cap = n * 5u;
+    }
+    s_wx_n = 0;
+    for (u32 d = 0; d < n; d++) {
+        const D3D12DrawRecord* e = &s_d3d.draws[d];
+        if (!e->no_color) {
+            const u32 offs[4] = { e->rt_off, e->rt_mrt[0], e->rt_mrt[1], e->rt_mrt[2] };
+            for (int k = 0; k < 4; k++) {
+                if (!offs[k]) continue;
+                WEnt* w = &s_wx[s_wx_n++];
+                w->off = offs[k]; w->d = d; w->depth = 0;
+                w->w = (u16)(e->rt_w ? e->rt_w : s_d3d.width);
+                w->h = (u16)(e->rt_h ? e->rt_h : s_d3d.height);
+                w->writes = (u8)dr_writes_colour(e, offs[k]);
+            }
+        }
+        if (dr_writes_depth(e, e->zeta_off)) {
+            WEnt* w = &s_wx[s_wx_n++];
+            w->off = e->zeta_off; w->d = d; w->w = w->h = 0; w->depth = 1; w->writes = 1;
+        }
+    }
+    qsort(s_wx, s_wx_n, sizeof(WEnt), wx_cmp);
+    s_wx_valid = 1;
+}
+/* [lo, hi) of the entries at off. */
+static void wx_range(u32 off, u32* lo, u32* hi)
+{
+    if (!s_wx_valid) wx_build();
+    u32 a = 0, b = s_wx_n;
+    while (a < b) { const u32 m = (a + b) / 2; if (s_wx[m].off < off) a = m + 1; else b = m; }
+    *lo = a;
+    while (b < s_wx_n && s_wx[b].off == off) b++;
+    *hi = b;
+}
 /* wseq of RT slot i as draw d of this batch sees it. */
 static u32 off_rt_seq_at(int i, u32 d)
 {
     const OffRT* r = &s_d3d.off_rt[i];
-    if (d > s_d3d.draw_count) d = s_d3d.draw_count;
-    if (d > MAX_DRAWS) d = MAX_DRAWS;
-    while (d-- > 0) {
-        const D3D12DrawRecord* e = &s_d3d.draws[d];
-        if (dr_writes_colour(e, r->off) && off_rt_find_sz(r->off, e->rt_w, e->rt_h) == i)
-            return s_wseq + d + 1;
+    u32 lo, hi;
+    wx_range(r->off, &lo, &hi);
+    while (hi > lo) {
+        const WEnt* w = &s_wx[--hi];
+        if (w->d >= d || w->depth || !w->writes) continue;
+        if (w->w == r->w && w->h == r->h) return s_wseq + w->d + 1;
     }
     return r->wseq;
 }
@@ -2766,10 +2834,12 @@ static u32 off_rt_seq_at(int i, u32 d)
 static u32 off_ds_seq_at(int i, u32 d)
 {
     const OffDS* z = &s_d3d.off_ds[i];
-    if (d > s_d3d.draw_count) d = s_d3d.draw_count;
-    if (d > MAX_DRAWS) d = MAX_DRAWS;
-    while (d-- > 0)
-        if (dr_writes_depth(&s_d3d.draws[d], z->off)) return s_wseq + d + 1;
+    u32 lo, hi;
+    wx_range(z->off, &lo, &hi);
+    while (hi > lo) {
+        const WEnt* w = &s_wx[--hi];
+        if (w->d < d && w->depth) return s_wseq + w->d + 1;
+    }
     return z->wseq;
 }
 /* Store this batch's writes (after its lookups, before the next batch). */
@@ -2798,12 +2868,9 @@ static void wseq_commit(void)
  * the colour pass drawing into a wrong-sized target. */
 static int batch_writes_colour(u32 raw)
 {
-    for (u32 d = 0; d < s_d3d.draw_count && d < MAX_DRAWS; d++) {
-        const D3D12DrawRecord* e = &s_d3d.draws[d];
-        if (!e->no_color && (e->rt_off == raw || e->rt_mrt[0] == raw ||
-                             e->rt_mrt[1] == raw || e->rt_mrt[2] == raw))
-            return 1;
-    }
+    u32 lo, hi;
+    wx_range(raw, &lo, &hi);
+    for (; lo < hi; lo++) if (!s_wx[lo].depth) return 1;
     return 0;
 }
 /* Is the newest data at off, as draw d sees it, a depth write? 1 = depth,
@@ -3330,8 +3397,9 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
     D3D12_INPUT_ELEMENT_DESC il[16];
     for (int _i = 0; _i < 16; _i++) {
         il[_i].SemanticName = "ATTR"; il[_i].SemanticIndex = _i;
-        il[_i].Format = DXGI_FORMAT_R32G32B32A32_FLOAT; il[_i].InputSlot = 0;
-        il[_i].AlignedByteOffset = (UINT)(_i * 16);
+        il[_i].Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        il[_i].InputSlot = (UINT)_i;          /* one slot per ATTRi (VPLayout) */
+        il[_i].AlignedByteOffset = 0;
         il[_i].InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
         il[_i].InstanceDataStepRate = 0;
     }
@@ -5168,9 +5236,41 @@ static void guest_fb_present(u32 fi)
     s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &gb);
 }
 
+/* Bind a VP draw's vertex views: ATTRi is input slot i (see VPLayout). A
+ * packed attribute reads the draw's interleaved vertices at its position in
+ * them; any other reads its entry of the draw's constants block with a zero
+ * stride. Skipped when the views equal the last draw's (merged runs, and
+ * consecutive draws of one mesh). s_vb_views_valid = 0 forces the next bind. */
+static D3D12_VERTEX_BUFFER_VIEW s_vb_views[16];
+static int s_vb_views_valid;
+static void vp_bind_vertex_views(const D3D12DrawRecord* dr)
+{
+    const u64 half = (u64)MAX_VERTICES * 256u;
+    const D3D12_GPU_VIRTUAL_ADDRESS base = s_d3d.vp_vb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_vb)
+                                         + (u64)s_d3d.vp_parity * half;
+    D3D12_VERTEX_BUFFER_VIEW v[16];
+    u32 j = 0;
+    for (int i = 0; i < 16; i++) {
+        if (dr->vl_mask & (1u << i)) {
+            const u64 off = (u64)dr->vb_byte_offset + 16u * j++;
+            v[i].BufferLocation = base + off;
+            v[i].SizeInBytes    = (UINT)(half - off);
+            v[i].StrideInBytes  = dr->vb_stride;
+        } else {
+            v[i].BufferLocation = base + dr->vc_off + 16u * (u32)i;
+            v[i].SizeInBytes    = 16;
+            v[i].StrideInBytes  = 0;
+        }
+    }
+    if (s_vb_views_valid && !memcmp(v, s_vb_views, sizeof v)) return;
+    memcpy(s_vb_views, v, sizeof v);
+    s_vb_views_valid = 1;
+    s_d3d.cmd_list->lpVtbl->IASetVertexBuffers(s_d3d.cmd_list, 0, 16, v);
+}
 
 static void render_frame(void)
 {
+    wx_invalidate();
     double _rf0 = perf_on() ? perf_now() : 0.0;
     u32 fi = s_d3d.frame_index;
 
@@ -5464,6 +5564,7 @@ static void render_frame(void)
         dr->zeta_off = base;
         dr->zeta_x = dx / dr->zeta_bpp;
     }
+    wx_invalidate();   /* the batch's surfaces are final from here: lookups may index them */
     for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
         D3D12DrawRecord* dr = &s_d3d.draws[_d];
         if (dr->is_vp && dr->rt_off)
@@ -5921,12 +6022,7 @@ static void render_frame(void)
             s_d3d.cmd_list->lpVtbl->SetGraphicsRootDescriptorTable(s_d3d.cmd_list, 1, gh);
             int samp_bound[RSX_TEX_UNITS];
             for (int _s = 0; _s < RSX_TEX_UNITS; _s++) samp_bound[_s] = -1;
-            D3D12_VERTEX_BUFFER_VIEW vbv;
-            vbv.BufferLocation = s_d3d.vp_vb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_vb)
-                               + (u64)s_d3d.vp_parity * MAX_VERTICES * 256;
-            vbv.SizeInBytes    = MAX_VERTICES * 256;
-            vbv.StrideInBytes  = 256;   /* 16 float4 attrib slots */
-            s_d3d.cmd_list->lpVtbl->IASetVertexBuffers(s_d3d.cmd_list, 0, 1, &vbv);
+            s_vb_views_valid = 0;   /* each draw binds its own (vp_bind_vertex_views) */
             D3D12_GPU_DESCRIPTOR_HANDLE gh_base;
             s_d3d.srv_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &gh_base);
             int cur_rt = -1;                       /* target A: -1 = backbuffer */
@@ -6068,9 +6164,11 @@ static void render_frame(void)
                     { static int tt = -1;
                       if (tt < 0) { const char* e = getenv("VP_TESTTRI"); tt = e ? atoi(e) : 0; }
                       if (tt && want >= 0 && s_d3d.vp_vb_mapped) {
-                          float* vtx = (float*)((char*)s_d3d.vp_vb_mapped
-                              + (u64)s_d3d.vp_parity * MAX_VERTICES * 256u
-                              + (u64)1000 * 256u);
+                          /* The last three 256-byte vertices of the half, past
+                           * anything a batch packs there in practice. */
+                          const u64 tt_off = (u64)s_d3d.vp_parity * MAX_VERTICES * 256u
+                                           + (u64)(MAX_VERTICES - 3) * 256u;
+                          float* vtx = (float*)((char*)s_d3d.vp_vb_mapped + tt_off);
                           static const float tri[3][4] = {
                               {-2.0f, -2.0f, 0.0f, 1.0f},
                               { 2.0f, -2.0f, 0.0f, 1.0f},
@@ -6080,7 +6178,14 @@ static void render_frame(void)
                               dstv[0] = tri[_v][0]; dstv[1] = tri[_v][1];
                               dstv[2] = tri[_v][2]; dstv[3] = tri[_v][3];
                           }
-                          s_d3d.cmd_list->lpVtbl->DrawInstanced(s_d3d.cmd_list, 3, 1, 1000, 0);
+                          { D3D12_VERTEX_BUFFER_VIEW tv[16];
+                            for (int _i = 0; _i < 16; _i++) {
+                                tv[_i].BufferLocation = s_d3d.vp_vb->lpVtbl->GetGPUVirtualAddress(s_d3d.vp_vb) + tt_off;
+                                tv[_i].SizeInBytes = 3 * 256; tv[_i].StrideInBytes = 256;
+                            }
+                            s_d3d.cmd_list->lpVtbl->IASetVertexBuffers(s_d3d.cmd_list, 0, 16, tv);
+                            s_vb_views_valid = 0; }
+                          s_d3d.cmd_list->lpVtbl->DrawInstanced(s_d3d.cmd_list, 3, 1, 0, 0);
                           { static int _n = 0;
                             if (PS3_LOG_FIRST(_n, 3)) ps3_log("[TESTTRI] issued on rt=%d off=0x%08X%c",
                                                   want, s_d3d.off_rt[want].off, 10); }
@@ -6227,9 +6332,9 @@ static void render_frame(void)
                   if (dcap && dn < dcap) { dn++;
                       D3D12_CPU_DESCRIPTOR_HANDLE _rh =
                           (cur_rt >= 0) ? off_rt_rtv(cur_rt) : rtv_handle;
-                      ps3_log("[DRAWARGS] verts=%u start=%u rt=%d rec=0x%08X bound=0x%08X"
+                      ps3_log("[DRAWARGS] verts=%u vbofs=%u rt=%d rec=0x%08X bound=0x%08X"
                               " tex0=0x%08X texrt=%d dvp=%.0f,%.0f %.0fx%.0f%c",
-                              dr->vertex_count, dr->vb_byte_offset / 256, cur_rt,
+                              dr->vertex_count, dr->vb_byte_offset, cur_rt,
                               dr->rt_off,
                               (cur_rt >= 0) ? s_d3d.off_rt[cur_rt].off : 0u,
                               dr->tex[0].raw, dr->tex_rt[0],
@@ -6263,11 +6368,14 @@ static void render_frame(void)
                         s_d3d.cmd_list->lpVtbl->IASetIndexBuffer(s_d3d.cmd_list, &ibv);
                         ib_bound = 1;
                     }
+                    vp_bind_vertex_views(dr);
                     s_d3d.cmd_list->lpVtbl->DrawIndexedInstanced(s_d3d.cmd_list,
-                        dr->index_count, 1, dr->ib_first, (INT)(dr->vb_byte_offset / 256), 0);
-                } else
-                s_d3d.cmd_list->lpVtbl->DrawInstanced(s_d3d.cmd_list,
-                    dr->vertex_count, 1, dr->vb_byte_offset / 256, 0);
+                        dr->index_count, 1, dr->ib_first, 0, 0);
+                } else {
+                    vp_bind_vertex_views(dr);
+                    s_d3d.cmd_list->lpVtbl->DrawInstanced(s_d3d.cmd_list,
+                        dr->vertex_count, 1, 0, 0);
+                }
                 /* VP_SUBMIT=<N>: prove the VP pass actually reaches the GPU.
                  * "records exist" and "draws were submitted" are different
                  * claims, and every blank-output investigation conflates them. */
@@ -6279,7 +6387,7 @@ static void render_frame(void)
                             dr->vp_w, dr->vp_h, dr->tex[0].raw, dr->tex[0].set,
                             dr->tex[1].raw, dr->tex_slot, dr->fp_addr, 10);
                     ps3_log("            vs_idx=%d cb_slot=%u vbofs=%u cull=%u blend=%d%c",
-                            dr->vs_idx, dr->cb_slot, dr->vb_byte_offset / 256,
+                            dr->vs_idx, dr->cb_slot, dr->vb_byte_offset,
                             dr->cull, dr->blend, 10); } }
             }
             if (perf_on()) s_perf_gpu += perf_now() - _rec0;   /* reuse: record time */
@@ -6392,7 +6500,7 @@ static void render_frame(void)
     }
     s_dbg_last_draws = s_d3d.draw_count;
     s_d3d.vb_offset  = 0; /* reset for next frame */
-    s_d3d.vp_vb_offset = 0;
+    s_d3d.vp_vb_offset = 0; s_vb_batch++;
     s_d3d.vp_ib_offset = 0;
     for (u32 _i = 0; _i < s_d3d.draw_count && _i < MAX_DRAWS; _i++) s_d3d.draws[_i].indexed = 0;
     s_ix_run_valid = 0;
@@ -6981,7 +7089,7 @@ static void d3d12_clear(void* ud, u32 flags, u32 color, float depth, u8 stencil)
     s_ix_run_valid = 0;
     s_d3d.draw_count   = 0;
     s_d3d.vb_offset    = 0;
-    s_d3d.vp_vb_offset = 0;
+    s_d3d.vp_vb_offset = 0; s_vb_batch++;
     s_d3d.vp_ib_offset = 0;
 }
 
@@ -7123,7 +7231,71 @@ static u32 upload_quads_from_rsx(u32 first, u32 count)
  * cover them: every enabled attrib is fetched from guest memory and converted
  * by its RSX type; disabled slots read (0,0,0,1). */
 typedef struct { float v[4]; } VPSlot;
-#define VP_VERT_STRIDE (16 * sizeof(VPSlot))   /* 256 */
+#define VP_VERT_STRIDE (16 * sizeof(VPSlot))   /* 256: the largest packed vertex */
+#define VP_VB_BYTES    ((u32)MAX_VERTICES * VP_VERT_STRIDE)   /* one parity half */
+
+/* Packed VP vertex layout. A vertex used to carry all 16 attribute slots
+ * (256 bytes) whatever the draw used, and most draws use three to six: the
+ * CPU converted, and the GPU read across the bus, mostly padding. Now a
+ * vertex holds only the attributes that vary per vertex -- enabled with a
+ * non-zero stride, plus attribute 0, which every path requires and the
+ * diagnostics read as the position -- in attribute order, one float4 each.
+ * The rest read the constant attribute registers (NV4097_SET_VERTEX_DATA4F),
+ * which rsx_fetch_attrib returns for them anyway: those go into a 16-slot
+ * block per draw (vc_off) that the input assembler reads with a zero stride.
+ * The input layout gives every ATTRi its own input slot, so it never changes;
+ * each draw binds its views (replay, vp_bind_vertex_views). The shader sees
+ * the same float4 values as before. */
+typedef struct { u32 mask, n; u8 idx[16]; rsx_fetch_plan plan[16]; } VPLayout;   /* plan[j]: packed slot j */
+static VPLayout s_vl = { 1u, 1u, {0}, {{0}} };
+#define VL_STRIDE (s_vl.n * (u32)sizeof(VPSlot))
+/* The last constants block written, reused while it is unchanged so that
+ * consecutive draws (the BEGIN/END batches the merges join) stay contiguous
+ * in the vertex buffer. s_vb_batch moves whenever the VP buffers reset. */
+static struct { VPSlot c[16]; u32 off, batch; int valid; } s_vcb;
+static u32 s_vl_cb_off;
+
+static void vl_compute(const rsx_state* st)
+{
+    s_vl.mask = 0; s_vl.n = 0;
+    for (int i = 0; i < 16; i++) {
+        const rsx_vertex_attrib* a = st ? &st->vertex_attribs[i] : NULL;
+        if (i == 0 || (a && a->enabled && a->stride)) {
+            s_vl.mask |= 1u << i;
+            if (st) rsx_fetch_plan_init(st, i, &s_vl.plan[s_vl.n]);
+            s_vl.idx[s_vl.n++] = (u8)i;
+        }
+    }
+}
+
+/* Write (or reuse) this draw's constants block; 0 when the buffer is full. */
+static int vl_constants(const rsx_state* st)
+{
+    VPSlot c[16];
+    for (int i = 0; i < 16; i++)
+        for (int k = 0; k < 4; k++) c[i].v[k] = st ? st->vertex_data4f[i][k] : (k == 3 ? 1.0f : 0.0f);
+    if (s_vcb.valid && s_vcb.batch == s_vb_batch && !memcmp(c, s_vcb.c, sizeof c)) {
+        s_vl_cb_off = s_vcb.off;
+        return 1;
+    }
+    if (!s_d3d.vp_vb_mapped || s_d3d.vp_vb_offset + sizeof c > VP_VB_BYTES) return 0;
+    memcpy((u8*)s_d3d.vp_vb_mapped + (u64)s_d3d.vp_parity * VP_VB_BYTES + s_d3d.vp_vb_offset, c, sizeof c);
+    memcpy(s_vcb.c, c, sizeof c);
+    s_vcb.off = s_vl_cb_off = s_d3d.vp_vb_offset;
+    s_vcb.batch = s_vb_batch; s_vcb.valid = 1;
+    s_d3d.vp_vb_offset += sizeof c;
+    return 1;
+}
+
+/* Attribute a of a packed vertex v, for the diagnostics: its slot when it is
+ * packed, else the draw's constant value. */
+static const VPSlot* vl_attr(const VPSlot* v, int a)
+{
+    if (!(s_vl.mask & (1u << a))) return &s_vcb.c[a];
+    u32 j = 0;
+    while (s_vl.idx[j] != (u8)a) j++;
+    return &v[j];
+}
 
 
 void rsx_vtx_pos_dbg(const rsx_state* state, const float* v, u32 n);
@@ -7221,16 +7393,18 @@ static void vs_arrays(const rsx_state* st, u32 prim, u32 count)
     vs_attrs(st);
 }
 
-static void read_vp_vertex(const rsx_state* state, u32 vi, VPSlot* out16)
+/* Fill one vertex's packed slots (s_vl: attribute 0 first). */
+static void read_vp_vertex(const rsx_state* state, u32 vi, VPSlot* out)
 {
     if (s_vs_on > 0) s_vs.conv++;
-    for (int i = 0; i < 16; i++) {
-        rsx_fetch_attrib(state, i, vi, out16[i].v);
-        if (i == 0) {
-            const rsx_vertex_attrib* a = &state->vertex_attribs[0];
-            u32 n = a->size ? a->size : 4; if (n > 4) n = 4;
-            rsx_vtx_pos_dbg(state, out16[0].v, n);
-        }
+    for (u32 j = 0; j < s_vl.n; j++)
+        rsx_fetch_planned(&s_vl.plan[j], vi, out[j].v);   /* planned by vl_compute */
+    static int pos_dbg = -1;
+    if (pos_dbg < 0) pos_dbg = getenv("VTX_POS") ? 1 : 0;
+    if (pos_dbg) {
+        const rsx_vertex_attrib* a = &state->vertex_attribs[0];
+        u32 n = a->size ? a->size : 4; if (n > 4) n = 4;
+        rsx_vtx_pos_dbg(state, out[0].v, n);
     }
 }
 
@@ -7257,7 +7431,7 @@ static void vc_begin_draw(void)
     if (++s_vc_cur == 0) { memset(s_vc_gen, 0, sizeof s_vc_gen); s_vc_cur = 1; }
 }
 
-static void read_vp_vertex_cached(const rsx_state* state, u32 vi, VPSlot* out16)
+static void read_vp_vertex_cached(const rsx_state* state, u32 vi, VPSlot* out16)   /* s_vl.n slots */
 {
     if (!s_vc || !s_vc_cur) { read_vp_vertex(state, vi, out16); return; }
     u32 h = vi & (VC_N - 1);
@@ -7266,13 +7440,13 @@ static void read_vp_vertex_cached(const rsx_state* state, u32 vi, VPSlot* out16)
         s_vc_gen[h] = s_vc_cur;
         s_vc_tag[h] = vi;
     }
-    memcpy(out16, s_vc[h], sizeof(VPSlot) * 16);
+    memcpy(out16, s_vc[h], sizeof(VPSlot) * s_vl.n);
     /* VTX_CACHE_CHECK=1: also refetch on every lookup and count differences
      * (validation for a new title; the refetch costs what the cache saves). */
     { static int chk = -1; if (chk < 0) chk = getenv("VTX_CACHE_CHECK") ? 1 : 0;
       if (chk) { static unsigned long long hits, bad; VPSlot fresh[16];
         read_vp_vertex(state, vi, fresh); hits++;
-        if (memcmp(fresh, s_vc[h], sizeof fresh)) bad++;
+        if (memcmp(fresh, s_vc[h], sizeof(VPSlot) * s_vl.n)) bad++;
         if ((hits & 0xFFFFF) == 0)
             ps3_log("[vtx-cache-check] %llu lookups, %llu mismatches\n", hits, bad); } }
 }
@@ -7406,10 +7580,10 @@ static u32 upload_quads_vp(const rsx_state* state, u32 first, u32 count)
     if (!state->vertex_attribs[0].enabled) return 0;
     vp_attrs_dbg(state);
     u32 quads = count / 4;
-    u32 maxv = (MAX_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+    u32 maxv = (VP_VB_BYTES - s_d3d.vp_vb_offset) / VL_STRIDE;
     if (quads * 6 > maxv) quads = maxv / 6;
     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
-        + (u64)s_d3d.vp_parity * MAX_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+        + (u64)s_d3d.vp_parity * VP_VB_BYTES + s_d3d.vp_vb_offset);
     u32 o = 0;
     for (u32 q = 0; q < quads; q++) {
         VPSlot c[4][16];
@@ -7417,16 +7591,16 @@ static u32 upload_quads_vp(const rsx_state* state, u32 first, u32 count)
             read_vp_vertex(state, first + q*4 + k, c[k]);
         /* quad -> two triangles (perimeter winding) */
         static const int idx[6] = {0,1,2, 0,2,3};
-        for (int t = 0; t < 6; t++) { memcpy(&out[o*16], c[idx[t]], sizeof(c[0])); o++; }
+        for (int t = 0; t < 6; t++) { memcpy(&out[o*s_vl.n], c[idx[t]], VL_STRIDE); o++; }
         if (env_on("VTX_DUMP", &s_env_vtx_dump)) { static int _n=0; if (PS3_LOG_FIRST(_n, 4)) {
             FILE* f = fopen("vtx_dump.txt", _n==1 ? "w" : "a");
             if (f) { for (u32 k = 0; k < 4; k++)
                 fprintf(f, "q%02d v%u a0=(%.3f,%.3f,%.3f,%.3f) a8=(%.3f,%.3f)\n", _n, k,
-                    c[k][0].v[0],c[k][0].v[1],c[k][0].v[2],c[k][0].v[3],
-                    c[k][8].v[0],c[k][8].v[1]);
+                    vl_attr(c[k], 0)->v[0],vl_attr(c[k], 0)->v[1],vl_attr(c[k], 0)->v[2],vl_attr(c[k], 0)->v[3],
+                    vl_attr(c[k], 8)->v[0],vl_attr(c[k], 8)->v[1]);
               fclose(f); } } }
     }
-    s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
+    s_d3d.vp_vb_offset += o * VL_STRIDE;
     return o;
 }
 
@@ -7439,17 +7613,17 @@ static u32 upload_tris_vp(const rsx_state* state, u32 first, u32 count)
     if (!state || !vm_base || !s_d3d.vp_vb_mapped) return 0;
     if (!state->vertex_attribs[0].enabled) return 0;
     vp_attrs_dbg(state);
-    u32 maxv = (MAX_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+    u32 maxv = (VP_VB_BYTES - s_d3d.vp_vb_offset) / VL_STRIDE;
     if (count > maxv) { s_drop_draws++;
         { static int _n = 0; if (getenv("VBFULL") && PS3_LOG_FIRST(_n, 12))
             ps3_log("[VBFULL] fp=0x%X wanted %u verts, room for %u%c",
                     state->shader_program, count, maxv, 10); }
         count = maxv - (maxv % 3); }
     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
-        + (u64)s_d3d.vp_parity * MAX_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+        + (u64)s_d3d.vp_parity * VP_VB_BYTES + s_d3d.vp_vb_offset);
     { double _tv = perf_on() ? perf_now() : 0.0;
       for (u32 k = 0; k < count; k++)
-          read_vp_vertex(state, first + k, &out[k*16]);
+          read_vp_vertex(state, first + k, &out[k*s_vl.n]);
       if (perf_on()) { s_perf_vtx += perf_now() - _tv; s_perf_nverts += count; } }
     /* IDXDBG=<hex shader_program>: vertex range for that program's draws. */
     { static const char* ie = (const char*)1; static u32 iw = 0;
@@ -7470,7 +7644,7 @@ static u32 upload_tris_vp(const rsx_state* state, u32 first, u32 count)
         ps3_log("[DUCKVTX] first=%u count=%u", first, count);
         for (u32 k = 0; k < count && k < 4; k++)
             ps3_log("  v%u=(%.2f,%.2f,%.2f)", k,
-                    out[k*16].v[0], out[k*16].v[1], out[k*16].v[2]);
+                    out[k*s_vl.n].v[0], out[k*s_vl.n].v[1], out[k*s_vl.n].v[2]);
         { int lo = -1, hi = -1, nz = 0;
           for (int r = 0; r < RSX_MAX_VERTEX_CONSTANTS; r++) {
               const float* m = state->vertex_constants[r];
@@ -7486,11 +7660,11 @@ static u32 upload_tris_vp(const rsx_state* state, u32 first, u32 count)
                          state->surface_color_offset[0], count, first);
           for (u32 k = 0; k < count && k < 30; k++)
             fprintf(f, "v%02u a0=(%.3f,%.3f,%.3f) a2=(%.3f,%.3f,%.3f) a9=(%.4f,%.4f,%.4f,%.4f)\n", k,
-                out[k*16].v[0],out[k*16].v[1],out[k*16].v[2],
-                out[k*16+2].v[0],out[k*16+2].v[1],out[k*16+2].v[2],
-                out[k*16+9].v[0],out[k*16+9].v[1],out[k*16+9].v[2],out[k*16+9].v[3]);
+                out[k*s_vl.n].v[0],out[k*s_vl.n].v[1],out[k*s_vl.n].v[2],
+                (*vl_attr(&out[k*s_vl.n], 2)).v[0],(*vl_attr(&out[k*s_vl.n], 2)).v[1],(*vl_attr(&out[k*s_vl.n], 2)).v[2],
+                (*vl_attr(&out[k*s_vl.n], 9)).v[0],(*vl_attr(&out[k*s_vl.n], 9)).v[1],(*vl_attr(&out[k*s_vl.n], 9)).v[2],(*vl_attr(&out[k*s_vl.n], 9)).v[3]);
           fclose(f); } } }
-    s_d3d.vp_vb_offset += count * VP_VERT_STRIDE;
+    s_d3d.vp_vb_offset += count * VL_STRIDE;
     return count;
 }
 
@@ -7506,10 +7680,10 @@ static u32 upload_strip_vp(const rsx_state* state, u32 first, u32 count, int fan
     if (!state->vertex_attribs[0].enabled) return 0;
     if (count < 3) return 0;
     u32 tris = count - 2;
-    u32 maxv = (MAX_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+    u32 maxv = (VP_VB_BYTES - s_d3d.vp_vb_offset) / VL_STRIDE;
     if (tris * 3 > maxv) tris = maxv / 3;
     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
-        + (u64)s_d3d.vp_parity * MAX_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+        + (u64)s_d3d.vp_parity * VP_VB_BYTES + s_d3d.vp_vb_offset);
     u32 o = 0;
     vc_begin_draw();
     for (u32 t = 0; t < tris; t++) {
@@ -7517,11 +7691,11 @@ static u32 upload_strip_vp(const rsx_state* state, u32 first, u32 count, int fan
         /* strip winding alternates per triangle to keep facing consistent */
         u32 i1 = t + 1, i2 = t + 2;
         if (!fan && (t & 1)) { u32 tmp = i1; i1 = i2; i2 = tmp; }
-        read_vp_vertex_cached(state, first + i0, &out[o*16]); o++;
-        read_vp_vertex_cached(state, first + i1, &out[o*16]); o++;
-        read_vp_vertex_cached(state, first + i2, &out[o*16]); o++;
+        read_vp_vertex_cached(state, first + i0, &out[o*s_vl.n]); o++;
+        read_vp_vertex_cached(state, first + i1, &out[o*s_vl.n]); o++;
+        read_vp_vertex_cached(state, first + i2, &out[o*s_vl.n]); o++;
     }
-    s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
+    s_d3d.vp_vb_offset += o * VL_STRIDE;
     return o;
 }
 
@@ -7550,10 +7724,10 @@ static u32 upload_quads_vp_indexed(const rsx_state* state, u32 first, u32 count)
     if (!state || !vm_base || !s_d3d.vp_vb_mapped) return 0;
     if (!state->vertex_attribs[0].enabled) return 0;
     u32 quads = count / 4;
-    u32 maxv = (MAX_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+    u32 maxv = (VP_VB_BYTES - s_d3d.vp_vb_offset) / VL_STRIDE;
     if (quads * 6 > maxv) quads = maxv / 6;
     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
-        + (u64)s_d3d.vp_parity * MAX_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+        + (u64)s_d3d.vp_parity * VP_VB_BYTES + s_d3d.vp_vb_offset);
     u32 o = 0;
     vc_begin_draw();
     for (u32 q = 0; q < quads; q++) {
@@ -7561,7 +7735,7 @@ static u32 upload_quads_vp_indexed(const rsx_state* state, u32 first, u32 count)
         for (u32 k = 0; k < 4; k++)
             read_vp_vertex_cached(state, read_guest_index(state, first + q*4 + k), c[k]);
         static const int idx[6] = {0,1,2, 0,2,3};
-        for (int t = 0; t < 6; t++) { memcpy(&out[o*16], c[idx[t]], sizeof(c[0])); o++; }
+        for (int t = 0; t < 6; t++) { memcpy(&out[o*s_vl.n], c[idx[t]], VL_STRIDE); o++; }
         if (env_on("VTX_DUMP", &s_env_vtx_dump)) { static int _n=0; if (PS3_LOG_FIRST(_n, 6)) {
             FILE* f = fopen("vtx_dump.txt", _n==1 ? "w" : "a");
             if (f) {
@@ -7576,12 +7750,12 @@ static u32 upload_quads_vp_indexed(const rsx_state* state, u32 first, u32 count)
                 for (u32 k = 0; k < 4; k++)
                     fprintf(f, "  v%u i%u a0=(%.3f,%.3f,%.3f,%.3f) a8=(%.3f,%.3f)\n", k,
                         read_guest_index(state, first + q*4 + k),
-                        c[k][0].v[0],c[k][0].v[1],c[k][0].v[2],c[k][0].v[3],
-                        c[k][8].v[0],c[k][8].v[1]);
+                        vl_attr(c[k], 0)->v[0],vl_attr(c[k], 0)->v[1],vl_attr(c[k], 0)->v[2],vl_attr(c[k], 0)->v[3],
+                        vl_attr(c[k], 8)->v[0],vl_attr(c[k], 8)->v[1]);
                 fclose(f);
             } } }
     }
-    s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
+    s_d3d.vp_vb_offset += o * VL_STRIDE;
     return o;
 }
 
@@ -7595,7 +7769,7 @@ static u32 upload_quads_vp_indexed(const rsx_state* state, u32 first, u32 count)
  * VTX_LIST=1 goes back to the expansion. */
 static u32* s_ix_stamp;   /* guest index -> generation that converted it */
 static u32* s_ix_slot;    /* guest index -> vertex within the run        */
-static u32  s_ix_gen, s_ix_vbase, s_ix_nverts;
+static u32  s_ix_gen, s_ix_vbase, s_ix_nverts;   /* s_ix_vbase: the run's BYTE offset */
 
 static int ix_on(void)
 {
@@ -7615,8 +7789,9 @@ static int ix_can_continue(u32 first)
            pv->fp_addr == (st ? st->shader_program : 0) &&
            pv->begin_epoch == (st ? st->begin_epoch : 0) &&
            pv->ib_first + pv->index_count == s_d3d.vp_ib_offset &&
-           pv->vb_byte_offset == s_ix_vbase * VP_VERT_STRIDE &&
-           s_d3d.vp_vb_offset == (s_ix_vbase + s_ix_nverts) * VP_VERT_STRIDE;
+           pv->vl_mask == s_vl.mask && pv->vc_off == s_vl_cb_off &&
+           pv->vb_byte_offset == s_ix_vbase &&
+           s_d3d.vp_vb_offset == s_ix_vbase + s_ix_nverts * VL_STRIDE;
 }
 
 /* Returns the number of indices written; 0 means "use the list path". */
@@ -7634,10 +7809,10 @@ static u32 upload_tris_vp_ix(const rsx_state* state, u32 first, u32 count, int c
     }
     if (!cont) {
         if (++s_ix_gen == 0) { memset(s_ix_stamp, 0, (1u << 20) * sizeof(u32)); s_ix_gen = 1; }
-        s_ix_vbase  = s_d3d.vp_vb_offset / VP_VERT_STRIDE;
+        s_ix_vbase  = s_d3d.vp_vb_offset;
         s_ix_nverts = 0;
     }
-    VPSlot* vb = (VPSlot*)((u8*)s_d3d.vp_vb_mapped + (u64)s_d3d.vp_parity * MAX_VERTICES * VP_VERT_STRIDE);
+    VPSlot* vb = (VPSlot*)((u8*)s_d3d.vp_vb_mapped + (u64)s_d3d.vp_parity * VP_VB_BYTES + s_ix_vbase);
     u32* ib = (u32*)s_d3d.vp_ib_mapped + (u64)s_d3d.vp_parity * VP_MAX_INDICES + s_d3d.vp_ib_offset;
     const int local = ((state->index_array_dma & 0xF) == 0);
     const u8* ip = vm_base + cellGcmResolveLocated(local, state->index_array_offset);
@@ -7648,7 +7823,7 @@ static u32 upload_tris_vp_ix(const rsx_state* state, u32 first, u32 count, int c
         const u32 ix = sixteen ? (((u32)ip[kk * 2] << 8) | ip[kk * 2 + 1])
                                : (((u32)ip[kk * 4] << 24) | ((u32)ip[kk * 4 + 1] << 16) |
                                   ((u32)ip[kk * 4 + 2] << 8) | ip[kk * 4 + 3]);
-        if (ix >= (1u << 20) || s_ix_vbase + n >= MAX_VERTICES) {
+        if (ix >= (1u << 20) || (u64)s_ix_vbase + (u64)(n + 1) * VL_STRIDE > VP_VB_BYTES) {
             /* Out of range for the tables, or the buffer is full: abandon the
              * run; nothing of it is published, the list path takes the draw. */
             s_ix_run_valid = 0;
@@ -7658,12 +7833,12 @@ static u32 upload_tris_vp_ix(const rsx_state* state, u32 first, u32 count, int c
         if (s_ix_stamp[ix] != s_ix_gen) {
             s_ix_stamp[ix] = s_ix_gen;
             s_ix_slot[ix] = n;
-            read_vp_vertex(state, ix, &vb[(u64)(s_ix_vbase + n) * 16]);
+            read_vp_vertex(state, ix, &vb[(u64)n * s_vl.n]);
             n++;
         }
         ib[k] = s_ix_slot[ix];
     }
-    s_d3d.vp_vb_offset += (n - s_ix_nverts) * VP_VERT_STRIDE;
+    s_d3d.vp_vb_offset += (n - s_ix_nverts) * VL_STRIDE;
     s_ix_nverts = n;
     s_d3d.vp_ib_offset += count;
     s_ix_run_valid = 1;
@@ -7677,18 +7852,18 @@ static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
     if (!state || !vm_base || !s_d3d.vp_vb_mapped) return 0;
     if (!state->vertex_attribs[0].enabled) return 0;
     vp_attrs_dbg(state);
-    u32 maxv = (MAX_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+    u32 maxv = (VP_VB_BYTES - s_d3d.vp_vb_offset) / VL_STRIDE;
     if (count > maxv) { s_drop_draws++;
         { static int _n = 0; if (getenv("VBFULL") && PS3_LOG_FIRST(_n, 12))
             ps3_log("[VBFULL] fp=0x%X wanted %u verts, room for %u%c",
                     state->shader_program, count, maxv, 10); }
         count = maxv - (maxv % 3); }
     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
-        + (u64)s_d3d.vp_parity * MAX_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+        + (u64)s_d3d.vp_parity * VP_VB_BYTES + s_d3d.vp_vb_offset);
     { double _tv = perf_on() ? perf_now() : 0.0;
       vc_begin_draw();
       for (u32 k = 0; k < count; k++)
-          read_vp_vertex_cached(state, read_guest_index(state, first + k), &out[k*16]);
+          read_vp_vertex_cached(state, read_guest_index(state, first + k), &out[k*s_vl.n]);
       if (perf_on()) { s_perf_vtx += perf_now() - _tv; s_perf_nverts += count; } }
     /* IDXDBG=<hex shader_program>: index range for that program's draws. An
      * index past the vertex array reads unmapped guest memory as zero, which
@@ -7727,7 +7902,7 @@ static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
           && (pick == -2 || (int)first == pick)) {
           double sx = 0, sy = 0, sz = 0;
           for (u32 k = 0; k < count; k++) {
-              sx += out[k*16].v[0]; sy += out[k*16].v[1]; sz += out[k*16].v[2];
+              sx += out[k*s_vl.n].v[0]; sy += out[k*s_vl.n].v[1]; sz += out[k*s_vl.n].v[2];
           }
           float v[4] = { (float)(sx/count), (float)(sy/count), (float)(sz/count), 1.0f };
           float clip[4];
@@ -7773,7 +7948,7 @@ static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
         if (!have_c || recen) {
             double sx = 0, sy = 0, sz = 0;
             for (u32 k = 0; k < count; k++) {
-                sx += out[k*16].v[0]; sy += out[k*16].v[1]; sz += out[k*16].v[2];
+                sx += out[k*s_vl.n].v[0]; sy += out[k*s_vl.n].v[1]; sz += out[k*s_vl.n].v[2];
             }
             ox = (float)(sx/count); oy = (float)(sy/count); oz = (float)(sz/count);
             have_c = 1;
@@ -7788,8 +7963,8 @@ static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
                            if (e) { double a=0,b=0; sscanf(e, "%lf,%lf", &a, &b);
                                     dx = (float)a; dy = (float)b; }
                            shf = 1; }
-            out[k*16].v[0] = (out[k*16].v[0] - ox) * sc + dx;
-            out[k*16].v[1] = (out[k*16].v[1] - oy) * sc + dy;
+            out[k*s_vl.n].v[0] = (out[k*s_vl.n].v[0] - ox) * sc + dx;
+            out[k*s_vl.n].v[1] = (out[k*s_vl.n].v[1] - oy) * sc + dy;
             /* Leave z alone: under VP_BYPASS the object z maps straight to clip
              * z, so scaling it walks the geometry out of the depth range and
              * everything clips away. */
@@ -7805,7 +7980,7 @@ static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
       if (want && s_d3d.cur_texs[0].raw == want && n < 8) { n++;
         float mnx=1e30f,mny=1e30f,mnz=1e30f,mxx=-1e30f,mxy=-1e30f,mxz=-1e30f;
         for (u32 k = 0; k < count; k++) {
-            float x=out[k*16].v[0], y=out[k*16].v[1], z=out[k*16].v[2];
+            float x=out[k*s_vl.n].v[0], y=out[k*s_vl.n].v[1], z=out[k*s_vl.n].v[2];
             if (x<mnx)mnx=x; if (y<mny)mny=y; if (z<mnz)mnz=z;
             if (x>mxx)mxx=x; if (y>mxy)mxy=y; if (z>mxz)mxz=z;
         }
@@ -7814,7 +7989,7 @@ static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
                         " -> col0 v0=(%.3f %.3f %.3f %.3f)%c",
                 _a3->enabled, _a3->type, _a3->size, _a3->stride, _a3->offset,
                 _a3->frequency,
-                out[3].v[0], out[3].v[1], out[3].v[2], out[3].v[3], 10);
+                vl_attr(out, 3)->v[0], vl_attr(out, 3)->v[1], vl_attr(out, 3)->v[2], vl_attr(out, 3)->v[3], 10);
         const rsx_vertex_attrib* _a0 = &state->vertex_attribs[0];
         ps3_log("[DUCKVTX] first=%u count=%u a0(type=%u size=%u stride=%u off=0x%08X)"
                         " obj-bbox x[%.3f,%.3f] y[%.3f,%.3f] z[%.3f,%.3f]%c",
@@ -7880,7 +8055,7 @@ static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
                 read_guest_index(state, first+2),
                 a0->offset, vbase, nz, a0->stride, a0->size, a0->type,
                 out[0].v[0], out[0].v[1], out[0].v[2], 10); } }
-    s_d3d.vp_vb_offset += count * VP_VERT_STRIDE;
+    s_d3d.vp_vb_offset += count * VL_STRIDE;
     return count;
 }
 
@@ -7897,21 +8072,21 @@ static u32 upload_strip_vp_indexed(const rsx_state* state, u32 first, u32 count,
     if (!state->vertex_attribs[0].enabled) return 0;
     if (count < 3) return 0;
     u32 tris = count - 2;
-    u32 maxv = (MAX_VERTICES * VP_VERT_STRIDE - s_d3d.vp_vb_offset) / VP_VERT_STRIDE;
+    u32 maxv = (VP_VB_BYTES - s_d3d.vp_vb_offset) / VL_STRIDE;
     if (tris * 3 > maxv) tris = maxv / 3;
     VPSlot* out = (VPSlot*)((u8*)s_d3d.vp_vb_mapped
-        + (u64)s_d3d.vp_parity * MAX_VERTICES * VP_VERT_STRIDE + s_d3d.vp_vb_offset);
+        + (u64)s_d3d.vp_parity * VP_VB_BYTES + s_d3d.vp_vb_offset);
     u32 o = 0;
     vc_begin_draw();
     for (u32 t = 0; t < tris; t++) {
         u32 i0 = fan ? 0 : t;
         u32 i1 = t + 1, i2 = t + 2;
         if (!fan && (t & 1)) { u32 tmp = i1; i1 = i2; i2 = tmp; }
-        read_vp_vertex_cached(state, read_guest_index(state, first + i0), &out[o*16]); o++;
-        read_vp_vertex_cached(state, read_guest_index(state, first + i1), &out[o*16]); o++;
-        read_vp_vertex_cached(state, read_guest_index(state, first + i2), &out[o*16]); o++;
+        read_vp_vertex_cached(state, read_guest_index(state, first + i0), &out[o*s_vl.n]); o++;
+        read_vp_vertex_cached(state, read_guest_index(state, first + i1), &out[o*s_vl.n]); o++;
+        read_vp_vertex_cached(state, read_guest_index(state, first + i2), &out[o*s_vl.n]); o++;
     }
-    s_d3d.vp_vb_offset += o * VP_VERT_STRIDE;
+    s_d3d.vp_vb_offset += o * VL_STRIDE;
     return o;
 }
 
@@ -7927,11 +8102,12 @@ static void batch_make_room(u32 count)
 {
     if (!s_d3d.draw_count || !s_d3d.initialized) return;
     const u64 need = 3ull * count;
-    const int vp_full = (u64)s_d3d.vp_vb_offset / VP_VERT_STRIDE + need > MAX_VERTICES;
+    const u64 vp_bytes = need * VL_STRIDE + sizeof(VPSlot) * 16;   /* + a constants block */
+    const int vp_full = (u64)s_d3d.vp_vb_offset + vp_bytes > VP_VB_BYTES;
     const int ib_full = (u64)s_d3d.vp_ib_offset + need > VP_MAX_INDICES;
     const int vb_full = (u64)s_d3d.vb_offset / sizeof(BasicVertex) + need > (u64)MAX_VERTICES * VERTEX_STRIDE / sizeof(BasicVertex);
     if (!vp_full && !ib_full && !vb_full) return;
-    if (need > MAX_VERTICES) return;   /* could never fit; the upload rejects it as before */
+    if (vp_bytes > VP_VB_BYTES || need > MAX_VERTICES) return;   /* could never fit; the upload rejects it as before */
     const int keep = s_present_this_frame;
     s_present_this_frame = 0;
     render_frame();
@@ -7959,7 +8135,9 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
 
     if (!s_d3d.pipeline_ready || !s_d3d.vb_mapped) return;
     if (count == 0 || count > MAX_VERTICES) return;
+    vl_compute(s_d3d.current_rsx_state);
     batch_make_room(count);
+    if (s_d3d.vp_vb_mapped && !vl_constants(s_d3d.current_rsx_state)) return;
     vs_arrays(s_d3d.current_rsx_state, primitive, count);
 
     /* QUADS (prim 8) have no D3D12 topology; expand to a triangle list.
@@ -7979,6 +8157,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
             if (emitted && s_d3d.draw_count < MAX_DRAWS) {
                 D3D12DrawRecord* dr = &s_d3d.draws[s_d3d.draw_count];
                 dr->vb_byte_offset = rec;
+                dr->vl_mask = s_vl.mask; dr->vb_stride = VL_STRIDE; dr->vc_off = s_vl_cb_off;
                 dr->vertex_count   = emitted;
                 dr->topology       = RSX_TOPOLOGY_TRIANGLES;
                 dr->textured       = s_d3d.tex_bound;
@@ -8094,7 +8273,8 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
                 pv->fp_addr == fpnow && primitive == RSX_PRIMITIVE_TRIANGLES &&
                 pv->begin_epoch == (s_d3d.current_rsx_state
                                     ? s_d3d.current_rsx_state->begin_epoch : 0) &&
-                pv->vb_byte_offset + pv->vertex_count * VP_VERT_STRIDE == rec) {
+                pv->vl_mask == s_vl.mask && pv->vc_off == s_vl_cb_off &&
+                pv->vb_byte_offset + pv->vertex_count * pv->vb_stride == rec) {
                 pv->vertex_count += emitted;
                 s_d3d.merge_first_end = first + count;
                 return;
@@ -8103,6 +8283,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
         if (emitted && s_d3d.draw_count < MAX_DRAWS) {
             D3D12DrawRecord* dr = &s_d3d.draws[s_d3d.draw_count];
             dr->vb_byte_offset = rec;
+            dr->vl_mask = s_vl.mask; dr->vb_stride = VL_STRIDE; dr->vc_off = s_vl_cb_off;
             dr->vertex_count   = emitted;
             dr->topology       = RSX_TOPOLOGY_TRIANGLES;
             dr->textured       = s_d3d.tex_bound;
@@ -8212,7 +8393,9 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
     if (!s_d3d.pipeline_ready) return;
     if (count == 0 || count > MAX_VERTICES) return;
     if (!s_d3d.vp_vb_mapped || !s_d3d.vp_root_sig) return;
+    vl_compute(s_d3d.current_rsx_state);
     batch_make_room(count);
+    if (!vl_constants(s_d3d.current_rsx_state)) return;
 
     /* Expand through the VP path (indices resolved CPU-side): QUADS -> two
      * triangles per quad, TRIANGLES straight through, STRIP/FAN -> triangle
@@ -8259,7 +8442,8 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
             pv->fp_addr == fpnow &&
             pv->begin_epoch == (s_d3d.current_rsx_state
                                 ? s_d3d.current_rsx_state->begin_epoch : 0) &&
-            pv->vb_byte_offset + pv->vertex_count * VP_VERT_STRIDE == rec) {
+            pv->vl_mask == s_vl.mask && pv->vc_off == s_vl_cb_off &&
+                pv->vb_byte_offset + pv->vertex_count * pv->vb_stride == rec) {
             pv->vertex_count += emitted;
             s_d3d.merge_first_end = first + count;
             return;
@@ -8268,10 +8452,11 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
     if (emitted && s_d3d.draw_count < MAX_DRAWS) {
         D3D12DrawRecord* dr = &s_d3d.draws[s_d3d.draw_count];
         dr->vb_byte_offset = rec;
+        dr->vl_mask = s_vl.mask; dr->vb_stride = VL_STRIDE; dr->vc_off = s_vl_cb_off;
         dr->vertex_count   = emitted;
         dr->indexed        = ix_used;
         if (ix_used) {
-            dr->vb_byte_offset = s_ix_vbase * VP_VERT_STRIDE;
+            dr->vb_byte_offset = s_ix_vbase;
             dr->vertex_count   = s_ix_nverts;
             dr->ib_first       = ib0;
             dr->index_count    = emitted;

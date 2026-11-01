@@ -28,6 +28,60 @@ float rsx_rd_half_be(const u8* p)
     float o; memcpy(&o, &f, 4); return o;
 }
 
+/* Convert one element at p by its NV4097 type into out (n components; the
+ * rest keep what out holds). Shared by both fetch paths so they cannot
+ * drift apart. */
+static void rsx_convert(const u8* p, u32 type, u32 n, int idx, u32 size, u32 stride, float out[4])
+{
+    switch (type) {
+    case 2: /* CELL_GCM_VERTEX_F: float32 BE */
+        for (u32 k = 0; k < n; k++) out[k] = rsx_rd_bef(p + k * 4);
+        break;
+    case 3: /* SF: half float BE */
+        for (u32 k = 0; k < n; k++) out[k] = rsx_rd_half_be(p + k * 2);
+        break;
+    case 4: /* UB: u8 normalized [0,1] */
+        for (u32 k = 0; k < n; k++) out[k] = p[k] / 255.0f;
+        break;
+    case 1: /* S1: s16 normalized [-1,1] */
+        for (u32 k = 0; k < n; k++) {
+            s16 s = (s16)((p[k*2] << 8) | p[k*2+1]);
+            out[k] = (float)s / 32767.0f;
+        }
+        break;
+    case 5: /* S32K: s16 integer */
+        for (u32 k = 0; k < n; k++)
+            out[k] = (float)(s16)((p[k*2] << 8) | p[k*2+1]);
+        break;
+    case 6: /* CMP: one big-endian word, x and y signed 11 bits, z signed 10,
+             * normalized. It fell to the float default, so a mesh with
+             * compressed normals was lit from garbage. Same decode as
+             * rsx_vertex_compact.c and rsx_live_draw.c. */
+        {
+            const u32 w = ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];
+            s32 x = (s32)(w & 0x7FF);          if (x & 0x400) x -= 0x800;
+            s32 y = (s32)((w >> 11) & 0x7FF); if (y & 0x400) y -= 0x800;
+            s32 z = (s32)((w >> 22) & 0x3FF); if (z & 0x200) z -= 0x400;
+            out[0] = (float)x / 1023.0f;
+            out[1] = (float)y / 1023.0f;
+            out[2] = (float)z / 511.0f;
+            out[3] = 1.0f;
+        }
+        break;
+    case 7: /* UB256: u8 unnormalized */
+        for (u32 k = 0; k < n; k++) out[k] = (float)p[k];
+        break;
+    default:
+        { static int t = -1; if (t < 0) t = getenv("VTX_TYPEDBG") ? 1 : 0;
+          if (t) { static u32 seen = 0;
+              if (!(seen & (1u << (type & 31)))) { seen |= 1u << (type & 31);
+                  ps3_log("[VTXTYPE] UNHANDLED type=%u attr=%d size=%u stride=%u\n",
+                          type, idx, size, stride); } } }
+        for (u32 k = 0; k < n; k++) out[k] = rsx_rd_bef(p + k * 4);
+        break;
+    }
+}
+
 void rsx_fetch_attrib(const rsx_state* st, int idx, u32 vi, float out[4])
 {
     /* A disabled attribute array feeds the CONSTANT vertex attribute register
@@ -84,51 +138,41 @@ void rsx_fetch_attrib(const rsx_state* st, int idx, u32 vi, float out[4])
         : cellGcmResolveLocated(1, off)); /* LOCAL: VRAM, never the IO table */
 
     u32 n = a->size ? a->size : 4; if (n > 4) n = 4;
-    switch (a->type) {
-    case 2: /* CELL_GCM_VERTEX_F: float32 BE */
-        for (u32 k = 0; k < n; k++) out[k] = rsx_rd_bef(p + k * 4);
-        break;
-    case 3: /* SF: half float BE */
-        for (u32 k = 0; k < n; k++) out[k] = rsx_rd_half_be(p + k * 2);
-        break;
-    case 4: /* UB: u8 normalized [0,1] */
-        for (u32 k = 0; k < n; k++) out[k] = p[k] / 255.0f;
-        break;
-    case 1: /* S1: s16 normalized [-1,1] */
-        for (u32 k = 0; k < n; k++) {
-            s16 s = (s16)((p[k*2] << 8) | p[k*2+1]);
-            out[k] = (float)s / 32767.0f;
+    rsx_convert(p, a->type, n, idx, a->size, a->stride, out);
+}
+
+void rsx_fetch_plan_init(const rsx_state* st, int idx, rsx_fetch_plan* p)
+{
+    memset(p, 0, sizeof *p);
+    p->idx = (u8)idx;
+    for (int k = 0; k < 4; k++) p->c[k] = st->vertex_data4f[idx][k];
+    const rsx_vertex_attrib* a = &st->vertex_attribs[idx];
+    if (!a->enabled || a->stride == 0 || !vm_base) return;   /* mode 0: the register */
+    p->stride = a->stride;
+    p->type = (u8)a->type;
+    { u32 n = a->size ? a->size : 4; if (n > 4) n = 4; p->n = (u8)n; }
+    p->base_index = st->vertex_data_base_index;
+    p->mode = 1;
+    if (!rsx_vertex_freq_plain(a->frequency, (st->frequency_divider_op >> idx) & 1u)) {
+        static int nofreq = -1;                 /* VP_NOFREQ, as in rsx_fetch_attrib */
+        if (nofreq < 0) nofreq = getenv("VP_NOFREQ") ? 1 : 0;
+        if (!nofreq) {
+            p->mode = (st->frequency_divider_op & (1u << idx)) ? 3 : 2;
+            p->freq = a->frequency;
         }
-        break;
-    case 5: /* S32K: s16 integer */
-        for (u32 k = 0; k < n; k++)
-            out[k] = (float)(s16)((p[k*2] << 8) | p[k*2+1]);
-        break;
-    case 6: /* CMP: one big-endian word, x and y signed 11 bits, z signed 10,
-             * normalized. It fell to the float default, so a mesh with
-             * compressed normals was lit from garbage. Same decode as
-             * rsx_vertex_compact.c and rsx_live_draw.c. */
-        {
-            const u32 w = ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];
-            s32 x = (s32)(w & 0x7FF);          if (x & 0x400) x -= 0x800;
-            s32 y = (s32)((w >> 11) & 0x7FF); if (y & 0x400) y -= 0x800;
-            s32 z = (s32)((w >> 22) & 0x3FF); if (z & 0x200) z -= 0x400;
-            out[0] = (float)x / 1023.0f;
-            out[1] = (float)y / 1023.0f;
-            out[2] = (float)z / 511.0f;
-            out[3] = 1.0f;
-        }
-        break;
-    case 7: /* UB256: u8 unnormalized */
-        for (u32 k = 0; k < n; k++) out[k] = (float)p[k];
-        break;
-    default:
-        { static int t = -1; if (t < 0) t = getenv("VTX_TYPEDBG") ? 1 : 0;
-          if (t) { static u32 seen = 0;
-              if (!(seen & (1u << (a->type & 31)))) { seen |= 1u << (a->type & 31);
-                  ps3_log("[VTXTYPE] UNHANDLED type=%u attr=%d size=%u stride=%u\n",
-                          a->type, idx, a->size, a->stride); } } }
-        for (u32 k = 0; k < n; k++) out[k] = rsx_rd_bef(p + k * 4);
-        break;
     }
+    const u32 off0 = (st->vertex_data_base_offset + (a->offset & 0x7FFFFFFFu)) & 0x0FFFFFFFu;
+    if (a->offset & 0x80000000u) p->off0 = off0;                         /* MAIN */
+    else                         p->base = vm_base + cellGcmResolveLocated(1, off0);   /* LOCAL */
+}
+
+void rsx_fetch_planned(const rsx_fetch_plan* p, u32 vi, float out[4])
+{
+    out[0] = p->c[0]; out[1] = p->c[1]; out[2] = p->c[2]; out[3] = p->c[3];
+    if (!p->mode) return;
+    const u32 ei = p->mode == 1 ? ((vi + p->base_index) & 0x000FFFFFu)
+                 : p->mode == 3 ? vi % p->freq : vi / p->freq;
+    const u8* q = p->base ? p->base + (u64)ei * p->stride
+                          : vm_base + cellGcmResolveLocated(0, p->off0 + ei * p->stride);
+    rsx_convert(q, p->type, p->n, p->idx, p->n, p->stride, out);
 }

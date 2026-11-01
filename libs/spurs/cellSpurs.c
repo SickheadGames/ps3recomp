@@ -16,6 +16,7 @@
 #include "spurs_taskset.h"  /* REAL BE CellSpursTaskset layout builders (fork Option-B) */
 #include "../../runtime/ppu/ppu_memory.h"   /* vm_base (guest mem) */
 #include "ps3emu/ps3_tprof.h"    /* PS3_TPROF: in-process samples of the SPU workers */
+#include "ps3emu/ps3_ftrace.h"   /* PS3_FTRACE: policy-module runs on the timeline */
 #include <stdio.h>
 #include <stdlib.h>   /* getenv -- an implicit decl returns int, truncating the pointer */
 #include <string.h>
@@ -1844,8 +1845,11 @@ static DWORD WINAPI spurs_pm_worker(LPVOID p)
             SleepConditionVariableSRW(&si->wake, &si->lock, INFINITE, 0);
         if (si->stopping && !slot->busy) break;
         ReleaseSRWLockExclusive(&si->lock);
+        const uint64_t ft0 = PS3_FT_ON() ? ps3_ft_now() : 0;
         spu_run_policy_module(slot->fn, slot->image_id, slot->pm, slot->pm_size,
                               slot->data, slot->wid, slot->ea, slot->spu_num);
+        if (ft0) ps3_ft_span(PS3_FT_SPU_BUSY, (uint32_t)slot->spu_num, (uint32_t)slot->image_id,
+                             slot->wid, ft0, ps3_ft_now());
         extern SPU_THREAD_LOCAL volatile unsigned g_spurs_pm_polls;
         unsigned polls = g_spurs_pm_polls;
         AcquireSRWLockExclusive(&si->lock);
@@ -2425,6 +2429,7 @@ static struct {
     u32 entry_ea;     /* first command word EA */
     u16 size_desc;
     u16 max_grab;
+    u32 max_cont;     /* maxContention: how many SPUs may run its jobs at once (0 = not given) */
     u32 spurs_ea;     /* owning SPURS instance; 0 = unknown (legacy caller) */
     int run_count;
     volatile long running;   /* 1 while a host thread walks this chain */
@@ -2502,7 +2507,7 @@ s32 cellSpursJobChainAttributeSetName(u64 attr_ea, u64 name_ea)
 }
 
 /* Register (or re-register) a job chain handle. Shared by both Create forms. */
-static s32 jc_register(u32 jc_ea, u32 entry_ea, u16 size_desc, u16 max_grab,
+static s32 jc_register(u32 jc_ea, u32 entry_ea, u16 size_desc, u16 max_grab, u32 max_cont,
                        u32 spurs_ea, const char* who)
 {
     for (int i = 0; i < MAX_JOBCHAINS; i++) {
@@ -2511,6 +2516,7 @@ static s32 jc_register(u32 jc_ea, u32 entry_ea, u16 size_desc, u16 max_grab,
             s_jobchains[i].entry_ea  = entry_ea;
             s_jobchains[i].size_desc = size_desc;
             s_jobchains[i].max_grab  = max_grab;
+            s_jobchains[i].max_cont  = max_cont;
             s_jobchains[i].spurs_ea  = spurs_ea;
             s_jobchains[i].run_count = 0;
             s_jobchains[i].pc = 0;
@@ -2550,6 +2556,7 @@ s32 cellSpursCreateJobChainWithAttribute(u64 spurs_ea, u64 jc_ea, u64 attr_ea)
            name_ea ? (const char*)(vm_base + name_ea) : "-");
 
     return jc_register((u32)jc_ea, entry, (u16)(sd_mg >> 16), (u16)(sd_mg & 0xFFFFu),
+                       vm_read32((u32)attr_ea + JCATTR_MAX_CONT),
                        (u32)spurs_ea, "CreateJobChainWithAttribute");
 }
 
@@ -2585,7 +2592,7 @@ s32 cellSpursCreateJobChain(u64 spurs_ea, u64 jc_ea, u64 entry_ea,
             jc_dump_commands("CreateJobChain", (u32)entry_ea, 16);
     }
     return jc_register((u32)jc_ea, (u32)entry_ea, (u16)sizeJobDescriptor,
-                       (u16)maxGrabbedJob, (u32)spurs_ea, "CreateJobChain");
+                       (u16)maxGrabbedJob, maxContention, (u32)spurs_ea, "CreateJobChain");
 }
 
 /* ---------------------------------------------------------------------------
@@ -3000,6 +3007,142 @@ static void jc_signal_done(u32 jc_ea, int job_index)
  * has somewhere to live: every exit from this function parks pc (and the
  * CALL/RET return address) back in the slot, and the next RunJobChain picks up
  * from there instead of re-walking from the top. */
+/* ---------------------------------------------------------------------------
+ * Parallel jobs within a chain.
+ *
+ * Real SPURS runs a chain's jobs on up to maxContention SPUs at once; the
+ * chain's SYNC/LWSYNC commands are what order them. The walker used to run
+ * every job itself, one after another: the title's render chain runs ~450
+ * jobs a frame, and its main thread spent ~73 ms of every frame waiting for
+ * that one host thread. Now a run of consecutive JOB commands is a batch,
+ * shared out between the walker and a small pool, and the walker moves on
+ * only when the whole batch is done -- i.e. it treats every command other
+ * than JOB and NOP as a barrier, which is at least as strict as SYNC.
+ * Completions are signalled after the batch, in job order.
+ *
+ * Every job, run by the walker or the pool, claims a virtual SPU number for its
+ * duration (jc_spu_claim). SPURS_JC_SERIAL=1 runs every chain serially as
+ * before. A chain created with maxContention < 2 stays serial. */
+static inline void spu_thread_set_fp_mode(void);
+extern void spurs_job_set_spu_num(uint32_t n);
+#define JC_POOL      3     /* worker threads; with the walker, 4 jobs at once */
+#define JC_BATCH_MAX 256
+
+/* Virtual SPU numbers for chain jobs. A job reads its SPU number
+ * (cellSpursGetCurrentSpuId) to pick per-SPU resources -- output rings, one
+ * RSX label per SPU -- so two jobs running at once must never see the same
+ * one. They all used to see 0: the walkers of different chains, each running
+ * jobs concurrently, and the taskset tasks, which run with 0 as well. A job
+ * now claims a free number in 1..nspus-1 for exactly as long as it runs, and
+ * waits when every one is taken, as a job waits for a free SPU on hardware.
+ * 0 stays with the taskset side. */
+static volatile long s_jc_spu_busy;
+static u32 jc_spu_claim(u32 nspus)
+{
+    if (nspus > 8) nspus = 8;
+    if (nspus <= 1) return 0;
+    for (;;) {
+        for (u32 n = 1; n < nspus; n++) {
+            const long bit = 1L << n, old = s_jc_spu_busy;
+            if (!(old & bit) && _InterlockedCompareExchange(&s_jc_spu_busy, old | bit, old) == old)
+                return n;
+        }
+        SwitchToThread();
+    }
+}
+static void jc_spu_release(u32 n) { if (n) _InterlockedAnd(&s_jc_spu_busy, ~(1L << n)); }
+static u32 jc_nspus(int slot)
+{
+    struct SpursInst* si = spurs_inst_find(s_jobchains[slot].spurs_ea);
+    return si ? si->nspus : 6;
+}
+/* Run one chain job on a claimed virtual SPU. */
+static void jc_run_job_on_spu(u32 job_ea, int idx, u32 size_desc, u32 nspus)
+{
+    const u32 sn = jc_spu_claim(nspus);
+    spurs_job_set_spu_num(sn);
+    jc_run_one_job(job_ea, idx, size_desc);
+    jc_spu_release(sn);
+}
+
+typedef struct JcBatch {
+    u32 jc_ea, size_desc, nspus;
+    int n;
+    u32 job_ea[JC_BATCH_MAX];
+    int idx[JC_BATCH_MAX];
+    volatile long next, done;
+    struct JcBatch* link;
+} JcBatch;
+
+static SRWLOCK            s_jcp_lock = SRWLOCK_INIT;
+static CONDITION_VARIABLE s_jcp_cv;   /* zero-init == CONDITION_VARIABLE_INIT */
+static JcBatch*           s_jcp_head;
+static volatile long      s_jcp_started;
+
+/* Run items of b until none are left unclaimed. */
+static void jc_batch_drain(JcBatch* b)
+{
+    for (;;) {
+        const long k = _InterlockedIncrement(&b->next) - 1;
+        if (k >= b->n) return;
+        { extern u32 g_spurs_job_ls_handle; g_spurs_job_ls_handle = b->jc_ea; }
+        jc_run_job_on_spu(b->job_ea[k], b->idx[k], b->size_desc, b->nspus);
+        _InterlockedIncrement(&b->done);
+    }
+}
+
+static DWORD WINAPI jc_pool_worker(LPVOID p)
+{
+    spu_thread_set_fp_mode();
+    ps3_thread_name("spurs jc pool %d", (int)(intptr_t)p);
+    AcquireSRWLockExclusive(&s_jcp_lock);
+    for (;;) {
+        JcBatch* b = s_jcp_head;
+        while (b && b->next >= b->n) b = b->link;
+        if (!b) { SleepConditionVariableSRW(&s_jcp_cv, &s_jcp_lock, INFINITE, 0); continue; }
+        ReleaseSRWLockExclusive(&s_jcp_lock);
+        jc_batch_drain(b);
+        AcquireSRWLockExclusive(&s_jcp_lock);
+    }
+}
+
+static int jc_parallel_on(int slot)
+{
+    static int serial = -1;
+    if (serial < 0) serial = getenv("SPURS_JC_SERIAL") ? 1 : 0;
+    if (serial || s_jobchains[slot].max_cont == 1) return 0;
+    if (_InterlockedCompareExchange(&s_jcp_started, 1, 0) == 0)
+        for (int w = 1; w <= JC_POOL; w++) {
+            HANDLE th = CreateThread(NULL, 1u << 20, jc_pool_worker, (LPVOID)(intptr_t)w, 0, NULL);
+            if (th) CloseHandle(th);
+        }
+    return 1;
+}
+
+/* Run a batch to completion (pool + this thread), then signal its jobs. */
+static void jc_batch_run(JcBatch* b)
+{
+    if (b->n == 0) return;
+    b->next = 0; b->done = 0;
+    if (b->n > 1) {
+        AcquireSRWLockExclusive(&s_jcp_lock);
+        b->link = s_jcp_head; s_jcp_head = b;
+        WakeAllConditionVariable(&s_jcp_cv);
+        ReleaseSRWLockExclusive(&s_jcp_lock);
+    }
+    jc_batch_drain(b);
+    while (b->done < b->n) YieldProcessor();
+    if (b->n > 1) {
+        AcquireSRWLockExclusive(&s_jcp_lock);
+        JcBatch** pp = &s_jcp_head;
+        while (*pp && *pp != b) pp = &(*pp)->link;
+        if (*pp) *pp = b->link;
+        ReleaseSRWLockExclusive(&s_jcp_lock);
+    }
+    for (int k = 0; k < b->n; k++) jc_signal_done(b->jc_ea, b->idx[k]);
+    b->n = 0;
+}
+
 static void jc_execute(int slot)
 {
     const u32 jc_ea     = s_jobchains[slot].jc_ea;
@@ -3009,10 +3152,18 @@ static void jc_execute(int slot)
     u32 pc     = s_jobchains[slot].pc ? s_jobchains[slot].pc : entry_ea;
     u32 ret_pc = s_jobchains[slot].ret_pc;
 
-/* Park the walk so the next RunJobChain resumes here. */
-#define JC_PARK(at) do { s_jobchains[slot].pc        = (at); \
+/* Park the walk so the next RunJobChain resumes here (finishing any batch). */
+#define JC_PARK(at) do { jc_batch_run(bt); \
+                         s_jobchains[slot].pc        = (at); \
                          s_jobchains[slot].ret_pc    = ret_pc; \
                          s_jobchains[slot].last_jobs = jobs; } while (0)
+
+    /* One walker per chain at a time, so one batch per slot. */
+    static JcBatch s_batches[MAX_JOBCHAINS];
+    JcBatch* const bt = &s_batches[slot];
+    const u32 nspus = jc_nspus(slot);
+    bt->jc_ea = jc_ea; bt->size_desc = size_desc; bt->nspus = nspus; bt->n = 0;
+    const int par = jc_parallel_on(slot);
 
     int jobs = 0;
     /* Bound IDLE steps, not total steps. A SPURS job chain is frequently a
@@ -3025,6 +3176,7 @@ static void jc_execute(int slot)
     int idle = 0;
     for (;; idle++) {
         /* An urgent RESET_PC/NEXT runs ahead of the next command. */
+        if (bt->n && s_jobchains[slot].urgent_pc) jc_batch_run(bt);
         { const u32 up = (u32)_InterlockedExchange(&s_jobchains[slot].urgent_pc, 0);
           if (up) { pc = up; ret_pc = 0; idle = 0; } }
         if (idle > 4096) {
@@ -3046,10 +3198,20 @@ static void jc_execute(int slot)
         u32 op  = (u32)(cmd & 7);
         u32 ext = (u32)(cmd & 127);
 
+        /* Anything but JOB/NOP ends the batch: run it before acting on it. */
+        if (bt->n && op != 0) jc_batch_run(bt);
+
+        if (cmd != 0 && op == 0 && par) {             /* JOB, batched */
+            bt->job_ea[bt->n] = (u32)(cmd & ~7ull);
+            bt->idx[bt->n] = jobs++;
+            if (++bt->n == JC_BATCH_MAX) jc_batch_run(bt);
+            idle = 0;
+            pc += 8; continue;
+        }
         if (cmd != 0 && op == 0) {                    /* JOB */
             { extern u32 g_spurs_job_ls_handle; g_spurs_job_ls_handle = jc_ea; }
             int idx = jobs++;
-            jc_run_one_job((u32)(cmd & ~7ull), idx, size_desc);
+            jc_run_job_on_spu((u32)(cmd & ~7ull), idx, size_desc, nspus);
             idle = 0;                    /* real work: the chain is healthy */
             /* Signal per JOB, not per lap. The application waits once for each
              * unit of work it queued -- this title notified the guard 7 times
@@ -3173,8 +3335,9 @@ static DWORD WINAPI jc_thread(LPVOID p)
      * is one-shot; if it reads descriptors before the PPU populates the I/O
      * (n_dma=0, empty ioBuffer), deferring the walk should let real I/O appear.
      * Confirms timing-vs-never before committing to the async rewrite. */
-    { const char* d = getenv("SPURS_JC_DELAY");
-      if (d && *d) Sleep((unsigned)atoi(d)); }
+    { static int s_delay = -1;   /* read once: this runs on every chain run */
+      if (s_delay < 0) { const char* d = getenv("SPURS_JC_DELAY"); s_delay = (d && *d) ? atoi(d) : 0; }
+      if (s_delay) Sleep((unsigned)s_delay); }
 
     /* The old loop lost run requests two ways. (1) It cleared `running` BEFORE
      * taking the rerun token, so a RunJobChain landing in that window spawned a
@@ -3193,7 +3356,10 @@ static DWORD WINAPI jc_thread(LPVOID p)
      * first walk below serves it and every other run already latched. */
     _InterlockedExchange(&s_jobchains[slot].rerun, 0);
     for (;;) {
-        jc_execute(slot);
+        { const uint64_t ft0 = PS3_FT_ON() ? ps3_ft_now() : 0;
+          jc_execute(slot);
+          if (ft0) ps3_ft_span(PS3_FT_SPU_BUSY, 200u + (uint32_t)slot, (uint32_t)s_jobchains[slot].last_jobs,
+                               s_jobchains[slot].jc_ea, ft0, ps3_ft_now()); }
 
         /* Runs still latched here came in after the walk read its END (the
          * END read cancels the earlier ones -- see jc_execute), i.e. after the

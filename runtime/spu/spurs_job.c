@@ -155,6 +155,14 @@ SPURS_JOB_TLS int g_spurs_job_mbox_valid;
 SPURS_JOB_TLS uint32_t g_spurs_job_spu_num;
 void spurs_job_set_spu_num(uint32_t n) { g_spurs_job_spu_num = n; }
 
+/* SPURS_JOB_DUMP, read once: getenv walks the whole environment, per job. */
+static int job_dump_on(void)
+{
+    static int v = -1;
+    if (v < 0) v = getenv("SPURS_JOB_DUMP") ? 1 : 0;
+    return v;
+}
+
 int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
                       uint32_t job_ea, uint32_t job_desc_size)
 {
@@ -297,7 +305,8 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
      * its DMA and atomic EAs from these words, so when a job spins on a
      * lock-line address that is not backed, this is what to read first. */
     { static int _d = 0;
-      if (getenv("SPURS_JOB_DESCDUMP") && PS3_LOG_FIRST(_d, 4)) {
+      static int s_dd = -1; if (s_dd < 0) s_dd = getenv("SPURS_JOB_DESCDUMP") ? 1 : 0;   /* once: this runs per job */
+      if (s_dd && PS3_LOG_FIRST(_d, 4)) {
           ps3_log("[spurs-job] desc @0x%08X (%u bytes):", job_ea, dsz);
           for (uint32_t o = 0; o < dsz && o < 128; o += 4) {
               if ((o & 31) == 0) ps3_log("\n    +%02X:", o);
@@ -327,7 +336,7 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
      * The header's input-DMA-list/io fields are legitimately zero for it. Dump
      * the user data + that command block so the bail path is attributable. */
     uint32_t dump_cmd = 0;
-    if (getenv("SPURS_JOB_DUMP")) {
+    if (job_dump_on()) {
         uint64_t ud  = g64(job_ea + JH_SIZE);        /* desc+0x30 */
         uint32_t cmd = (uint32_t)ud;                 /* low word = EA */
         ps3_log("[spurs-job] job 0x%08X userdata: %016llX %016llX %016llX %016llX\n",
@@ -437,7 +446,7 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
           ps3_log("[spurs-job] job 0x%08X posted mbox=0x%08X intr=0x%08X\n",
                   job_ea, g_spurs_job_mbox, g_spurs_job_mbox_intr); }
 
-    if (getenv("SPURS_JOB_DUMP")) {
+    if (job_dump_on()) {
         ps3_log("[spurs-job] job 0x%08X exit: status=0x%X stop=0x%X pc=0x%05X\n",
                 job_ea, ctx.status, ctx.stop_code, ctx.pc);
         /* Post-run view of the same command block: the game polls result/status

@@ -68,6 +68,24 @@ float rsx_rd_half_be(const u8* p);  /* 2-byte IEEE half -> float  */
  */
 void rsx_fetch_attrib(const rsx_state* st, int idx, u32 vi, float out[4]);
 
+/* The same fetch with its per-draw work done once. rsx_fetch_attrib resolves
+ * the array, reads the frequency state and the constant register for every
+ * vertex; a draw converts thousands of vertices with that state fixed. Plan
+ * each attribute when the draw starts (rsx_fetch_plan_init), then fetch per
+ * vertex (rsx_fetch_planned) -- same values, bit for bit. A LOCAL array's
+ * address is linear in the element index, so its plan keeps the host pointer
+ * of element 0; a MAIN array still resolves each element through the IO
+ * table. A plan is only valid while the state it was made from is unchanged. */
+typedef struct {
+    const u8* base;        /* host address of element 0 (LOCAL arrays), else NULL */
+    u32       off0;        /* masked array offset of element 0 (MAIN arrays)       */
+    u32       stride, freq, base_index;
+    u8        idx, type, n, mode;   /* mode: 0 constant, 1 per vertex, 2 divide, 3 modulo */
+    float     c[4];        /* the constant vertex attribute register               */
+} rsx_fetch_plan;
+void rsx_fetch_plan_init(const rsx_state* st, int idx, rsx_fetch_plan* p);
+void rsx_fetch_planned(const rsx_fetch_plan* p, u32 vi, float out[4]);
+
 #ifdef __cplusplus
 }
 #endif
