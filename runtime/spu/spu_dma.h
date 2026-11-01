@@ -1006,8 +1006,36 @@ static inline void spu_dma_repeat_log_end(const spu_context* spu, uint32_t ea, u
     }
 }
 
+/* Whether any of mfc_submit's diagnostic switches is set, read once. Every MFC
+ * command passed some twenty of them, each its own cached test; with none set
+ * -- the normal run -- one test now skips them all. A switch named here gates
+ * its block exactly as before when set. */
+static inline int mfc_diag_on(void)
+{
+    static int v = -1;
+    if (v < 0) {
+        static const char* const names[] = {
+            "SPU_CMDHIST", "SPU_DMA_IMG", "SPU_WATCHEA", "SPU_WATCHLSA", "SPU_ROWCOV",
+            "SPU_VRAMPC", "SPU_H2LSRC", "SPU_PUTEA", "SPU_PUTHIST",
+            "SPU_DMATRACE", "SPU_DMATRACE_ALL", "SPU_DMATRACE_RAW",
+        };
+        int any = 0;
+        for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+            if (getenv(names[i])) any = 1;
+        v = any;
+    }
+    return v;
+}
+
 static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
 {
+    uint32_t lsa  = spu->mfc_lsa;
+    uint64_t ea   = ((uint64_t)spu->mfc_eah << 32) | spu->mfc_eal;
+    uint32_t size = spu->mfc_size;
+    uint32_t tag  = spu->mfc_tag & 0x1F;
+    int rc = 0;
+
+    if (mfc_diag_on()) {   /* diagnostics, before the transfer */
     /* SPU_CMDHIST=1: every MFC command that reaches the engine, by opcode and
      * SPU image. Catches list DMAs (putl/getl) that never reach
      * mfc_do_transfer's per-element path. */
@@ -1020,11 +1048,26 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
                   if (h[c][im]) fprintf(stderr, "   cmd=0x%02X img=%d  %llu%c",
                                         c, im, h[c][im], 10);
           } } }
-    uint32_t lsa  = spu->mfc_lsa;
-    uint64_t ea   = ((uint64_t)spu->mfc_eah << 32) | spu->mfc_eal;
-    uint32_t size = spu->mfc_size;
-    uint32_t tag  = spu->mfc_tag & 0x1F;
-    int rc = 0;
+
+    /* TEMPORARY: SPU_DMA_IMG=<image> SPU_DMA_LO/HI=<hex>: log that image's
+     * GETs and PUTs touching [LO,HI) with the caller's lr and the first words
+     * of guest memory (before a PUT lands, after a GET is read: same bytes). */
+    { static int s_di = -2; static uint32_t s_lo, s_hi;
+      if (s_di == -2) { const char* e = getenv("SPU_DMA_IMG"); s_di = e ? atoi(e) : -1;
+          const char* l = getenv("SPU_DMA_LO"); const char* h = getenv("SPU_DMA_HI");
+          s_lo = l ? (uint32_t)strtoul(l, 0, 16) : 0; s_hi = h ? (uint32_t)strtoul(h, 0, 16) : 0xFFFFFFFFu; }
+      const uint32_t c = cmd & 0xFF;
+      if (s_di >= 0 && spu->image_id == s_di && (uint32_t)ea < s_hi && (uint32_t)ea + size > s_lo &&
+          (c == 0x40 || c == 0x20) && size <= 0x4000) {
+          extern uint8_t* vm_base;
+          const uint8_t* m = (c == 0x20) ? (spu->ls + (lsa & 0x3FFFF)) : (vm_base + (uint32_t)ea);   /* PUT: the data being written */
+          #define DW(o) (((uint32_t)m[o]<<24)|((uint32_t)m[o+1]<<16)|((uint32_t)m[o+2]<<8)|m[o+3])
+          char b[600]; int n = 0;
+          for (uint32_t o = 0; o + 4 <= size && o < 128; o += 4) n += snprintf(b + n, sizeof b - n, " %08X", DW(o));
+          #undef DW
+          ps3_log("[dmaimg] img=%d ctx=%p %s ea=0x%08X size=0x%X lsa=0x%05X lr=0x%05X%s\n", spu->image_id, (void*)spu,
+                  c == 0x40 ? "GET" : "PUT", (uint32_t)ea, size, lsa, spu->gpr[0]._u32[0] & 0x3FFFF, b);
+      } }
 
     /* SPU_WATCHEA=<hex guest addr>: report every DMA whose destination range
      * covers one word, with the SPU id, its pc and the value the word holds
@@ -1277,6 +1320,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
               }
           }
       } }
+    }   /* mfc_diag_on: before the transfer */
 
     /* cri build (YDKJ_CRI_CHAIN): when the kernel DMA-loads the TASKSET policy
      * module (libsre guest 0x30023680) to LS 0xA00, switch this SPU's image to 23
@@ -1396,6 +1440,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
         return 0;
     }
 
+    if (mfc_diag_on()) {   /* diagnostics: SPU_DMATRACE*, before the transfer */
     /* DMA trace for the cri task (image 22): log each transfer's LS/EA/size so we
      * can see the work-fetch GET (func_000040F0) that precedes the branch-to-0 and
      * whether its source EA holds valid work-queue data. Env SPU_DMATRACE_ALL. */
@@ -1547,6 +1592,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
                         fd_lo,fd_hi, (fd_hi>=fd_lo)?(fd_hi-fd_lo):0);
         }
     }
+    }   /* mfc_diag_on: SPU_DMATRACE* */
 
     /* Policy-module observation trace: every SPURS PM run's first transfers,
      * always on (policy runs are rare and their DMA pattern is the primary
@@ -1636,7 +1682,7 @@ static inline int mfc_submit(mfc_engine* mfc, spu_context* spu, uint32_t cmd)
 
     /* After a cri-task GET, dump the bytes it just read (the task context) so we
      * can tell if eaContext holds valid SPURS work data or garbage. */
-    {
+    if (mfc_diag_on()) {
         static int64_t dt2=-2; if (dt2==-2){ const char* e=getenv("SPU_DMATRACE_ALL"); dt2=e?1:0; }
         if (dt2 && spu->image_id==22 && cmd==0x40 /*GET*/ && size<=0x80) {
             static int _g=0; if (PS3_LOG_FIRST(_g, 6)) {

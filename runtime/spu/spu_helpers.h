@@ -83,11 +83,19 @@ static inline uint8x16_t spu__iota(void) {
  * a Bink video decoder ran at 6-7 fps. The per-lane variable shifts (shl/rot/rotm/rotma) also
  * need AVX2 (vpsllvd & co.) and keep the scalar form without it. Each stays bit-identical to
  * spu_X_ref (tests/test_spu_int_x86.c). */
-#if !defined(__ARM_NEON) && defined(__SSE4_1__) && \
+/* MSVC never defines __SSE4_1__, but cl.exe takes SSE4.1 intrinsics without an /arch flag (as
+ * for the AVX2 float path below): without the _MSC_VER test an MSVC build ran every op here as
+ * its scalar _ref byte loop. */
+#if !defined(__ARM_NEON) && \
+    (defined(__SSE4_1__) || (defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64))) && \
     !defined(SPU_SCALAR_HELPERS) && !defined(SPU_SCALAR_INT)
 #define SPU_X86 1
 #include <immintrin.h>
+#if defined(_MSC_VER) && !defined(__clang__)
+#define SPU__XI static __forceinline
+#else
 #define SPU__XI static inline __attribute__((always_inline))
+#endif
 SPU__XI __m128i spu__xl(u128 a) { __m128i v; memcpy(&v, &a, 16); return v; }
 SPU__XI u128 spu__xs(__m128i v) { u128 r; memcpy(&r, &v, 16); return r; }
 /* Host lane h holds SPU byte h^3. ir[h] = the SPU source byte for the result's SPU byte h^3
@@ -317,16 +325,17 @@ static inline u128 spu_xor(u128 a, u128 b) {
 #else
 static inline u128 spu_xor(u128 a, u128 b) { return spu_xor_ref(a, b); }
 #endif
-/* MSVC x64 (no SPU_X86: MSVC never defines __SSE4_1__) gets explicit SSE2 for
- * the complemented bitwise ops. Left as scalar u64 code, MSVC 14.38's
+/* MSVC x64 gets explicit SSE2 for the complemented bitwise ops. Left as scalar u64 code, MSVC 14.38's
  * auto-vectorizer turns `a & ~b` into ANDNPS and then stores the wrong
  * register: in AC1's Havok SPU job queue, `andc $r2,$r2,$r6` came out as
  *     andnps xmm6,xmm0 ; movaps xmm6,[rsp+50h] ; movups [ctx+r2],xmm0
  * i.e. r2 kept its pre-andc value. "active==0 && queues empty" became just
  * "queues empty", the master tasks quit mid-step and the PPU waited for ever.
  * The intrinsics do not go through that path. Lane order does not matter to
- * bitwise ops. */
-#if defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64) && !SPU_X86 && \
+ * bitwise ops. Applies with SPU_X86 too: that section has no forms of these four,
+ * so without this an MSVC build with SPU_X86 fell back to the miscompiled u64 code
+ * (the Havok hang again, during the first level load). */
+#if defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64) && \
     !defined(SPU_SCALAR_HELPERS)
 #include <emmintrin.h>
 #define SPU_MSVC_SSE2 1
@@ -1143,15 +1152,22 @@ SPU__X8_INLINE __m256d spu__x8_wide(__m128i x) { return _mm256_cvtps_pd(_mm_cast
 SPU__X8_INLINE __m128i spu__x8_narrow(__m256i m) {
     return _mm256_castsi256_si128(_mm256_permutevar8x32_epi32(m, _mm256_setr_epi32(0, 2, 4, 6, 0, 2, 4, 6)));
 }
-/* d truncated to singles. *ok: lanes whose result is a normal single or an exact zero and, when
- * err is given, did not both round and land on a 24-bit boundary. *zm: the zero lanes. */
+/* d truncated to singles. *ok: lanes whose result is a normal single, or below the normal range
+ * (an exact zero included), and, when err is given, did not both round and land on a 24-bit
+ * boundary. *zm: the lanes below the normal range, all +0 in the result.
+ *
+ * Below the normal range is a +0 because the SPU flushes any result under 2^-126 to +0
+ * (spu__sf_pack: biased < 1), and truncation never grows a magnitude. That holds for fm (the
+ * product is exact) and fa (exact within the exponent gap the caller enforces), and for fma too:
+ * 2^-126 is a double, so a once-rounded sum below it means the exact sum was below it. These
+ * lanes used to go to the per-lane path -- a decaying audio tail lives there, and the title's
+ * reverb spent much of its time in spu__x8_fa_fix for it. */
 SPU__X8_INLINE __m128i spu__x8_trunc0(__m256d d, __m128i* ok, __m128i* zm, const __m256d* err) {
     const __m256i u = _mm256_castpd_si256(d);
-    const __m256i az = _mm256_cmpeq_epi64(_mm256_slli_epi64(u, 1), _mm256_setzero_si256());
     const __m256i e = _mm256_sub_epi64(_mm256_and_si256(_mm256_srli_epi64(u, 52), _mm256_set1_epi64x(0x7FF)),
                                        _mm256_set1_epi64x(1023));
-    __m256i good = _mm256_andnot_si256(_mm256_or_si256(_mm256_cmpgt_epi64(_mm256_set1_epi64x(-126), e),
-                                                       _mm256_cmpgt_epi64(e, _mm256_set1_epi64x(127))),
+    const __m256i tiny = _mm256_cmpgt_epi64(_mm256_set1_epi64x(-126), e);   /* zero (e = -1023) too */
+    __m256i good = _mm256_andnot_si256(_mm256_or_si256(tiny, _mm256_cmpgt_epi64(e, _mm256_set1_epi64x(127))),
                                        _mm256_set1_epi64x(-1));
     if (err) {
         const __m256i low = _mm256_and_si256(u, _mm256_set1_epi64x(0x1FFFFFFF));
@@ -1159,10 +1175,15 @@ SPU__X8_INLINE __m128i spu__x8_trunc0(__m256d d, __m128i* ok, __m128i* zm, const
         const __m256i rnd = _mm256_castpd_si256(_mm256_cmp_pd(*err, _mm256_setzero_pd(), _CMP_NEQ_UQ));
         good = _mm256_andnot_si256(_mm256_and_si256(bnd, rnd), good);
     }
-    *ok = spu__x8_narrow(_mm256_or_si256(good, az));
-    *zm = spu__x8_narrow(az);
+    *ok = spu__x8_narrow(_mm256_or_si256(good, tiny));
+    *zm = spu__x8_narrow(tiny);
     const __m256d t = _mm256_castsi256_pd(_mm256_and_si256(u, _mm256_set1_epi64x(~0x1FFFFFFFll)));
-    return _mm_andnot_si128(_mm_and_si128(*zm, _mm_set1_epi32((int)0x80000000u)), _mm_castps_si128(_mm256_cvtpd_ps(t)));
+    return _mm_andnot_si128(*zm, _mm_castps_si128(_mm256_cvtpd_ps(t)));
+}
+/* SPU zeros as +0: a single with biased exponent 0 is a zero whatever its fraction or sign
+ * (spu__sf_split), and fa/fm treat it so (the other term unchanged, a zero product). */
+SPU__X8_INLINE __m128i spu__x8_z0(__m128i x) {
+    return _mm_andnot_si128(_mm_cmpeq_epi32(_mm_and_si128(x, _mm_set1_epi32(0x7F800000)), _mm_setzero_si128()), x);
 }
 SPU__X8_INLINE int spu__x8_all4(__m128i m) { return _mm_movemask_ps(_mm_castsi128_ps(m)) == 0xF; }
 SPU__X8_INLINE __m128i spu__x8_ld(u128 a) { return _mm_loadu_si128((const __m128i*)a._u32); }
@@ -1183,7 +1204,8 @@ SPU__X8_SLOW u128 spu__x8_fma_fix(u128 r, __m128i ok, u128 a, u128 b, u128 c, ui
     return r;
 }
 SPU__X8_INLINE u128 spu__x8_fa(u128 a, u128 b, uint32_t negb) {
-    const __m128i x = spu__x8_ld(a), y = _mm_xor_si128(spu__x8_ld(b), _mm_set1_epi32((int)negb));
+    const __m128i x = spu__x8_z0(spu__x8_ld(a));
+    const __m128i y = spu__x8_z0(_mm_xor_si128(spu__x8_ld(b), _mm_set1_epi32((int)negb)));
     /* the exponent-gap limit applies only between two nonzero terms */
     const __m128i gap = _mm_cmpgt_epi32(_mm_set1_epi32(30), _mm_abs_epi32(_mm_sub_epi32(spu__x8_bexp(x), spu__x8_bexp(y))));
     const __m128i pre = _mm_and_si128(_mm_and_si128(spu__x8_plain0(x), spu__x8_plain0(y)),
@@ -1196,7 +1218,7 @@ SPU__X8_INLINE u128 spu__x8_fa(u128 a, u128 b, uint32_t negb) {
 SPU__X8_INLINE u128 spu_fa(u128 a, u128 b) { return spu__x8_fa(a, b, 0); }
 SPU__X8_INLINE u128 spu_fs(u128 a, u128 b) { return spu__x8_fa(a, b, 0x80000000u); }
 SPU__X8_INLINE u128 spu_fm(u128 a, u128 b) {
-    const __m128i x = spu__x8_ld(a), y = spu__x8_ld(b);
+    const __m128i x = spu__x8_z0(spu__x8_ld(a)), y = spu__x8_z0(spu__x8_ld(b));
     __m128i ok, zm;
     const __m128i r = spu__x8_trunc0(_mm256_mul_pd(spu__x8_wide(x), spu__x8_wide(y)), &ok, &zm, NULL);
     ok = _mm_and_si128(ok, _mm_and_si128(spu__x8_plain0(x), spu__x8_plain0(y)));

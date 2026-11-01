@@ -234,7 +234,16 @@ static volatile long g_lwm_tab_lock = 0;
  * contended block it logs who holds it and for how long; on unlock it flags a
  * long hold. The leaf holder (the one blocked on a non-lwmutex wait) is the
  * convoy root. Default OFF. */
-static int lwm_trace(void){ static int v=-1; if(v<0){const char*e=getenv("PS3_LWMUTEX_TRACE"); v=e?1:0;} return v; }
+/* Read once into a file-scope flag; the test itself is forced inline. It sits on every lwmutex
+ * lock and unlock -- several times per call -- and a function-local static behind a call cost
+ * more there than the default-off trace is worth. */
+static int s_lwm_trace = -1;
+static int lwm_trace_init(void){ const char* e = getenv("PS3_LWMUTEX_TRACE"); s_lwm_trace = e ? 1 : 0; return s_lwm_trace; }
+#if defined(_MSC_VER)
+static __forceinline int lwm_trace(void){ const int v = s_lwm_trace; return v >= 0 ? v : lwm_trace_init(); }
+#else
+static inline __attribute__((always_inline)) int lwm_trace(void){ const int v = s_lwm_trace; return v >= 0 ? v : lwm_trace_init(); }
+#endif
 static long long lwm_now_us(void){
     static LARGE_INTEGER freq={0}; if(!freq.QuadPart) QueryPerformanceFrequency(&freq);
     LARGE_INTEGER c; QueryPerformanceCounter(&c);
