@@ -345,8 +345,27 @@ static CellGcmTileInfo s_tiles[CELL_GCM_MAX_TILE_COUNT];
 /* Zcull configuration (8 zcull regions) */
 static CellGcmZcullInfo s_zcull[CELL_GCM_MAX_ZCULL_COUNT];
 
-/* Report data area (256 slots, each 16 bytes) */
+/* Report data area (CELL_GCM_MAX_REPORT_COUNT slots, 16 bytes each).
+ * s_report_data is the host copy cellGcmGetReport reads; GCM_REPORT_GUEST_BASE
+ * is the same data in GUEST memory, big-endian CellGcmReportData (u64 timer,
+ * u32 value, u32 pad), which is what cellGcmGetReportDataAddress hands out --
+ * a title reads its occlusion-query results through that pointer. It used to
+ * return the host array's address, which the guest then read as a guest
+ * address: unrelated memory, not the reports. 1 MB of the inject window,
+ * clear of everything else there. */
 static CellGcmReportData s_report_data[CELL_GCM_MAX_REPORT_COUNT];
+#define GCM_REPORT_GUEST_BASE (VM_HLE_INJECT_BASE + 0x100000u)   /* 1 MB: 65536 x 16 B */
+static void gcm_report_store(u32 idx, u64 ts, u32 val)
+{
+    if (idx >= CELL_GCM_MAX_REPORT_COUNT) return;
+    s_report_data[idx].timestamp = ts;
+    s_report_data[idx].value = val;
+    const u32 ea = GCM_REPORT_GUEST_BASE + idx * 16u;
+    vm_write32(ea, (u32)(ts >> 32));
+    vm_write32(ea + 4u, (u32)ts);
+    vm_write32(ea + 8u, val);
+    vm_write32(ea + 12u, 0u);
+}
 
 /* NV4097_SET_CONTEXT_DMA_REPORT (0x1A8): where NV4097_GET_REPORT writes.
  * Local (0xFEED0000, the default): the s_report_data slots above, read back
@@ -2079,9 +2098,8 @@ static void gcm_3d_method(rsx_state* st, u32 m, u32 v, int legacy_state_live)
                 vm_write32(rea + 8u, val);
                 vm_write32(rea + 12u, 0u);
             } else { static int un = 0; if (PS3_LOG_FIRST(un, 4)) ps3_log("[GET_REPORT] main-memory offset 0x%X is not IO-mapped%c", off, 10); }
-        } else if (idx < CELL_GCM_MAX_REPORT_COUNT) {
-            s_report_data[idx].timestamp = ts;
-            s_report_data[idx].value = val;
+        } else {
+            gcm_report_store(idx, ts, val);
         }
     }
 }
@@ -3786,7 +3804,7 @@ CellGcmReportData* cellGcmGetReportDataAddress(u32 index)
         ps3_log("[cellGcmSys] WARNING: GetReportDataAddress index %u out of range\n", index);
         return NULL;
     }
-    return &s_report_data[index];
+    return (CellGcmReportData*)(uintptr_t)(GCM_REPORT_GUEST_BASE + index * 16u);
 }
 
 /* NID: 0x97FC4B73 */
@@ -3810,7 +3828,7 @@ u64 cellGcmGetTimeStamp(u32 index)
      * On real hardware this reads the RSX timestamp for a given report index.
      * We return the host timestamp in nanoseconds as a reasonable approximation.
      */
-    s_report_data[index].timestamp = get_timestamp_ns();
+    gcm_report_store(index, get_timestamp_ns(), s_report_data[index].value);
     return s_report_data[index].timestamp;
 }
 
@@ -3987,7 +4005,7 @@ u64 cellGcmGetTimeStampLocation(u32 index, u32 location)
     if (index >= CELL_GCM_MAX_REPORT_COUNT)
         return 0;
 
-    s_report_data[index].timestamp = get_timestamp_ns();
+    gcm_report_store(index, get_timestamp_ns(), s_report_data[index].value);
     return s_report_data[index].timestamp;
 }
 
@@ -4357,7 +4375,7 @@ CellGcmReportData* cellGcmGetReportDataAddressLocation(u32 index, u32 location)
         ps3_log("[cellGcmSys] WARNING: GetReportDataAddressLocation index %u out of range\n", index);
         return NULL;
     }
-    return &s_report_data[index];
+    return (CellGcmReportData*)(uintptr_t)(GCM_REPORT_GUEST_BASE + index * 16u);
 }
 
 /* Get report value at index with location */

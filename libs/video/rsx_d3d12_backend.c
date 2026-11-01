@@ -186,7 +186,7 @@ typedef struct {
     D3D12_RESOURCE_STATES st;          /* tracked resource state */
     int                   used;        /* referenced this frame */
     u32                   stamp;       /* off_rt_get order: newest of several sizes at one offset wins */
-    u32                   drawn;       /* draw-time stamp of the last draw that rendered into it */
+    u32                   wseq;        /* write order of the last draw/clear into it (s_wseq); 0 = none */
 } OffRT;
 #define MAX_OFF_RTS  32  /* demosaic double-buffers its 6-surface pass chain; the title's
                           * luminance chain reuses offsets at 3 sizes (keyed by size) */
@@ -203,6 +203,7 @@ typedef struct {
     u32                   gen;         /* bumped by every draw or clear that writes it */
     u32                   conv_gen;    /* gen its colour copy was made from */
     u64                   last_frame;  /* frame_count of the last pass that bound it */
+    u32                   wseq;        /* write order of the last draw/clear into it (s_wseq); 0 = none */
 } OffDS;
 #define MAX_OFF_DS   6
 #define DS_SRV_BASE  (RT_SRV_BASE + MAX_OFF_RTS)  /* depth + stencil SRVs (2 per OffDS) */
@@ -1901,16 +1902,18 @@ static void rsx_capture_frame(u32 fi, u32 ndraws, u32 capidx)
         for (u32 d = 0; d < ndraws && d < MAX_DRAWS; d++) {
             const D3D12DrawRecord* r = &s_d3d.draws[d];
             if (r->is_clear)
-                fprintf(mf, "op%03u CLEAR rt=0x%08X mrt=0x%X/0x%X/0x%X cc=(%.3f,%.3f,%.3f,%.3f)\n",
+                fprintf(mf, "op%03u CLEAR rt=0x%08X mrt=0x%X/0x%X/0x%X cc=(%.3f,%.3f,%.3f,%.3f) mask=0x%02X zeta=0x%08X %ux%u nc=%d\n",
                         d, r->rt_off, r->rt_mrt[0], r->rt_mrt[1], r->rt_mrt[2],
-                        r->cc[0], r->cc[1], r->cc[2], r->cc[3]);
+                        r->cc[0], r->cc[1], r->cc[2], r->cc[3], r->clear_mask, r->zeta_off, r->rt_w, r->rt_h, r->no_color);
             else {
                 fprintf(mf, "op%03u DRAW  rt=0x%08X mrt=0x%X/0x%X/0x%X vp=%u,%u,%ux%u fp=0x%08X vs=%d "
-                            "n=%u cmask=%X blend=%d bk=0x%X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X\n",
+                            "n=%u cmask=%X blend=%d bk=0x%X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X"
+                            " rtsz=%ux%u zeta=0x%08X nc=%d zs=0x%llX\n",
                         d, r->rt_off, r->rt_mrt[0], r->rt_mrt[1], r->rt_mrt[2],
                         r->vp_x, r->vp_y, r->vp_w, r->vp_h,
                         r->fp_addr, r->vs_idx, r->vertex_count, r->cmask, r->blend, r->blend_key,
-                        r->tex[0].raw, r->tex[1].raw, r->tex[2].raw, r->tex[3].raw);
+                        r->tex[0].raw, r->tex[1].raw, r->tex[2].raw, r->tex[3].raw,
+                        r->rt_w, r->rt_h, r->zeta_off, r->no_color, (unsigned long long)r->zs_key);
                 for (int u = 0; u < RSX_TEX_UNITS; u++)
                     if (r->tex[u].set) {
                         fprintf(mf, "      t%d off=0x%08X fmt=0x%02X (%s%s) %ux%u d=%u remap=0x%04X", u,
@@ -2714,25 +2717,80 @@ static int dr_shadow(const D3D12DrawRecord* dr, rsx_fp_shadow_desc out[RSX_TEX_U
     }
     return any;
 }
-/* Which kind of write last touched surface `raw` before draw d this batch:
- * 1 = depth (zeta), 0 = colour, -1 = none. Guest memory aliases: the title draws
- * its shadow atlas into zeta 0x1680000, then reuses 0x1680000 as the 1280x720
- * scene colour RT, so "is there a depth surface at this offset" alone would
- * replace the scene with a colour copy of the shadow depth. */
-/* The same, carried across batches/frames: the last write kind per guest
- * offset (not per resource slot -- slots are recycled), noted after each
- * batch's pre-pass. A batch that samples 0x1680000 before writing it would
- * otherwise flash the shadow atlas on screen. */
-#define WR_SLOTS 64
-static struct { u32 off; u32 seq; int depth; } s_wr[WR_SLOTS];
-static u32 s_wr_seq;
-static void wr_note(u32 off, int depth)
+/* Write order. Every offscreen colour RT and depth surface carries the
+ * sequence number of the last draw or clear that wrote it (wseq), numbered in
+ * command-stream order across batches: draw e of the current batch is
+ * s_wseq + e + 1, and wseq_commit() stores those numbers once the batch's
+ * lookups are done. The SRV binding for a whole batch runs before any of its
+ * draws, so a lookup for draw d also scans draws 0..d-1 of the batch.
+ *
+ * This is the one ordering every "which surface holds the data at this
+ * offset" question uses. It replaced three that disagreed: the order
+ * surfaces were prepared in (which moves with where frames split into
+ * batches), a draw-time stamp only set after the batch's lookups had run, and
+ * a per-offset depth/colour note. */
+static u32 s_wseq;
+static int off_rt_find_sz(u32 off, u32 w, u32 h);
+static int off_ds_find(u32 off);
+/* Does record e write colour into off? A clear only with colour bits. */
+static int dr_writes_colour(const D3D12DrawRecord* e, u32 off)
 {
-    int i, old = 0;
-    for (i = 0; i < WR_SLOTS && s_wr[i].off != off; i++)
-        if (s_wr[i].seq < s_wr[old].seq) old = i;
-    if (i >= WR_SLOTS) i = old;
-    s_wr[i].off = off; s_wr[i].depth = depth; s_wr[i].seq = ++s_wr_seq;
+    if (!off || !e->is_vp || e->no_color) return 0;
+    if (e->is_clear && !(e->clear_mask & 0xF0u)) return 0;
+    return e->rt_off == off || e->rt_mrt[0] == off || e->rt_mrt[1] == off || e->rt_mrt[2] == off;
+}
+/* Does record e write the depth surface at off? A draw only with depth or
+ * stencil writes on, and only when it binds that surface (an offscreen colour
+ * target or a depth-only pass; a display draw uses the shared buffer); a
+ * clear only with depth/stencil bits. */
+static int dr_writes_depth(const D3D12DrawRecord* e, u32 off)
+{
+    if (!off || !e->is_vp || e->zeta_off != off) return 0;
+    if (e->is_clear) return (e->clear_mask & 0x3u) != 0;
+    return (e->rt_off || e->no_color) && (e->zs_key & (2u | (1u << 5))) != 0;
+}
+/* wseq of RT slot i as draw d of this batch sees it. */
+static u32 off_rt_seq_at(int i, u32 d)
+{
+    const OffRT* r = &s_d3d.off_rt[i];
+    if (d > s_d3d.draw_count) d = s_d3d.draw_count;
+    if (d > MAX_DRAWS) d = MAX_DRAWS;
+    while (d-- > 0) {
+        const D3D12DrawRecord* e = &s_d3d.draws[d];
+        if (dr_writes_colour(e, r->off) && off_rt_find_sz(r->off, e->rt_w, e->rt_h) == i)
+            return s_wseq + d + 1;
+    }
+    return r->wseq;
+}
+/* wseq of depth surface i as draw d of this batch sees it. */
+static u32 off_ds_seq_at(int i, u32 d)
+{
+    const OffDS* z = &s_d3d.off_ds[i];
+    if (d > s_d3d.draw_count) d = s_d3d.draw_count;
+    if (d > MAX_DRAWS) d = MAX_DRAWS;
+    while (d-- > 0)
+        if (dr_writes_depth(&s_d3d.draws[d], z->off)) return s_wseq + d + 1;
+    return z->wseq;
+}
+/* Store this batch's writes (after its lookups, before the next batch). */
+static void wseq_commit(void)
+{
+    const u32 n = s_d3d.draw_count < MAX_DRAWS ? s_d3d.draw_count : MAX_DRAWS;
+    for (u32 d = 0; d < n; d++) {
+        const D3D12DrawRecord* e = &s_d3d.draws[d];
+        const u32 q = s_wseq + d + 1;
+        const u32 offs[4] = { e->rt_off, e->rt_mrt[0], e->rt_mrt[1], e->rt_mrt[2] };
+        for (int k = 0; k < 4; k++)
+            if (dr_writes_colour(e, offs[k])) {
+                const int i = off_rt_find_sz(offs[k], e->rt_w, e->rt_h);
+                if (i >= 0) s_d3d.off_rt[i].wseq = q;
+            }
+        if (dr_writes_depth(e, e->zeta_off)) {
+            const int z = off_ds_find(e->zeta_off);
+            if (z >= 0) s_d3d.off_ds[z].wseq = q;
+        }
+    }
+    s_wseq += n;
 }
 /* Does any draw in this batch render colour into `raw`? Its colour RT then
  * must not be re-made at the depth surface's size/format for a depth copy:
@@ -2748,18 +2806,23 @@ static int batch_writes_colour(u32 raw)
     }
     return 0;
 }
-static int dr_last_write_is_depth(u32 d, u32 raw)
+/* Is the newest data at off, as draw d sees it, a depth write? 1 = depth,
+ * 0 = colour, -1 = neither has been written there. Guest memory aliases: the
+ * title draws its shadow atlas into zeta 0x1680000, then reuses 0x1680000 as
+ * the 1280x720 scene colour RT, so "is there a depth surface at this offset"
+ * alone would replace the scene with a colour copy of the shadow depth. */
+static int dr_depth_is_newest(u32 d, u32 off)
 {
-    if (d > MAX_DRAWS) d = MAX_DRAWS;
-    while (d-- > 0) {
-        const D3D12DrawRecord* e = &s_d3d.draws[d];
-        if (e->rt_off == raw || e->rt_mrt[0] == raw || e->rt_mrt[1] == raw || e->rt_mrt[2] == raw)
-            return 0;
-        if (e->zeta_off == raw) return 1;
-    }
-    for (int i = 0; i < WR_SLOTS; i++)
-        if (s_wr[i].off == raw && s_wr[i].seq) return s_wr[i].depth;
-    return -1;
+    const int ds = off_ds_find(off);
+    const u32 zs = ds >= 0 ? off_ds_seq_at(ds, d) : 0;
+    u32 cs = 0;
+    for (int i = 0; i < MAX_OFF_RTS; i++)
+        if (s_d3d.off_rt[i].res && s_d3d.off_rt[i].off == off) {
+            const u32 s = off_rt_seq_at(i, d);
+            if (s > cs) cs = s;
+        }
+    if (!zs && !cs) return -1;
+    return zs > cs;
 }
 /* Six bits per unit (enabled, func, linear, unnormalized) for the PSO key. */
 static void fp_shadow_pack(const rsx_fp_shadow_desc* s, u64* lo, u64* hi)
@@ -4356,38 +4419,42 @@ static DXGI_FORMAT rsx_surface_dxgi(u32 fmt)
  * one offset at 80x45, 40x22 and 20x11 within a frame (and samples each at
  * its own size), so a single resource per offset was resized back and forth
  * and every level read whichever size won. off_rt_find (offset only) picks
- * the newest; off_rt_find_sz the exact surface. */
+ * the one written last (wseq), falling back to the one prepared last (stamp)
+ * between surfaces nothing has written yet; off_rt_find_sz the exact surface. */
 static u32 s_rt_stamp;
 static int off_rt_find(u32 off)
 {
     if (!off) return -1;
     int best = -1;
-    for (int i = 0; i < MAX_OFF_RTS; i++)
-        if (s_d3d.off_rt[i].res && s_d3d.off_rt[i].off == off &&
-            (best < 0 || s_d3d.off_rt[i].stamp > s_d3d.off_rt[best].stamp)) best = i;
+    for (int i = 0; i < MAX_OFF_RTS; i++) {
+        const OffRT* r = &s_d3d.off_rt[i];
+        if (!r->res || r->off != off) continue;
+        if (best < 0) { best = i; continue; }
+        const OffRT* b = &s_d3d.off_rt[best];
+        if (r->wseq > b->wseq || (r->wseq == b->wseq && r->stamp > b->stamp)) best = i;
+    }
     return best;
 }
-static u32 s_rt_drawn;   /* bumped each time a draw binds an offscreen RT as its target */
 static int off_rt_find_sz(u32 off, u32 w, u32 h);
-/* The RT a TEXTURE of this size reads at off: the exact size; else the one a
- * 2x-AA read implies (the texture twice the surface's width, or width and
- * height: a resolve reads a 1280x720 2x-AA target as 2560x720); else
- * the one most recently RENDERED to. "Most recently prepared" (off_rt_find)
- * follows the pre-pass order, which moves with where frames split into
- * batches -- a resolve that picked a different-size RT at the same offset
- * that way fed the glow buffer through the whole post chain. */
-static int off_rt_find_tex(u32 off, u32 w, u32 h)
+/* The RT a TEXTURE of this size reads at off, for draw d of this batch: the
+ * exact size; else the one a 2x-AA read implies (the texture twice the
+ * surface's width, or width and height: a resolve reads a 1280x720 2x-AA
+ * target as 2560x720); else the one written last as draw d sees it (see
+ * s_wseq). Picking by preparation order instead fed the glow buffer through
+ * the whole post chain whenever a frame split into batches differently. */
+static int off_rt_find_tex(u32 off, u32 w, u32 h, u32 d)
 {
     int rt = off_rt_find_sz(off, w, h);
     if (rt >= 0 || !off) return rt;
-    int best = -1;
+    int best = -1; u32 bseq = 0;
     for (int i = 0; i < MAX_OFF_RTS; i++) {
         const OffRT* r = &s_d3d.off_rt[i];
         if (!r->res || r->off != off) continue;
         if (r->w * 2u == w && (r->h == h || r->h * 2u == h)) return i;
-        if (best < 0 || r->drawn > s_d3d.off_rt[best].drawn) best = i;
+        const u32 s = off_rt_seq_at(i, d);
+        if (s > bseq) { bseq = s; best = i; }
     }
-    return (best >= 0 && s_d3d.off_rt[best].drawn) ? best : off_rt_find(off);
+    return best >= 0 ? best : off_rt_find(off);
 }
 static int off_rt_find_sz(u32 off, u32 w, u32 h)
 {
@@ -4459,7 +4526,7 @@ static int off_rt_get(u32 off, u32 w, u32 h, u32 rsx_fmt)
             D3D12_RESOURCE_STATE_COPY_DEST, &cv,
             &IID_ID3D12Resource, (void**)&r->res)))
         return -1;
-    r->off = off; r->w = w; r->h = h; r->dxgi = (u32)want_fmt;
+    r->off = off; r->w = w; r->h = h; r->dxgi = (u32)want_fmt; r->wseq = 0;
     r->st = D3D12_RESOURCE_STATE_COPY_DEST;
     r->used = 1; r->stamp = ++s_rt_stamp;
     rdoc_name((ID3D12Object*)r->res, "rt 0x%08X %ux%u rsxfmt %02X", off, w, h, rsx_fmt);
@@ -4715,7 +4782,7 @@ static int off_ds_get(u32 off, u32 w, u32 h)
         return -1;
     z->off = off; z->w = w; z->h = h;
     z->st = D3D12_RESOURCE_STATE_DEPTH_WRITE;
-    z->cleared = 0; z->gen = 0; z->conv_gen = 0xFFFFFFFFu;
+    z->cleared = 0; z->gen = 0; z->conv_gen = 0xFFFFFFFFu; z->wseq = 0;
     z->last_frame = s_d3d.frame_count;
     D3D12_DEPTH_STENCIL_VIEW_DESC dv = {0};
     dv.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
@@ -5417,7 +5484,7 @@ static void render_frame(void)
             if (ds < 0) continue;
             s_d3d.off_ds[ds].last_frame = s_d3d.frame_count;
             if (_psh[_u].enabled != 1 &&   /* compared depth units sample the surface itself */
-                dr_last_write_is_depth(_d, dr->tex[_u].raw) != 0 &&
+                dr_depth_is_newest(_d, dr->tex[_u].raw) != 0 &&
                 !batch_writes_colour(dr->tex[_u].raw))
                 off_rt_get(dr->tex[_u].raw, s_d3d.off_ds[ds].w, s_d3d.off_ds[ds].h, 0x08u);
         }
@@ -5541,7 +5608,7 @@ static void render_frame(void)
             if (dr->tex[_u].set) {
                 const int ds = off_ds_find(dr->tex[_u].raw);
                 const int crt = ds >= 0 ? off_rt_find_sz(dr->tex[_u].raw, s_d3d.off_ds[ds].w, s_d3d.off_ds[ds].h) : -1;
-                if (crt >= 0 && dr_last_write_is_depth(_d, dr->tex[_u].raw) != 0 &&
+                if (crt >= 0 && dr_depth_is_newest(_d, dr->tex[_u].raw) != 0 &&
                     s_d3d.off_rt[crt].w == s_d3d.off_ds[ds].w &&
                     s_d3d.off_rt[crt].h == s_d3d.off_ds[ds].h) {
                     dr->tex_rt[_u] = crt;
@@ -5559,7 +5626,7 @@ static void render_frame(void)
             if (dr->tex[_u].set) {
                 /* The RT this texture reads (off_rt_find_tex: exact size, then a 2x-AA
                  * read, then the one most recently rendered to). */
-                int rt = off_rt_find_tex(dr->tex[_u].raw, dr->tex[_u].w, dr->tex[_u].h);
+                int rt = off_rt_find_tex(dr->tex[_u].raw, dr->tex[_u].w, dr->tex[_u].h, _d);
                 if (rt < 0) rt = off_rt_find(dr->tex[_u].raw);
                 if (rt >= 0) {
                     dr->tex_rt[_u] = rt;
@@ -5693,12 +5760,7 @@ static void render_frame(void)
 
     if (perf_on()) s_perf_pre += perf_now() - _pre0;
     /* Every lookup for this batch is done: carry its writes to the next one. */
-    for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
-        const D3D12DrawRecord* e = &s_d3d.draws[_d];
-        if (e->rt_off) wr_note(e->rt_off, 0);
-        for (int _m = 0; _m < 3; _m++) if (e->rt_mrt[_m]) wr_note(e->rt_mrt[_m], 0);
-        if (e->zeta_off) wr_note(e->zeta_off, 1);
-    }
+    wseq_commit();
     /* Set render target + depth */
     s_d3d.cmd_list->lpVtbl->OMSetRenderTargets(s_d3d.cmd_list, 1, &rtv_handle, FALSE, &dsv_handle);
 
@@ -5927,8 +5989,7 @@ static void render_frame(void)
                 /* Remember where geometry actually went: off_rt_find() matches
                  * on offset alone and slots share offsets at different sizes,
                  * so the composite cannot just look the source up by address. */
-                if (want >= 0) { s_last_drawn_slot = want; s_last_drawn_off = dr->rt_off;
-                                 s_d3d.off_rt[want].drawn = ++s_rt_drawn; }
+                if (want >= 0) { s_last_drawn_slot = want; s_last_drawn_off = dr->rt_off; }
                 int wantm[3];
                 for (int _m = 0; _m < 3; _m++)
                     wantm[_m] = (dr->rt_mrt[_m] && !dr->no_color) ? off_rt_find_sz(dr->rt_mrt[_m], dr->rt_w, dr->rt_h) : -1;
@@ -7854,6 +7915,29 @@ static u32 upload_strip_vp_indexed(const rsx_state* state, u32 first, u32 count,
     return o;
 }
 
+/* Make room in this batch's vertex and index buffers for a draw of `count`
+ * vertices or indices, by executing the batch recorded so far (offscreen,
+ * no Present) when it could not fit. Both buffers are sized per batch, and an
+ * upload that runs out of space returns 0 -- the draw is then silently
+ * dropped. A scene heavier than the buffers lost everything drawn after they
+ * filled: in the title's opening scene about two thirds of the indexed draws,
+ * the whole lit pass, and the player character with it. 3 * count bounds
+ * every expansion (a strip or fan as a triangle list, quads at 1.5x). */
+static void batch_make_room(u32 count)
+{
+    if (!s_d3d.draw_count || !s_d3d.initialized) return;
+    const u64 need = 3ull * count;
+    const int vp_full = (u64)s_d3d.vp_vb_offset / VP_VERT_STRIDE + need > MAX_VERTICES;
+    const int ib_full = (u64)s_d3d.vp_ib_offset + need > VP_MAX_INDICES;
+    const int vb_full = (u64)s_d3d.vb_offset / sizeof(BasicVertex) + need > (u64)MAX_VERTICES * VERTEX_STRIDE / sizeof(BasicVertex);
+    if (!vp_full && !ib_full && !vb_full) return;
+    if (need > MAX_VERTICES) return;   /* could never fit; the upload rejects it as before */
+    const int keep = s_present_this_frame;
+    s_present_this_frame = 0;
+    render_frame();
+    s_present_this_frame = keep;
+}
+
 static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
 {
     /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
@@ -7875,6 +7959,7 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
 
     if (!s_d3d.pipeline_ready || !s_d3d.vb_mapped) return;
     if (count == 0 || count > MAX_VERTICES) return;
+    batch_make_room(count);
     vs_arrays(s_d3d.current_rsx_state, primitive, count);
 
     /* QUADS (prim 8) have no D3D12 topology; expand to a triangle list.
@@ -8127,6 +8212,7 @@ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
     if (!s_d3d.pipeline_ready) return;
     if (count == 0 || count > MAX_VERTICES) return;
     if (!s_d3d.vp_vb_mapped || !s_d3d.vp_root_sig) return;
+    batch_make_room(count);
 
     /* Expand through the VP path (indices resolved CPU-side): QUADS -> two
      * triangles per quad, TRIANGLES straight through, STRIP/FAN -> triangle

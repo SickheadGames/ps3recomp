@@ -94,7 +94,7 @@ extern uint32_t ppu_vm_size;
  * window, the control register and the IO<->EA offset tables there, so a VM
  * that stops short of it segfaults the moment the context is built. calloc is
  * lazy, so the extra range costs address space rather than memory. */
-#define VM_SIZE     (VM_HLE_INJECT_BASE + 0x10000u)
+#define VM_SIZE     (VM_HLE_INJECT_BASE + 0x200000u)   /* through the report area at +0x100000 */
 #define IO_ADDR     0x00100000u          /* RSX IO window base                */
 #define IO_SIZE     0x00200000u
 #define CMD_SIZE    0x00010000u
