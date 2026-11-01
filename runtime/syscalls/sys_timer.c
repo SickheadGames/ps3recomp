@@ -136,6 +136,19 @@ static __declspec(thread) HANDLE t_sleep_timer = NULL;
 static __declspec(thread) int    t_sleep_timer_tried = 0;
 
 #if defined(_WIN32)
+/* This thread's high-resolution waitable timer, made on first use. */
+static void ps3_sleep_timer(void)
+{
+    if (!t_sleep_timer && !t_sleep_timer_tried) {
+        t_sleep_timer_tried = 1;
+        t_sleep_timer = CreateWaitableTimerExW(NULL, NULL,
+            CREATE_WAITABLE_TIMER_MANUAL_RESET |
+            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        if (!t_sleep_timer)      /* pre-1803: plain timer, ~1ms granularity */
+            t_sleep_timer = CreateWaitableTimerW(NULL, TRUE, NULL);
+    }
+}
+
 static void ps3_precise_sleep_us(uint64_t usec)
 {
     if (usec == 0) 
@@ -153,14 +166,7 @@ static void ps3_precise_sleep_us(uint64_t usec)
     const uint64_t SPIN_TAIL_US = 100;
 
     if (usec > SPIN_TAIL_US) {
-        if (!t_sleep_timer && !t_sleep_timer_tried) {
-            t_sleep_timer_tried = 1;
-            t_sleep_timer = CreateWaitableTimerExW(NULL, NULL,
-                CREATE_WAITABLE_TIMER_MANUAL_RESET |
-                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-            if (!t_sleep_timer)      /* pre-1803: plain timer, ~1ms granularity */
-                t_sleep_timer = CreateWaitableTimerW(NULL, TRUE, NULL);
-        }
+        ps3_sleep_timer();
         if (t_sleep_timer) {
             LARGE_INTEGER due;
             due.QuadPart = -(LONGLONG)((usec - SPIN_TAIL_US) * 10);  /* 100ns, relative */
@@ -185,6 +191,60 @@ static void ps3_precise_sleep_us(uint64_t usec)
         if ((++spins & 0x3FF) == 0)
             SwitchToThread();
     }
+}
+
+/* A sleep that gives the core away: the timer alone, no spin tail, so it ends
+ * late by the timer's slack (well under a millisecond on Win10 1803+). */
+static void ps3_coarse_sleep_us(uint64_t usec)
+{
+    if (usec == 0) return;
+    ps3_sleep_timer();
+    if (t_sleep_timer) {
+        LARGE_INTEGER due;
+        due.QuadPart = -(LONGLONG)(usec * 10);   /* 100ns, relative */
+        if (SetWaitableTimer(t_sleep_timer, &due, 0, NULL, NULL, FALSE)) {
+            WaitForSingleObject(t_sleep_timer, INFINITE);
+            return;
+        }
+    }
+    Sleep((DWORD)((usec + 999) / 1000));
+}
+
+/* Guest usleep, adaptive for polling. Titles wait on a flag with runs of very
+ * short sleeps -- 12, 30, 50 us -- tens of thousands a second per thread (the
+ * title's main thread waiting for its job chain, its audio mixer, a task
+ * thread), and every one of them spun the whole time: about a core's worth of
+ * CPU, on a host where the SPU job workers needed it. A run of back-to-back
+ * short sleeps (gaps under 100 us) still spins exactly for its first
+ * PS3_POLL_SPIN_US (default 500), so a handshake that completes quickly keeps
+ * its latency; the rest of the run sleeps on the timer and yields the core,
+ * noticing the flag up to the timer's slack later. A sleep over 1 ms, or
+ * PS3_POLL_SPIN_US=0, is exact as before. */
+static __declspec(thread) int64_t t_poll_start, t_poll_last;
+static void ps3_usleep_guest(uint64_t usec)
+{
+    static int64_t s_budget_us = -1;
+    if (s_budget_us < 0) {
+        const char* e = getenv("PS3_POLL_SPIN_US");
+        s_budget_us = e ? strtoll(e, NULL, 10) : 500;
+        if (s_budget_us < 0) s_budget_us = 0;
+    }
+    if (!s_budget_us || usec == 0 || usec > 1000) {
+        ps3_precise_sleep_us(usec);
+        t_poll_last = 0;
+        return;
+    }
+    ensure_qpc_init();
+    LARGE_INTEGER now; QueryPerformanceCounter(&now);
+    const int64_t f = s_qpc_freq.QuadPart;
+    if (!t_poll_last || (now.QuadPart - t_poll_last) * 1000000 / f > 100)
+        t_poll_start = now.QuadPart;              /* the guest did other work in between: a new run */
+    if ((now.QuadPart - t_poll_start) * 1000000 / f < s_budget_us)
+        ps3_precise_sleep_us(usec);
+    else
+        ps3_coarse_sleep_us(usec);
+    QueryPerformanceCounter(&now);
+    t_poll_last = now.QuadPart;
 }
 #endif // WIN32
 
@@ -303,7 +363,7 @@ int64_t sys_timer_usleep(ppu_context* ctx)
         ppu_log_host_chain("usleep1ms"); } }
 
 #ifdef _WIN32
-    ps3_precise_sleep_us(usec);
+    ps3_usleep_guest(usec);
 #else
     if (usec > 0) {
         struct timespec ts;

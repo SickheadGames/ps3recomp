@@ -187,8 +187,13 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
         return -1;
     }
 
-    uint8_t* ls = (uint8_t*)calloc(1, SPU_LS_SIZE);
-    if (!ls) return -1;
+    /* Build the job's LS in place in its context: spu_context_init zeroes it
+     * once. A separate calloc'd image copied in, plus a copy back out after
+     * the run, was four 256 KB passes and a heap round trip per job, and a
+     * chain runs over a thousand jobs a frame. */
+    spu_context ctx;
+    spu_context_init(&ctx, 0);
+    uint8_t* ls = ctx.ls;
 
     /* ---- binary at LS 0 (PIC, so delta 0 keeps the lifted addresses) ---- */
     memcpy(ls, vm_base + ea_bin, size_bin);
@@ -371,10 +376,7 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
     }
 
     /* ---- enter the job -------------------------------------------------- */
-    spu_context ctx;
-    spu_context_init(&ctx, 0);
     ctx.image_id = image_id;
-    memcpy(ctx.ls, ls, SPU_LS_SIZE);
     /* SPU stack grows down. A function saves its link register in its
      * caller's frame, at 16($sp), so the entry's first store lands 16 bytes
      * above $sp. The cache buffers start right at stack_top: with $sp at
@@ -409,7 +411,13 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
      * comment here claimed they carried the title's bus counts; they do not,
      * and feeding them into the completion event turned 0x40000000 into a 1 GB
      * allocation request. Kept because the printf service needs them. */
-    memcpy(s_job_ls, ctx.ls, SPU_LS_SIZE);   /* keep the store readable */
+    /* Keep the store readable for the SPU printf server, which reads the
+     * strings a job's outbound mailbox points at. Only a job that wrote a
+     * mailbox can be asked, so only those pay for the 256 KB copy. */
+    if (spu_channel_has_data(&ctx.ch_out_mbox) || spu_channel_has_data(&ctx.ch_out_intr_mbox)) {
+        memcpy(s_job_ls, ctx.ls, SPU_LS_SIZE);
+        s_job_ls_valid = 1;
+    }
     /* TEMP SPURS_JOB_LSWORD=<img>:<lsa>: after a job of that image, print the
      * LS word at lsa and every other LS offset holding the same value. */
     { static int img = -2; static uint32_t lsa; static int n = 0;
@@ -426,7 +434,6 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
           }
           ps3_log("\n");
       } }
-    s_job_ls_valid = 1;
 
     g_spurs_job_mbox      = spu_channel_has_data(&ctx.ch_out_mbox)
                           ? ctx.ch_out_mbox.value : 0;
@@ -466,6 +473,5 @@ int spu_run_spurs_job(spu_lifted_entry_fn entry, int image_id,
     spu_mfc_release(&ctx);
     spu_coh_unregister(&ctx);   /* stack local: out of the reserver set */
     { extern void spu_mfc_release(spu_context*); spu_mfc_release(&ctx); }
-    free(ls);
     return 0;
 }

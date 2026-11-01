@@ -25,6 +25,7 @@
 #include "rsx_vertex_fetch.h"
 #include "rsx_texture_layout.h"
 #include "ps3emu/logging.h"
+#include "ps3emu/ps3_ftrace.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -91,6 +92,11 @@ typedef struct {
      * (bit i = ATTRi), the packed stride, and the 16-slot block of constant
      * attribute values the others read with a zero stride. */
     u32 vl_mask, vb_stride, vc_off;
+    /* The guest-FP pipeline the pre-pass looked up for this draw (pso_done set), reused by the
+     * replay: the lookup walks and hashes the fragment program, and ran twice per draw. */
+    ID3D12PipelineState* pso;
+    int pso_done;
+    u32 srv_win;        /* the draw whose SRV window this one binds (itself, or an identical earlier one) */
     u32 vertex_count;
     u32 topology;       /* rsx_topology (NOT a D3D value; see topo_to_d3d) */
     int textured;       /* 1 = sample the bound font/atlas texture (dbgfont) */
@@ -1623,6 +1629,7 @@ static void wait_for_gpu(void)
     s_d3d.fence_values[fi] = d3d12_signal(s_d3d.fence_values[fi] + 1);
 
     if (s_d3d.fence->lpVtbl->GetCompletedValue(s_d3d.fence) < s_d3d.fence_values[fi]) {
+        const uint64_t ft0 = PS3_FT_ON() ? ps3_ft_now() : 0;
         s_d3d.fence->lpVtbl->SetEventOnCompletion(
             s_d3d.fence, s_d3d.fence_values[fi], s_d3d.fence_event);
         /* NEVER wait unbounded here: this runs on the vblank ticker, which also
@@ -1636,6 +1643,7 @@ static void wait_for_gpu(void)
          * running headless). */
         for (int tries = 0; tries < 3; tries++) {
             if (WaitForSingleObject(s_d3d.fence_event, 2000) != WAIT_TIMEOUT) {
+                if (ft0) ps3_ft_span(PS3_FT_GPU_WAIT, 0, 0, 0, ft0, ps3_ft_now());
                 d3d12_grave_flush();
                 return;
             }
@@ -1662,6 +1670,7 @@ static void move_to_next_frame(void)
     s_d3d.frame_index = s_d3d.swap_chain->lpVtbl->GetCurrentBackBufferIndex(s_d3d.swap_chain);
 
     if (s_d3d.fence->lpVtbl->GetCompletedValue(s_d3d.fence) < s_d3d.fence_values[s_d3d.frame_index]) {
+        const uint64_t ft0 = PS3_FT_ON() ? ps3_ft_now() : 0;
         s_d3d.fence->lpVtbl->SetEventOnCompletion(
             s_d3d.fence, s_d3d.fence_values[s_d3d.frame_index], s_d3d.fence_event);
         if (WaitForSingleObject(s_d3d.fence_event, 2000) == WAIT_TIMEOUT) {
@@ -1672,6 +1681,7 @@ static void move_to_next_frame(void)
                    (long)rr);
             if (rr != 0) d3d12_note_removed("move_to_next_frame", rr);
         }
+        if (ft0) ps3_ft_span(PS3_FT_GPU_WAIT, 0, 1, 0, ft0, ps3_ft_now());
     }
     /* Free what retired frames replaced (see d3d12_defer_release). */
     d3d12_grave_flush();
@@ -3565,6 +3575,51 @@ static u32 tex_csum(const u8* base, u32 nbytes)
     return h;
 }
 
+/* Index of the vp_tex slots by their cache key (key, w, h, fmt, cube, depth). Every texture bind
+ * looks its slot up, and the linear scan of all VP_TEX_SLOTS entries that did it was most of
+ * render_frame's time in a busy scene. Chained buckets; a slot is unlinked under its old key and
+ * linked under the new one where vp_upload_tex_slot (re)writes the key, the only place it changes.
+ * A hit is checked against the slot itself, so an entry can never return the wrong texture. */
+#define TEX_HASH_BITS 12
+static int s_tex_bucket[1 << TEX_HASH_BITS];   /* slot + 1; 0 = empty */
+static int s_tex_next[VP_TEX_SLOTS];           /* slot + 1 */
+static u8  s_tex_inmap[VP_TEX_SLOTS];
+static u32 tex_key_hash(u32 key, u32 w, u32 h, u32 fmt, int cube, u32 depth)
+{
+    u32 x = key * 0x9E3779B1u ^ w * 0x85EBCA77u ^ h * 0xC2B2AE3Du ^ fmt * 0x27D4EB2Fu
+          ^ ((u32)cube << 7) ^ depth * 0x165667B1u;
+    x ^= x >> 15; x *= 0x2C1B3C6Du; x ^= x >> 12;
+    return x & ((1u << TEX_HASH_BITS) - 1u);
+}
+static u32 tex_slot_hash(const VPTexSlot* t)
+{
+    return tex_key_hash(t->key, t->w, t->h, t->fmt, t->cube, t->depth);
+}
+static void tex_map_unlink(int s)
+{
+    if (!s_tex_inmap[s]) return;
+    int* pp = &s_tex_bucket[tex_slot_hash(&s_d3d.vp_tex[s])];
+    while (*pp && *pp != s + 1) pp = &s_tex_next[*pp - 1];
+    if (*pp) *pp = s_tex_next[s];
+    s_tex_inmap[s] = 0;
+}
+static void tex_map_link(int s)
+{
+    const u32 b = tex_slot_hash(&s_d3d.vp_tex[s]);
+    s_tex_next[s] = s_tex_bucket[b];
+    s_tex_bucket[b] = s + 1;
+    s_tex_inmap[s] = 1;
+}
+static int tex_map_find(u32 key, u32 w, u32 h, u32 fmt, int cube, u32 depth)
+{
+    for (int e = s_tex_bucket[tex_key_hash(key, w, h, fmt, cube, depth)]; e; e = s_tex_next[e - 1]) {
+        const VPTexSlot* c = &s_d3d.vp_tex[e - 1];
+        if (c->res && c->key == key && c->w == w && c->h == h && c->fmt == fmt
+            && c->cube == cube && c->depth == depth) return e - 1;
+    }
+    return -1;
+}
+
 /* depth > 1: a linear volume (3D texture) of `depth` w x h slices stored back
  * to back, uploaded as one TEXTURE3D and viewed as Texture3D (vol_unit_ok
  * decides which units get here). */
@@ -3625,24 +3680,28 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
      * here was a GCC/Clang extension MSVC rejects.) */
     #define TEX_CSUM(base, nbytes) tex_csum((base), (nbytes))
     int slot = -1, freeslot = -1;
-    for (int i = 0; i < VP_TEX_SLOTS; i++) {
+    { const int i = tex_map_find(key_off, w, h, fmt, cube, depth);
+      if (i >= 0) {
         VPTexSlot* c = &s_d3d.vp_tex[i];
-        if (c->res && c->key == key_off && c->w == w && c->h == h && c->fmt == fmt
-            && c->cube == cube && c->depth == depth) {
-            c->last_frame = s_d3d.frame_count;
-            if (c->used) return i;                /* already bound this frame */
-            { static int nocache = -1;            /* TEX_NOCACHE=1: always re-upload */
-              if (nocache < 0) { const char* e = getenv("TEX_NOCACHE");
-                                 nocache = e ? atoi(e) : 0; }
-              if (nocache) { slot = i; break; } }
+        c->last_frame = s_d3d.frame_count;
+        if (c->used) return i;                    /* already bound this frame */
+        { static int nocache = -1;                /* TEX_NOCACHE=1: always re-upload */
+          if (nocache < 0) { const char* e = getenv("TEX_NOCACHE");
+                             nocache = e ? atoi(e) : 0; }
+          if (nocache) slot = i; }
+        if (slot < 0) {
             /* Held from an earlier frame: re-upload only if the guest bytes
              * changed. Most of this scene's textures are static, and converting
              * every one of them every frame was ~70% of the frame's CPU time. */
             u32 nb = (dxt ? (blkrow * blkrows) : (w * h * bpp)) * depth;
             u32 cs = TEX_CSUM(vm_base + c->off, nb);
             if (cs == c->csum) { c->used = 1; return i; }
-            slot = i; break;                      /* stale: fall through and redo */
+            slot = i;                             /* stale: fall through and redo */
         }
+      } }
+    if (slot < 0)
+    for (int i = 0; i < VP_TEX_SLOTS; i++) {
+        VPTexSlot* c = &s_d3d.vp_tex[i];
         /* A new texture takes an empty slot, else the one used least
          * recently. Taking the first slot not used this frame evicted
          * textures the next frame needed again. */
@@ -4186,8 +4245,10 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
         s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &b);
     }
 
+    tex_map_unlink(slot);   /* under its old key (the index's only key change) */
     t->off = off; t->key = key_off; t->w = w; t->h = h; t->fmt = fmt;
     t->cube = cube; t->depth = depth; t->used = 1;
+    tex_map_link(slot);
     { u32 nb = (dxt ? (blkrow * blkrows) : (w * h * bpp)) * depth;
       t->csum = TEX_CSUM(vm_base + off, nb); }
     #undef TEX_CSUM
@@ -4713,8 +4774,35 @@ static D3D12_CPU_DESCRIPTOR_HANDLE off_rt_rtv(int slot)
 
 /* Write a texture SRV (or a null SRV when res == NULL) at an absolute SRV
  * heap slot. Used to fill per-draw t0-t15 descriptor windows. */
+/* A draw's SRV window, collected rather than written (srv_defer_*): when every unit binds what
+ * the previous window written in this batch binds, the draw points its table at that window and
+ * creates nothing. CreateShaderResourceView for all 16 units of every draw was a fifth of
+ * render_frame. Resource pointers are a safe identity within a batch: a replaced resource is only
+ * released once its frames retire (d3d12_defer_release), so no new one can share its address. */
+typedef struct { ID3D12Resource* res; DXGI_FORMAT fmt; UINT map; int cube; int pad; } SrvDesc;
+static struct {
+    int on; u32 base; u32 have;           /* collecting slots [base, base+16); bit u = written */
+    SrvDesc d[RSX_TEX_UNITS];
+    int prev_ok; u32 prev_win;            /* the last window created this batch, and its views */
+    SrvDesc prev[RSX_TEX_UNITS];
+} s_srvd;
+
+static void srv_create(u32 heap_slot, ID3D12Resource* res, DXGI_FORMAT fmt, UINT mapping, int cube);
 static void srv_write_ex(u32 heap_slot, ID3D12Resource* res, DXGI_FORMAT fmt,
                          UINT mapping, int cube)
+{
+    const u32 u = heap_slot - s_srvd.base;
+    if (s_srvd.on && u < RSX_TEX_UNITS) {
+        SrvDesc* e = &s_srvd.d[u];
+        e->res = res; e->fmt = fmt; e->map = mapping; e->cube = cube;
+        s_srvd.have |= 1u << u;
+        return;
+    }
+    srv_create(heap_slot, res, fmt, mapping, cube);
+}
+
+static void srv_create(u32 heap_slot, ID3D12Resource* res, DXGI_FORMAT fmt,
+                       UINT mapping, int cube)
 {
     D3D12_SHADER_RESOURCE_VIEW_DESC sv = {0};
     sv.Format = fmt;
@@ -5268,7 +5356,24 @@ static void vp_bind_vertex_views(const D3D12DrawRecord* dr)
     s_d3d.cmd_list->lpVtbl->IASetVertexBuffers(s_d3d.cmd_list, 0, 16, v);
 }
 
+static void render_frame_body(void);
+
+/* Titlebar counters: backbuffer flips and draw calls (records minus clears)
+ * submitted since the title last refreshed. */
+static u64 s_title_flips, s_title_draws;
+
+/* PS3_FTRACE: one GPU_ENCODE span per submitted batch, a = 1 if it presented. */
 static void render_frame(void)
+{
+    const uint64_t ft0 = PS3_FT_ON() ? ps3_ft_now() : 0;
+    const u32 pres = (u32)s_present_this_frame, nd = s_d3d.draw_count;
+    for (u32 i = 0; i < nd && i < MAX_DRAWS; i++)
+        if (!s_d3d.draws[i].is_clear) s_title_draws++;
+    render_frame_body();
+    if (ft0) ps3_ft_span(PS3_FT_GPU_ENCODE, 0, pres, nd, ft0, ps3_ft_now());
+}
+
+static void render_frame_body(void)
 {
     wx_invalidate();
     double _rf0 = perf_on() ? perf_now() : 0.0;
@@ -5598,8 +5703,11 @@ static void render_frame(void)
      * (tex_slot 1000+idx) -- no guest-memory upload. */
     double _pre0 = perf_on() ? perf_now() : 0.0;
     for (int _i = 0; _i < VP_TEX_SLOTS; _i++) s_d3d.vp_tex[_i].used = 0;
+    s_srvd.prev_ok = 0;   /* windows are shared within one batch only */
     for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
         D3D12DrawRecord* dr = &s_d3d.draws[_d];
+        dr->pso_done = 0;   /* records are reused: only this batch's lookup counts */
+        dr->srv_win = _d;
         if (!dr->is_vp || dr->is_clear) continue;
         /* Debug: RTT_VIEWRT=<hex raw offset> makes display draws sample that
          * offscreen RT at t0 (the composite blit then shows it fullscreen). */
@@ -5682,6 +5790,10 @@ static void render_frame(void)
          * texture, or a null SRV. */
         double _sv0 = perf_on() ? perf_now() : 0.0;
         rsx_fp_shadow_desc _bsh[RSX_TEX_UNITS]; dr_shadow(dr, _bsh);
+        memset(s_srvd.d, 0, sizeof s_srvd.d);   /* padding included: compared with memcmp */
+        s_srvd.have = 0;
+        s_srvd.base = DRAW_SRV_BASE + _d * RSX_TEX_UNITS;
+        s_srvd.on = 1;
         for (int _u = 0; _u < RSX_TEX_UNITS; _u++) {
             u32 wslot = DRAW_SRV_BASE + _d * RSX_TEX_UNITS + (u32)_u;
             dr->tex_rt[_u] = -1;
@@ -5829,15 +5941,31 @@ static void render_frame(void)
                          D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
                          ((dr_vol_mask(dr) >> _u) & 1) ? 3 : 0);
         }
+        s_srvd.on = 0;
+        {   /* bind the previous window if it holds exactly these views, else create them */
+            const u32 all = (1u << RSX_TEX_UNITS) - 1u;
+            if (s_srvd.have == all && s_srvd.prev_ok && !memcmp(s_srvd.d, s_srvd.prev, sizeof s_srvd.d)) {
+                dr->srv_win = s_srvd.prev_win;
+            } else {
+                for (int _u = 0; _u < RSX_TEX_UNITS; _u++)
+                    if (s_srvd.have & (1u << _u)) {
+                        const SrvDesc* e = &s_srvd.d[_u];
+                        srv_create(s_srvd.base + (u32)_u, e->res, e->fmt, e->map, e->cube);
+                    }
+                s_srvd.prev_ok = (s_srvd.have == all);
+                if (s_srvd.prev_ok) { memcpy(s_srvd.prev, s_srvd.d, sizeof s_srvd.d); s_srvd.prev_win = _d; }
+            }
+        }
         if (perf_on()) s_perf_srv += perf_now() - _sv0;
         double _ps0 = perf_on() ? perf_now() : 0.0;
         rsx_fp_shadow_desc _sh[RSX_TEX_UNITS]; const int _has_sh = dr_shadow(dr, _sh);
-        if (dr->fp_addr) vp_get_fp_pso(dr->vs_idx, dr->fp_addr, dr->blend_key,
+        dr->pso = dr->fp_addr ? vp_get_fp_pso(dr->vs_idx, dr->fp_addr, dr->blend_key,
                                        dr_num_rts(dr),
                                        dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
                                                   : DXGI_FORMAT_R8G8B8A8_UNORM,
                                        dr->fp_ctrl, dr->cmask, dr->cull, dr_texkind_mask(dr),
-                                       dr->zs_key, _has_sh ? _sh : NULL);
+                                       dr->zs_key, _has_sh ? _sh : NULL) : NULL;
+        dr->pso_done = 1;
         if (perf_on()) s_perf_pso += perf_now() - _ps0;
     }
 
@@ -6241,7 +6369,7 @@ static void render_frame(void)
                  * back to the hardcoded atlas/colour PS pair. */
                 rsx_fp_shadow_desc _dsh[RSX_TEX_UNITS];
                 const int _dhas_sh = dr_shadow(dr, _dsh);
-                ID3D12PipelineState* dpso =
+                ID3D12PipelineState* dpso = dr->pso_done ? dr->pso :   /* the pre-pass's lookup */
                     dr->fp_addr ? vp_get_fp_pso(dr->vs_idx, dr->fp_addr, dr->blend_key,
                                                 dr_num_rts(dr),
                                                 dr->rt_off ? rsx_surface_dxgi(dr->rt_fmt)
@@ -6301,7 +6429,7 @@ static void render_frame(void)
                         off_rt_transition(rt, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
                 }
                 D3D12_GPU_DESCRIPTOR_HANDLE gh = gh_base;
-                gh.ptr += (u64)(DRAW_SRV_BASE + d * RSX_TEX_UNITS) * s_d3d.srv_inc;
+                gh.ptr += (u64)(DRAW_SRV_BASE + dr->srv_win * RSX_TEX_UNITS) * s_d3d.srv_inc;
                 s_d3d.cmd_list->lpVtbl->SetGraphicsRootDescriptorTable(s_d3d.cmd_list, 1, gh);
                 if (s_d3d.samp_heap) {
                     D3D12_GPU_DESCRIPTOR_HANDLE sb;
@@ -6839,6 +6967,7 @@ skip_dump_consider: ;
      * title past the display's rate. Skipped for an offscreen-only batch. */
     if (s_present_this_frame) {
         HRESULT phr;
+        s_title_flips++;
         if (!d3d12_vsync_off())
             phr = s_d3d.swap_chain->lpVtbl->Present(s_d3d.swap_chain, 1, 0);
         else
@@ -6854,23 +6983,29 @@ skip_dump_consider: ;
 
     s_d3d.frame_count++;
 
-    /* RPCS3-style titlebar stats, refreshed once a second: presented FPS,
-     * draw count of the last frame, and the backbuffer size. */
+    /* Titlebar stats, refreshed once a second: backbuffer flips (Presents)
+     * per second, the average time between them, and the draw calls per flip.
+     * A frame is submitted as several batches (mid-frame flushes, offscreen
+     * passes), so counting render_frame calls overstated the rate ~2.5x and
+     * the last batch's draw count said nothing about the frame. */
     {
         static ULONGLONG s_tt0 = 0;
-        static u64 s_tframes = 0;
-        s_tframes++;
         ULONGLONG tnow = GetTickCount64();
         if (s_tt0 == 0) s_tt0 = tnow;
         if (tnow - s_tt0 >= 1000 && s_d3d.hwnd) {
             extern char g_rsx_title_base[128];
             char tb[256];
-            snprintf(tb, sizeof(tb), "%s | FPS: %.2f | draws: %u | %ux%u",
+            const double dt = (double)(tnow - s_tt0);
+            const u64 f = s_title_flips;
+            snprintf(tb, sizeof(tb), "%s | FPS: %.2f | %.1f ms | draws: %llu | %ux%u",
                      g_rsx_title_base,
-                     s_tframes * 1000.0 / (double)(tnow - s_tt0),
-                     s_dbg_last_draws, s_d3d.width, s_d3d.height);
+                     f * 1000.0 / dt,
+                     f ? dt / (double)f : 0.0,
+                     (unsigned long long)(f ? s_title_draws / f : s_title_draws),
+                     s_d3d.width, s_d3d.height);
             SetWindowTextA(s_d3d.hwnd, tb);
-            s_tframes = 0;
+            s_title_flips = 0;
+            s_title_draws = 0;
             s_tt0 = tnow;
         }
     }
